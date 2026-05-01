@@ -1,0 +1,96 @@
+[project]
+name = "tyui"
+version = "0.1.0"
+description = "tyui — Terminal · Your · Universal · Intelligence. Norton Commander–style terminal file manager, editor, and LLM-agent CLI."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "tumikosha", email = "tumikosha@gmail.com" },
+]
+keywords = [
+    "tui",
+    "terminal",
+    "textual",
+    "editor",
+    "file-manager",
+    "norton-commander",
+    "mc",
+    "midnight-commander",
+    "folding",
+    "macros",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Editors",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "textual>=3.0.0",
+    "ptyprocess>=0.7.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+    "build>=1.2",
+    "twine>=5.0",
+]
+
+[project.urls]
+Homepage      = "https://github.com/tumikosha/qwe"
+Repository    = "https://github.com/tumikosha/qwe"
+Issues        = "https://github.com/tumikosha/qwe/issues"
+Documentation = "https://github.com/tumikosha/qwe#readme"
+
+[project.scripts]
+tyui = "tyui.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tyui"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"tyui/themes/dark.yaml"  = "tyui/themes/dark.yaml"
+"tyui/themes/light.yaml" = "tyui/themes/light.yaml"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "tyui/**",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "tests",
+    "docs",
+    "vibe",
+    ".omc",
+    ".idea",
+    ".venv",
+    "uv.lock",
+    "claude.sh",
+    "install_global.sh",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

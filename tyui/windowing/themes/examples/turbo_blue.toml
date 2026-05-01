@@ -1,0 +1,86 @@
+# Classic Turbo Vision-style theme. Shows how to author a user theme in TOML.
+
+[theme]
+name = "turbo_blue"
+[theme.borders]
+focused = "double"
+unfocused = "single"
+[theme.pattern]
+kind = "dots"
+char = "▒"
+
+[styles."desktop.background"]
+bg = "#0000aa"
+[styles."desktop.pattern"]
+fg = "#5555ff"
+bg = "#0000aa"
+
+[styles."window.border.focused"]
+fg = "#ffffff"
+bg = "#0000aa"
+bold = true
+[styles."window.border.unfocused"]
+fg = "#aaaaaa"
+bg = "#0000aa"
+
+[styles."window.title.focused"]
+fg = "#ffff55"
+bg = "#0000aa"
+bold = true
+[styles."window.title.unfocused"]
+fg = "#cccccc"
+bg = "#0000aa"
+
+[styles."window.subtitle"]
+fg = "#cccccc"
+bg = "#0000aa"
+
+[styles."window.content"]
+fg = "#000000"
+bg = "#aaaaaa"
+
+[styles."decoration.close_box"]
+fg = "#000000"
+bg = "#55ff55"
+bold = true
+[styles."decoration.zoom_box"]
+fg = "#000000"
+bg = "#55ff55"
+bold = true
+[styles."decoration.resize_grip"]
+fg = "#ffffff"
+bg = "#0000aa"
+
+[styles."icon_tray.background"]
+bg = "#000088"
+[styles."icon.normal"]
+fg = "#ffffff"
+bg = "#0000aa"
+[styles."icon.hover"]
+fg = "#000000"
+bg = "#55ffff"
+bold = true
+
+[styles."modal.overlay"]
+bg = "#000000"
+dim = true
+
+[styles."menu.bar"]
+fg = "#000000"
+bg = "#aaaaaa"
+[styles."menu.item"]
+fg = "#000000"
+bg = "#aaaaaa"
+[styles."menu.item.active"]
+fg = "#ffffff"
+bg = "#00aa00"
+bold = true
+[styles."menu.hotkey"]
+fg = "#aa0000"
+bg = "#aaaaaa"
+[styles."menu.dropdown.border"]
+fg = "#000000"
+bg = "#aaaaaa"
+[styles."menu.separator"]
+fg = "#555555"
+bg = "#aaaaaa"

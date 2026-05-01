@@ -1,0 +1,94 @@
+# Classic Midnight Commander color scheme: navy blue background,
+# cyan menu bar, yellow hotkeys. A nostalgic nod to Norton Commander
+# ancestry and the de-facto TUI color palette of the 90s.
+
+[theme]
+name = "midnight_commander"
+[theme.borders]
+focused = "double"
+unfocused = "single"
+[theme.pattern]
+kind = "solid"
+
+# --- Desktop -----------------------------------------------------------
+[styles."desktop.background"]
+bg = "#000080"
+[styles."desktop.pattern"]
+fg = "#0000aa"
+bg = "#000080"
+
+# --- Windows -----------------------------------------------------------
+[styles."window.border.focused"]
+fg = "#ffffff"
+bg = "#000080"
+bold = true
+[styles."window.border.unfocused"]
+fg = "#00aaaa"
+bg = "#000080"
+
+[styles."window.title.focused"]
+fg = "#ffff55"
+bg = "#000080"
+bold = true
+[styles."window.title.unfocused"]
+fg = "#aaaaaa"
+bg = "#000080"
+
+[styles."window.subtitle"]
+fg = "#aaaaaa"
+bg = "#000080"
+
+[styles."window.content"]
+fg = "#ffffff"
+bg = "#000080"
+
+# --- Decorations -------------------------------------------------------
+[styles."decoration.close_box"]
+fg = "#000000"
+bg = "#00aaaa"
+bold = true
+[styles."decoration.zoom_box"]
+fg = "#000000"
+bg = "#00aaaa"
+bold = true
+[styles."decoration.resize_grip"]
+fg = "#ffffff"
+bg = "#000080"
+
+# --- Icon tray ---------------------------------------------------------
+[styles."icon_tray.background"]
+bg = "#00aaaa"
+[styles."icon.normal"]
+fg = "#000000"
+bg = "#00aaaa"
+[styles."icon.hover"]
+fg = "#ffffff"
+bg = "#000080"
+bold = true
+
+# --- Modal overlay -----------------------------------------------------
+[styles."modal.overlay"]
+bg = "#000000"
+dim = true
+
+# --- Menu bar (MC signature: black on cyan, yellow hotkeys) ----------
+[styles."menu.bar"]
+fg = "#000000"
+bg = "#00aaaa"
+[styles."menu.item"]
+fg = "#000000"
+bg = "#00aaaa"
+[styles."menu.item.active"]
+fg = "#ffffff"
+bg = "#000080"
+bold = true
+[styles."menu.hotkey"]
+fg = "#ffff00"
+bg = "#00aaaa"
+bold = true
+[styles."menu.dropdown.border"]
+fg = "#000000"
+bg = "#00aaaa"
+[styles."menu.separator"]
+fg = "#555555"
+bg = "#00aaaa"

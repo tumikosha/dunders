@@ -1,0 +1,32 @@
+name: "Light"
+dark: false
+primary: "#5b6ea8"
+secondary: "#8899bb"
+accent: "#2563eb"
+background: "#ffffff"
+surface: "#f5f5f5"
+panel: "#e8e8e8"
+foreground: "#1e1e1e"
+
+variables:
+  input-bg: "#ffffff"
+  input-focus-bg: "#f0f4ff"
+  border-color: "#b0b8cc"
+  hover-bg: "#e0e4ee"
+  muted-text: "#666666"
+  dim-text: "#999999"
+  highlight-bg: "#ccd5ea"
+  dialog-bg: "#f5f5f5"
+  list-bg: "#ffffff"
+  button-bg: "#5b6ea8"
+  button-hover-bg: "#7888bb"
+  label-color: "#666666"
+
+editor:
+  cursor: "reverse"
+  selection: "on #add6ff"
+  selection_cursor: "reverse on #add6ff"
+  search_match: "on #ffff80"
+  search_current: "on #ffcc00"
+  fold_marker: "bold #b07800"
+  line_numbers: "#999999"

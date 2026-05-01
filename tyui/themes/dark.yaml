@@ -1,0 +1,32 @@
+name: "Dark"
+dark: true
+primary: "#4a4a8a"
+secondary: "#3a3a5a"
+accent: "#6a6aaa"
+background: "#1a1a2e"
+surface: "#1e1e2e"
+panel: "#2a2a4a"
+foreground: "#e0e0e0"
+
+variables:
+  input-bg: "#16213e"
+  input-focus-bg: "#1a2540"
+  border-color: "#4a4a8a"
+  hover-bg: "#3a3a5a"
+  muted-text: "#888888"
+  dim-text: "#666666"
+  highlight-bg: "#4a4a8a"
+  dialog-bg: "#1e1e2e"
+  list-bg: "#1a1a2e"
+  button-bg: "#4a4a8a"
+  button-hover-bg: "#6a6aaa"
+  label-color: "#aaaaaa"
+
+editor:
+  cursor: "reverse"
+  selection: "on #264f78"
+  selection_cursor: "reverse on #264f78"
+  search_match: "on yellow"
+  search_current: "on dark_orange"
+  fold_marker: "bold orange3"
+  line_numbers: "dim"
