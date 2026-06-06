@@ -20,6 +20,17 @@ modern_dark = Theme(
         "window.subtitle":             Style(fg="#a0a0a0", bg="#1c1c1c"),
         # Inner content default (only used when content sets no colour itself)
         "window.content":              Style(fg="#d0d0d0", bg="#262626"),
+        # File-panel per-type colours (foreground layered on the row base)
+        "panel.file.dir":              Style(fg="#5fafff", bold=True),
+        "panel.file.symlink":          Style(fg="#00d7d7"),
+        "panel.file.executable":       Style(fg="#5fd75f", bold=True),
+        "panel.file.archive":          Style(fg="#ff5f5f"),
+        "panel.file.image":            Style(fg="#d787ff"),
+        "panel.file.media":            Style(fg="#d75fd7"),
+        "panel.file.document":         Style(fg="#ffd787"),
+        "panel.file.source":           Style(fg="#dcdcaa"),
+        "panel.file.config":           Style(fg="#87afaf"),
+        "panel.file.hidden":           Style(fg="#8a8a8a"),
         # Decorations
         "decoration.close_box":        Style(fg="#ff5555", bg="#1c1c1c", bold=True),
         "decoration.zoom_box":         Style(fg="#50fa7b", bg="#1c1c1c", bold=True),

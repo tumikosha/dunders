@@ -505,6 +505,33 @@ class FilePanel(WindowContent):
             style = pal.get("window.content")
         return style.to_rich()
 
+    def _entry_base_style(self, entry) -> RichStyle:
+        """Themed base for one row, with the file-type colour layered in.
+
+        Resolves ``panel.file.<category>`` for the entry's type and overlays
+        its fg/bold/italic onto :meth:`_base_style`. Themes that don't define
+        the role resolve to an empty style, so the row falls back to the plain
+        base (no type colour) — older/partial themes keep working unchanged.
+        """
+        base = self._base_style()
+        from tyui.fm.file_colors import classify, role_for
+
+        category = classify(entry)
+        if category is None:
+            return base
+        pal = self._get_palette()
+        if pal is None:
+            return base
+        role = pal.get(role_for(category))
+        if role.fg is None and not role.bold and not role.italic:
+            return base
+        overlay = RichStyle(
+            color=role.fg,
+            bold=True if role.bold else None,
+            italic=True if role.italic else None,
+        )
+        return base + overlay
+
     def apply_theme(self) -> None:
         """Re-apply the themed background and repaint (called on theme switch)."""
         base = self._base_style()
@@ -745,6 +772,7 @@ class FilePanel(WindowContent):
             is_cursor=is_cursor,
             is_selected=is_selected,
             focused=self._is_active_panel,
+            entry=entry,
         )
         if self._qs_active and self._qs_query and not entry.is_parent:
             hi = self._qs_highlight_segments(
@@ -807,6 +835,7 @@ class FilePanel(WindowContent):
                 is_cursor=(idx == self.cursor),
                 is_selected=(entry.path in self.selection),
                 focused=self._is_active_panel,
+                entry=entry,
             )
             segs.append(Segment(cell, style))
         used = k * col_w + (k - 1)
@@ -849,12 +878,14 @@ class FilePanel(WindowContent):
         is_cursor: bool,
         is_selected: bool,
         focused: bool,
+        entry=None,
     ) -> RichStyle:
         # Active panel: cursor row inverts (reverse=True). Selected entries
         # are yellow-bold. Inactive panel: cursor row is just bold so the
         # user can see at a glance which panel is "live". All layered on the
-        # themed base so colours/background follow the active theme.
-        base = self._base_style()
+        # type-coloured themed base so the file-type fg shows on normal rows,
+        # the cursor reverses it, and selection's yellow overrides it.
+        base = self._entry_base_style(entry) if entry is not None else self._base_style()
         if is_cursor and is_selected:
             return base + RichStyle(
                 color="yellow",

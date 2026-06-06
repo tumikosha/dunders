@@ -135,3 +135,27 @@ fg = "#404040"
 fg = "#008060"
 [styles."editor.syntax.error"]
 fg = "#c00000"
+
+# File-panel per-type colours
+[styles."panel.file.dir"]
+fg = "#008060"
+bold = true
+[styles."panel.file.symlink"]
+fg = "#008060"
+[styles."panel.file.executable"]
+fg = "#7a5c00"
+bold = true
+[styles."panel.file.archive"]
+fg = "#9c00b0"
+[styles."panel.file.image"]
+fg = "#005000"
+[styles."panel.file.media"]
+fg = "#005000"
+[styles."panel.file.document"]
+fg = "#a03000"
+[styles."panel.file.source"]
+fg = "#7a5c00"
+[styles."panel.file.config"]
+fg = "#608060"
+[styles."panel.file.hidden"]
+fg = "#608060"
