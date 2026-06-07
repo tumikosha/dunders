@@ -34,6 +34,9 @@ from tyui.windowing.content import WindowCommand, WindowContent
 
 __all__ = ["FilePanel"]
 
+# Entries the cursor moves per mouse-wheel notch (matches typical 3-line scroll).
+_WHEEL_STEP = 3
+
 
 class FilePanel(WindowContent):
     """Norton-Commander-style file-listing panel.
@@ -911,6 +914,44 @@ class FilePanel(WindowContent):
     # follows whether this panel is the active one.
     # ------------------------------------------------------------------
 
+    def _enclosing_window(self):
+        """Walk up to the enclosing windowing ``Window``, or ``None`` when the
+        panel is not mounted under one (e.g. standalone in unit tests)."""
+        from tyui.windowing.window import Window
+
+        node = self.parent
+        while node is not None and not isinstance(node, Window):
+            node = getattr(node, "parent", None)
+        return node  # a Window or None
+
+    def _wheel(self, delta: int) -> None:
+        """Move the cursor by ``delta`` entries in response to a wheel notch.
+
+        If the panel is not the active one, request focus on its window first
+        (the same path a click takes) so the wheel both activates and scrolls,
+        matching Midnight Commander. Clamping and viewport follow are handled by
+        ``move_cursor`` / ``_ensure_cursor_visible``.
+        """
+        if not self._is_active_panel:
+            win = self._enclosing_window()
+            if win is not None:
+                from tyui.windowing.window import Window
+
+                self.post_message(Window.FocusRequested(win))
+        self._qs_reset()
+        self.move_cursor(delta)
+        self.refresh()
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._wheel(_WHEEL_STEP)
+        event.stop()
+        event.prevent_default()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._wheel(-_WHEEL_STEP)
+        event.stop()
+        event.prevent_default()
+
     @property
     def _is_active_panel(self) -> bool:
         """True when this panel is the "active" one for rendering purposes.
@@ -922,24 +963,18 @@ class FilePanel(WindowContent):
         """
         if self.has_focus:
             return True
-        # Walk up to the enclosing Window, then to the Desktop.
         try:
             from tyui.windowing.desktop import Desktop
-            from tyui.windowing.window import Window
-            node = self.parent
-            while node is not None and not isinstance(node, Window):
-                node = getattr(node, "parent", None)
-            if node is None:
+
+            win = self._enclosing_window()
+            if win is None:
                 return False
-            win = node
-            # Find the desktop.
             node = win.parent
             while node is not None and not isinstance(node, Desktop):
                 node = getattr(node, "parent", None)
             if node is None:
                 return False
-            desktop = node
-            return desktop.focused_window is win
+            return node.focused_window is win
         except Exception:
             return False
 

@@ -112,3 +112,25 @@ async def test_we_mc_shutdown_called_on_unmount(tmp_path):
         app._handover = spy
         app.on_unmount()
         assert spy.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_wheel_over_inactive_panel_activates_and_scrolls(tmp_path):
+    from tyui.fm.file_panel import FilePanel
+
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x")
+    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panels = list(app.query(FilePanel))
+        inactive = next(p for p in panels if not p._is_active_panel)
+        # Point the inactive panel at the populated dir so the move is
+        # deterministic regardless of where it seeded.
+        inactive.cwd = tmp_path
+        inactive.refresh_listing()
+        before = inactive.cursor
+        inactive._wheel(3)
+        await pilot.pause()
+        assert inactive._is_active_panel  # wheel activated it
+        assert inactive.cursor == min(before + 3, len(inactive.entries) - 1)

@@ -838,3 +838,85 @@ def test_footer_background_is_dimmed(tmp_path):
     assert seg.style is not None
     assert seg.style.reverse is True
     assert seg.style.dim is True
+
+
+def test_enclosing_window_is_none_when_unparented(tmp_path: Path):
+    # A standalone (unmounted) panel has no enclosing windowing Window.
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    assert p._enclosing_window() is None
+    # And it is therefore not the active panel.
+    assert p._is_active_panel is False
+
+
+class _FakeScroll:
+    """Duck-typed stand-in for a Textual MouseScroll event."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+        self.prevented = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def prevent_default(self) -> None:
+        self.prevented = True
+
+
+def test_wheel_moves_cursor_by_step(tmp_path: Path):
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x")
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    assert p.cursor == 0
+    p._wheel(3)
+    assert p.cursor == 3
+    p._wheel(-3)
+    assert p.cursor == 0
+
+
+def test_wheel_clamps_at_bounds(tmp_path: Path):
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x")
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    last = len(p.entries) - 1
+    p._wheel(-3)               # already at top
+    assert p.cursor == 0
+    p.end()                    # jump to bottom
+    p._wheel(3)                # past the end
+    assert p.cursor == last
+
+
+def test_wheel_on_minimal_listing_does_not_crash(tmp_path: Path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    p = FilePanel(cwd=sub)     # only the synthetic ".." row
+    p.refresh_listing()
+    p._wheel(3)
+    p._wheel(-3)
+    assert p.cursor == 0
+
+
+def test_scroll_down_handler_moves_cursor_and_stops_event(tmp_path: Path):
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x")
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    ev = _FakeScroll()
+    p._on_mouse_scroll_down(ev)
+    assert p.cursor == 3
+    assert ev.stopped and ev.prevented
+
+
+def test_scroll_up_handler_moves_cursor_and_stops_event(tmp_path: Path):
+    for i in range(10):
+        (tmp_path / f"f{i:02d}.txt").write_text("x")
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    p.end()
+    last = p.cursor
+    ev = _FakeScroll()
+    p._on_mouse_scroll_up(ev)
+    assert p.cursor == last - 3
+    assert ev.stopped and ev.prevented
