@@ -16,6 +16,26 @@ macros, a command palette, and an embedded LLM/agent CLI mode.
 > Status: **alpha**. Core file-manager and editor are usable; agent/CLI
 > mode is a stub.
 
+## Quick install (any OS — one line)
+
+Installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, then installs
+`tyui` (plus the `we` / `wew` launchers) into an isolated environment — no
+system Python needed.
+
+**Linux / macOS / WSL** (bash/zsh):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force git+https://github.com/tumikosha/tyui.git
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force git+https://github.com/tumikosha/tyui.git
+```
+
+Then run `tyui`. (Already have `uv`? Just `uv tool install git+https://github.com/tumikosha/tyui.git`.)
+
 ## Features
 
 - **Dual-pane file manager** with sort, multi-select, quick-search, and
