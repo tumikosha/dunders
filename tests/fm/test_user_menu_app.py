@@ -35,11 +35,14 @@ async def test_f2_opens_dialog_when_menu_exists(tmp_path):
 
 
 class _FakeHandover:
-    def __init__(self):
+    def __init__(self, *, ends_at=None):
         self.calls = []
+        self.last_cwd = None
+        self._ends_at = ends_at  # simulate a `cd` leaving the shell here
 
     def run_foreground(self, cmd, cwd):
         self.calls.append((cmd, str(cwd)))
+        self.last_cwd = self._ends_at
         return 0
 
     def command_screen(self, cwd):
@@ -68,6 +71,41 @@ async def test_selecting_entry_runs_expanded_body_with_panel_cwd(tmp_path):
         "echo %d", MacroContext(None, (), str(tmp_path), None, None), {}
     )
     assert fake.calls == [(expected, str(tmp_path))]
+
+
+async def test_entry_that_cds_moves_active_panel(tmp_path):
+    # A User Menu entry whose command `cd`s elsewhere should move the active
+    # panel there (the handover reports the resulting cwd via last_cwd).
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / ".tyui.menu.md").write_text(
+        "## X\n\n### (a) Go\n```\ncd sub\n```\n", encoding="utf-8"
+    )
+    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        app._handover = _FakeHandover(ends_at=sub)
+        app.action_user_menu()
+        await _settle(pilot)
+        await pilot.press("a")
+        await _settle(pilot)
+        assert app._panel_cwd_for_test().resolve() == sub.resolve()
+
+
+async def test_entry_without_cd_keeps_panel(tmp_path):
+    (tmp_path / ".tyui.menu.md").write_text(
+        "## X\n\n### (a) Echo\n```\necho hi\n```\n", encoding="utf-8"
+    )
+    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        # last_cwd reports the same dir -> panel must not move.
+        app._handover = _FakeHandover(ends_at=tmp_path)
+        app.action_user_menu()
+        await _settle(pilot)
+        await pilot.press("a")
+        await _settle(pilot)
+        assert app._panel_cwd_for_test().resolve() == tmp_path.resolve()
 
 
 async def test_prompt_macro_asks_then_runs(tmp_path):

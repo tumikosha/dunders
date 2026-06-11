@@ -60,8 +60,35 @@ def _prompt_hook_setup(shell_name: str, fifo_path: str) -> str:
     return f"PS1='$(printf \"%d\\n\" \"$?\" >> {q})'\n"
 
 
+def _cwd_capture_wrap(cmd: str, pwd_file: str) -> str:
+    """Wrap a one-shot shell command so the shell's final ``$PWD`` is written to
+    ``pwd_file`` after it runs, letting the caller learn where a ``cd`` inside
+    the command left the (ephemeral) shell. The command's own exit status is
+    preserved as the wrapper's status."""
+    q = shlex.quote(pwd_file)
+    return f"{cmd}\n__tyui_rc=$?\npwd > {q} 2>/dev/null\nexit $__tyui_rc"
+
+
+def _read_pwd_file(path: Path) -> Path | None:
+    """Read a captured ``$PWD`` back into a Path, or None if absent/empty."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return Path(text) if text else None
+
+
 @runtime_checkable
 class TerminalHandover(Protocol):
+    # Set after run_foreground to the shell's resulting cwd (so a `cd` inside a
+    # foreground command can move the active panel), or None if unknown.
+    last_cwd: Path | None
+
     def run_foreground(self, cmd: str, cwd: Path) -> int: ...
     def command_screen(self, cwd: Path) -> None: ...
     def shutdown(self) -> None: ...
@@ -79,15 +106,23 @@ class SubprocessHandover:
     def __init__(self, app, *, runner: Callable = subprocess.run) -> None:
         self._app = app
         self._runner = runner
+        self.last_cwd: Path | None = None
         # Lazily-built relay used ONLY for the command screen, so Ctrl+O toggles
         # in/out exactly like in `we` (relay) mode. Commands still run via
         # subprocess; this relay's shell only backs the interactive screen.
         self._relay: "RelayHandover | None" = None
 
     def run_foreground(self, cmd: str, cwd: Path) -> int:
+        self.last_cwd = None
+        # The shell is ephemeral, so a `cd` inside it can't propagate back on its
+        # own — capture the resulting $PWD inline before the shell exits.
+        pwd_file = Path(tempfile.gettempdir()) / f"tyui-pwd-{uuid.uuid4().hex}"
         with self._app.suspend():
-            result = self._runner(cmd, shell=True, cwd=str(cwd))
-            return getattr(result, "returncode", 0) or 0
+            result = self._runner(
+                _cwd_capture_wrap(cmd, str(pwd_file)), shell=True, cwd=str(cwd)
+            )
+        self.last_cwd = _read_pwd_file(pwd_file)
+        return getattr(result, "returncode", 0) or 0
 
     def command_screen(self, cwd: Path) -> None:
         # On POSIX with a real tty, reuse the relay's interactive screen so the
@@ -127,6 +162,7 @@ class RelayHandover:
         self._fifo_path: Path | None = None
         self._fifo_fd: int = -1
         self._fifo_buf: bytes = b""
+        self.last_cwd: Path | None = None
 
     def _open_fifo(self) -> None:
         """Create the completion FIFO and open it O_RDWR|O_NONBLOCK.
@@ -304,6 +340,7 @@ class RelayHandover:
 
     def run_foreground(self, cmd: str, cwd: Path) -> int:
         self._ensure_shell(cwd)
+        self.last_cwd = None
         import termios
         import tty
 
@@ -315,9 +352,52 @@ class RelayHandover:
                 assert self._proc is not None
                 self._propagate_winsize()
                 self._send_command(cmd, cwd)
-                return self._pump([stdin_fd], self._proc.fd, sys.stdout.buffer)
+                rc = self._pump([stdin_fd], self._proc.fd, sys.stdout.buffer)
             finally:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
+        # The persistent subshell now sits at whatever directory the command
+        # left it in (a `cd` inside cmd persists). Read it back so the caller
+        # can follow it with the panel (mc parity).
+        self.last_cwd = self._capture_cwd()
+        return rc
+
+    def _capture_cwd(self, timeout: float = 2.0) -> Path | None:
+        """Ask the live subshell for its current directory by writing ``pwd`` to
+        a temp file and waiting for the next prompt marker on the FIFO. Returns
+        the parsed directory, or None if the shell is gone / it times out.
+
+        Runs after the terminal is restored: it only touches our private PTY and
+        FIFO fds (never the real stdin/stdout), so nothing leaks to the screen.
+        """
+        if self._proc is None or not self._proc.isalive():
+            return None
+        pwd_file = Path(tempfile.gettempdir()) / f"tyui-pwd-{uuid.uuid4().hex}"
+        try:
+            self._proc.write(
+                f"pwd > {shlex.quote(str(pwd_file))} 2>/dev/null\n".encode()
+            )
+        except OSError:
+            return None
+        # Drain the command echo on master and wait for the prompt marker that
+        # fires once `pwd` has finished writing the file.
+        while True:
+            try:
+                r, _, _ = select.select(
+                    [self._proc.fd, *self._watch_fifo()], [], [], timeout
+                )
+            except InterruptedError:
+                continue
+            if not r:
+                break  # timed out — give up best-effort
+            if self._proc.fd in r:
+                try:
+                    os.read(self._proc.fd, 65536)  # discard echo
+                except OSError:
+                    break
+            if self._fifo_fd >= 0 and self._fifo_fd in r:
+                if self._read_rc_from_fifo() is not None:
+                    break
+        return _read_pwd_file(pwd_file)
 
     def _propagate_winsize(self) -> None:
         if self._proc is None:

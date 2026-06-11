@@ -40,7 +40,33 @@ def test_subprocess_handover_runs_in_suspend_and_returns_rc(tmp_path):
     rc = h.run_foreground("htop", tmp_path)
 
     assert rc == 7
-    assert calls == {"cmd": "htop", "shell": True, "cwd": str(tmp_path)}
+    assert calls["shell"] is True
+    assert calls["cwd"] == str(tmp_path)
+    # The command is wrapped to capture the shell's final $PWD, but the user's
+    # command still leads and its exit status is preserved.
+    assert calls["cmd"].startswith("htop\n")
+    assert "pwd >" in calls["cmd"]
+    assert "exit $__tyui_rc" in calls["cmd"]
+
+
+def test_subprocess_handover_captures_cwd_after_cd(tmp_path):
+    # A real shell: a `cd` inside the foreground command is reported via last_cwd
+    # so the caller can follow it with the panel.
+    import shlex as _shlex
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    h = SubprocessHandover(_FakeApp())  # real subprocess.run
+    h.run_foreground(f"cd {_shlex.quote(str(sub))}", tmp_path)
+    assert h.last_cwd is not None
+    assert h.last_cwd.resolve() == sub.resolve()
+
+
+def test_subprocess_handover_cwd_unchanged_without_cd(tmp_path):
+    h = SubprocessHandover(_FakeApp())
+    h.run_foreground("true", tmp_path)
+    assert h.last_cwd is not None
+    assert h.last_cwd.resolve() == tmp_path.resolve()
 
 
 from tyui.fm.console.handover import RelayHandover, make_handover
@@ -273,6 +299,57 @@ def test_relay_runs_real_command(tmp_path):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
         h.shutdown()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pty only")
+def test_relay_capture_cwd_follows_cd(tmp_path):
+    import signal
+
+    def _alarm(_signum, _frame):
+        raise TimeoutError("relay capture hung")
+
+    import shlex as _shlex
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    h = RelayHandover(_FakeApp())
+    h._ensure_shell(tmp_path)
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(10)
+    try:
+        # Run a `cd` into the subdir, then read the subshell's resulting cwd.
+        h._send_command(f"cd {_shlex.quote(str(sub))}", tmp_path)
+        h._pump([], h._proc.fd, io.BytesIO())
+        captured = h._capture_cwd()
+        assert captured is not None
+        assert captured.resolve() == sub.resolve()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+        h.shutdown()
+
+
+def test_cwd_capture_wrap_preserves_command_and_exit_status():
+    from tyui.fm.console.handover import _cwd_capture_wrap
+
+    wrapped = _cwd_capture_wrap("make all", "/tmp/x")
+    assert wrapped.startswith("make all\n")
+    assert "pwd > /tmp/x" in wrapped
+    assert wrapped.strip().endswith("exit $__tyui_rc")
+
+
+def test_read_pwd_file_reads_and_unlinks(tmp_path):
+    from tyui.fm.console.handover import _read_pwd_file
+
+    f = tmp_path / "pwd"
+    f.write_text("/some/dir\n", encoding="utf-8")
+    got = _read_pwd_file(f)
+    assert got == __import__("pathlib").Path("/some/dir")
+    assert not f.exists()  # consumed
+    # Missing / empty -> None
+    assert _read_pwd_file(tmp_path / "nope") is None
+    (tmp_path / "empty").write_text("", encoding="utf-8")
+    assert _read_pwd_file(tmp_path / "empty") is None
 
 
 def test_interactive_relay_exits_on_toggle_and_forwards_prefix():

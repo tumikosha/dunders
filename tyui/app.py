@@ -3184,7 +3184,24 @@ class TyuiApp(App):
         self._handover.run_foreground(body, cwd)
         if self.command_history is not None:
             self.command_history.append(body)
+        # A `cd` inside the menu entry runs in the foreground shell; follow it
+        # with the active panel (mc User-Menu parity), then refresh listings.
+        self._follow_handover_cwd(cwd)
         self._refresh_panels()
+
+    def _follow_handover_cwd(self, prev: Path) -> None:
+        """If the last foreground command left its shell in a different
+        directory than ``prev``, move the active panel there."""
+        new_cwd = getattr(self._handover, "last_cwd", None)
+        if new_cwd is None:
+            return
+        try:
+            unchanged = new_cwd.resolve() == prev.resolve()
+        except OSError:
+            unchanged = str(new_cwd) == str(prev)
+        if unchanged or not new_cwd.is_dir():
+            return
+        self._panel_cd(new_cwd)
 
     def _restore_tray_at(self, index: int) -> None:
         if self._has_active_modal() or self.desktop is None:
