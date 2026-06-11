@@ -1,6 +1,7 @@
 """Tests for EditorContent."""
 
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
 
 from tyui.windowing.editor.content import EditorContent
@@ -228,3 +229,19 @@ async def test_save_as_shows_saved_as_toast(tmp_path, monkeypatch):
         await pilot.pause()
     assert notes == [f"Saved as {dest}"]
     assert dest.read_text() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_bracketed_paste_inserts_text():
+    """Cmd+V arrives as a terminal Paste event; the editor must insert it."""
+    content = EditorContent(initial_text="ab")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_col = 1  # between "a" and "b"
+        editor.on_paste(events.Paste("XY"))
+        await pilot.pause()
+        assert editor.buffer.lines == ["aXYb"]

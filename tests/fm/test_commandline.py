@@ -3,8 +3,11 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 
+from textual.widgets.text_area import Selection
+
 from tyui.fm.commandline import CommandLine
 from tyui.fm.console.history import History
+from tyui.windowing.core import clipboard
 
 
 class _Probe(App):
@@ -106,6 +109,39 @@ async def test_history_up_down(tmp_path):
         assert app.cl.text == "ls"
         app.cl.history_next()
         assert app.cl.text == "pwd"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_with_selection_copies_and_keeps_text(tmp_path, monkeypatch):
+    h = History(tmp_path / "h", cap=10)
+    app = _Probe(h)
+    async with app.run_test() as pilot:
+        copied: list[str] = []
+        monkeypatch.setattr(clipboard, "copy", lambda text, app=None: copied.append(text))
+        app.cl.set_text("hello world")
+        app.cl._input.selection = Selection((0, 0), (0, 5))  # "hello"
+        await pilot.pause()
+        app.cl.action_ctrl_c()
+        await pilot.pause()
+        assert copied == ["hello"]
+        # Selection-copy must NOT clear the command buffer.
+        assert app.cl.text == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_without_selection_clears_buffer(tmp_path, monkeypatch):
+    h = History(tmp_path / "h", cap=10)
+    app = _Probe(h)
+    async with app.run_test() as pilot:
+        copied: list[str] = []
+        monkeypatch.setattr(clipboard, "copy", lambda text, app=None: copied.append(text))
+        app.cl.set_text("some command")
+        app.cl._input.selection = Selection((0, 0), (0, 0))  # no selection
+        await pilot.pause()
+        app.cl.action_ctrl_c()
+        await pilot.pause()
+        assert copied == []
+        assert app.cl.text == ""
 
 
 @pytest.mark.asyncio

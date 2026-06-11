@@ -1,29 +1,12 @@
 from __future__ import annotations
 
-import platform
-import subprocess
 from dataclasses import dataclass, field
 
-
-def _copy_to_system(text: str) -> None:
-    try:
-        if platform.system() == "Darwin":
-            subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        else:
-            subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
-
-
-def _paste_from_system() -> str:
-    try:
-        if platform.system() == "Darwin":
-            result = subprocess.run(["pbpaste"], capture_output=True, check=True)
-        else:
-            result = subprocess.run(["xclip", "-selection", "clipboard", "-o"], capture_output=True, check=True)
-        return result.stdout.decode()
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return ""
+# Clipboard access lives in one place (clipboard.py) so the editor, command
+# line and panel header all share the same system clipboard. These aliases
+# preserve the historical names imported elsewhere (e.g. app.py).
+from tyui.windowing.core.clipboard import system_copy as _copy_to_system
+from tyui.windowing.core.clipboard import system_paste as _paste_from_system
 
 
 @dataclass
@@ -277,18 +260,37 @@ class TextBuffer:
         _copy_to_system(self._clipboard)
         return self._clipboard
 
+    def cut_selection(self) -> str:
+        """Copy the selection (or current line) to the clipboard, then delete it."""
+        text = self.copy_selection()
+        if self.has_selection:
+            self.delete_selection()
+        else:
+            self.delete_line()
+        return text
+
     def copy_line(self) -> str:
         self._clipboard = self.current_line
         return self._clipboard
 
-    def paste(self) -> None:
+    def paste(self, fallback: str = "") -> None:
         system_text = _paste_from_system()
         if system_text:
             self._clipboard = system_text
-        if not self._clipboard:
+        elif fallback:
+            # OSC 52 / Textual clipboard fallback (SSH where pbpaste is empty).
+            self._clipboard = fallback
+        self.insert_text(self._clipboard)
+
+    def insert_text(self, text: str) -> None:
+        """Insert arbitrary (possibly multi-line) text at the cursor.
+
+        Shared by clipboard paste and terminal bracketed-paste (Cmd+V).
+        """
+        if not text:
             return
         self._save_undo()
-        paste_lines = self._clipboard.split("\n")
+        paste_lines = text.split("\n")
         if len(paste_lines) == 1:
             self.insert_char(paste_lines[0])
         else:
@@ -341,6 +343,14 @@ class TextBuffer:
         if self.cursor_row < self.line_count - 1:
             self.cursor_row += 1
             self._clamp_cursor()
+
+    def move_cursor_document_start(self) -> None:
+        self.cursor_row = 0
+        self.cursor_col = 0
+
+    def move_cursor_document_end(self) -> None:
+        self.cursor_row = self.line_count - 1
+        self.cursor_col = len(self.lines[self.cursor_row])
 
     def find_all(self, query: str, case_sensitive: bool = True) -> list[tuple[int, int, int]]:
         """Return list of (row, col, length) for all matches."""

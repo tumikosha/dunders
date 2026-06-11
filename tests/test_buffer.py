@@ -1,4 +1,52 @@
+import tyui.windowing.core.buffer as buffer_mod
 from tyui.windowing.core.buffer import TextBuffer
+
+
+class TestTextBufferCut:
+    def test_cut_selection(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(buffer_mod, "_copy_to_system", lambda s: copied.append(s))
+        buf = TextBuffer.from_string("hello world")
+        buf.start_selection(0, 0)
+        buf.update_selection(0, 5)  # "hello"
+        text = buf.cut_selection()
+        assert text == "hello"
+        assert copied == ["hello"]
+        assert buf.lines == [" world"]
+        assert buf.has_selection is False
+
+    def test_cut_no_selection_cuts_line(self, monkeypatch):
+        copied = []
+        monkeypatch.setattr(buffer_mod, "_copy_to_system", lambda s: copied.append(s))
+        buf = TextBuffer.from_string("line1\nline2")
+        buf.cursor_row = 0
+        text = buf.cut_selection()
+        assert text == "line1"
+        assert copied == ["line1"]
+        assert buf.lines == ["line2"]
+
+
+class TestTextBufferInsertText:
+    def test_insert_text_single_line(self):
+        buf = TextBuffer.from_string("ad")
+        buf.cursor_col = 1
+        buf.insert_text("bc")
+        assert buf.lines == ["abcd"]
+        assert buf.cursor_col == 3
+
+    def test_insert_text_multiline(self):
+        buf = TextBuffer.from_string("ae")
+        buf.cursor_col = 1
+        buf.insert_text("b\nc\nd")
+        assert buf.lines == ["ab", "c", "de"]
+        assert buf.cursor_row == 2
+        assert buf.cursor_col == 1
+
+    def test_insert_text_empty_is_noop(self):
+        buf = TextBuffer.from_string("hello")
+        buf.insert_text("")
+        assert buf.lines == ["hello"]
+        assert buf.modified is False
 
 
 class TestTextBufferInit:

@@ -47,6 +47,12 @@ class EditorWidget(ScrollView):
         Binding("right", "cursor_right", "Right", show=False),
         Binding("home", "line_start", "Home", show=False),
         Binding("end", "line_end", "End", show=False),
+        Binding("ctrl+home", "document_start", "Document Start", show=False),
+        Binding("ctrl+end", "document_end", "Document End", show=False),
+        # macOS classic: Cmd+Up/Down jump to start/end of the document.
+        # "super" is how the kitty keyboard protocol reports the Cmd key.
+        Binding("super+up", "document_start", "Document Start", show=False),
+        Binding("super+down", "document_end", "Document End", show=False),
         Binding("enter", "newline", "Enter", show=False),
         Binding("backspace", "backspace", "Backspace", show=False),
         Binding("delete", "delete_forward", "Delete", show=False),
@@ -61,6 +67,13 @@ class EditorWidget(ScrollView):
         Binding("shift+right", "select_right", "Select Right", show=False),
         Binding("shift+home", "select_line_start", "Select to Start", show=False),
         Binding("shift+end", "select_line_end", "Select to End", show=False),
+        Binding("ctrl+shift+home", "select_document_start", "Select to Document Start", show=False),
+        Binding("ctrl+shift+end", "select_document_end", "Select to Document End", show=False),
+        Binding("shift+ctrl+home", "select_document_start", "Select to Document Start", show=False),
+        Binding("shift+ctrl+end", "select_document_end", "Select to Document End", show=False),
+        # macOS classic: Cmd+Shift+Up/Down select to start/end of the document.
+        Binding("shift+super+up", "select_document_start", "Select to Document Start", show=False),
+        Binding("shift+super+down", "select_document_end", "Select to Document End", show=False),
         Binding("ctrl+shift+right", "select_word_right", "Select Word Right", show=False),
         Binding("ctrl+shift+left", "select_word_left", "Select Word Left", show=False),
         Binding("shift+ctrl+right", "select_word_right", "Select Word Right", show=False),
@@ -73,6 +86,7 @@ class EditorWidget(ScrollView):
         Binding("ctrl+right_square_bracket", "smart_fold", "Smart Fold", show=False),
         # Copy/Paste shortcuts
         Binding("ctrl+c", "copy", "Copy", show=False),
+        Binding("ctrl+x", "cut", "Cut", show=False),
         Binding("ctrl+v", "paste", "Paste", show=False),
     ]
 
@@ -637,6 +651,18 @@ class EditorWidget(ScrollView):
         self.buffer.cursor_col = len(self.buffer.current_line)
         self._update_selection_to_cursor()
 
+    def action_select_document_start(self) -> None:
+        self._start_or_extend_selection()
+        self.buffer.move_cursor_document_start()
+        self._snap_cursor_to_visible_row(direction=1)
+        self._update_selection_to_cursor()
+
+    def action_select_document_end(self) -> None:
+        self._start_or_extend_selection()
+        self.buffer.move_cursor_document_end()
+        self._snap_cursor_to_visible_row(direction=-1)
+        self._update_selection_to_cursor()
+
     def action_select_word_right(self) -> None:
         self._start_or_extend_selection()
         self.buffer.move_cursor_word_right()
@@ -756,6 +782,16 @@ class EditorWidget(ScrollView):
                 vis_col += 1
         return buf_col
 
+    def action_document_start(self) -> None:
+        self.buffer.move_cursor_document_start()
+        self._snap_cursor_to_visible_row(direction=1)
+        self._post_cursor_update()
+
+    def action_document_end(self) -> None:
+        self.buffer.move_cursor_document_end()
+        self._snap_cursor_to_visible_row(direction=-1)
+        self._post_cursor_update()
+
     def action_line_start(self) -> None:
         self.buffer.cursor_col = 0
         self._post_cursor_update()
@@ -838,6 +874,27 @@ class EditorWidget(ScrollView):
             self._unfold_at_cursor()
             self.buffer.insert_char(character)
             self._post_buffer_update()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle terminal bracketed paste (Cmd+V / right-click paste).
+
+        Cmd+V is intercepted by the terminal, which injects the clipboard as a
+        Paste event rather than a key — so it never reaches the ctrl+v binding.
+        Insert the pasted text directly at the cursor.
+        """
+        if not self.has_focus:
+            return
+        text = event.text
+        if not text:
+            return
+        if self.buffer.has_selection:
+            self._delete_collapsed_in_selection()
+            self.buffer.delete_selection()
+        self._unfold_at_cursor()
+        self.buffer.insert_text(text)
+        self._post_buffer_update()
+        event.prevent_default()
+        event.stop()
 
     def on_key(self, event: events.Key) -> None:
         if not self.has_focus:
@@ -981,14 +1038,40 @@ class EditorWidget(ScrollView):
 
     def action_copy(self) -> None:
         """Copy the current selection or line to the OS clipboard."""
-        # The TextBuffer handles copying to the system clipboard.
-        self.buffer.copy_selection()
+        # The TextBuffer writes to the system clipboard (pbcopy/xclip).
+        text = self.buffer.copy_selection()
+        # OSC 52 fallback so copy also works over SSH/remote sessions.
+        if text:
+            try:
+                self.app.copy_to_clipboard(text)
+            except Exception:
+                pass
         # Refresh cursor to reflect any visual changes (e.g., selection cleared).
         self._post_cursor_update()
 
+    def action_cut(self) -> None:
+        """Cut the current selection (or line) to the OS clipboard."""
+        # The TextBuffer writes to the system clipboard (pbcopy/xclip).
+        text = self.buffer.cut_selection()
+        # OSC 52 fallback so cut also works over SSH/remote sessions.
+        if text:
+            try:
+                self.app.copy_to_clipboard(text)
+            except Exception:
+                pass
+        # Cut changes buffer contents, so do a full buffer refresh.
+        self._post_buffer_update()
+
     def action_paste(self) -> None:
         """Paste text from the OS clipboard into the buffer at the cursor."""
-        self.buffer.paste()
+        # Fall back to Textual's clipboard (OSC 52) when the local system
+        # clipboard is empty/unreachable (SSH).
+        fallback = ""
+        try:
+            fallback = self.app.clipboard or ""
+        except Exception:
+            fallback = ""
+        self.buffer.paste(fallback=fallback)
         # Refresh the editor view after inserting the pasted text.
         self._post_buffer_update()
 

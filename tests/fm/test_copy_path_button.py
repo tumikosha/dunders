@@ -1,8 +1,8 @@
 import pytest
 from textual.geometry import Offset
 
-import tyui.app as app_mod
 from tyui.app import TyuiApp
+from tyui.windowing.core import clipboard
 
 
 def _panel_window(app, win_id):
@@ -43,7 +43,7 @@ async def test_copy_box_click_copies_cwd_and_notifies(tmp_path, monkeypatch):
         await pilot.pause()
         copied = []
         notes = []
-        monkeypatch.setattr(app_mod, "_copy_to_system", lambda s: copied.append(s))
+        monkeypatch.setattr(clipboard, "copy", lambda text, app=None: copied.append(text))
         monkeypatch.setattr(app, "notify", lambda msg, **k: notes.append(msg))
         win = _panel_window(app, "panel-left")
         event = type("E", (), {"window": win})()

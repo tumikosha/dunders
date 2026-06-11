@@ -33,3 +33,23 @@ def test_editor_widget_gutter_width():
 def test_editor_widget_gutter_width_no_line_numbers():
     widget = EditorWidget(show_line_numbers=False)
     assert widget._gutter_width() == 0
+
+
+def test_move_cursor_document_start():
+    buf = TextBuffer.from_string("alpha\nbeta\ngamma")
+    buf.cursor_row, buf.cursor_col = 1, 3
+    buf.move_cursor_document_start()
+    assert (buf.cursor_row, buf.cursor_col) == (0, 0)
+
+
+def test_move_cursor_document_end():
+    buf = TextBuffer.from_string("alpha\nbeta\ngamma")
+    buf.cursor_row, buf.cursor_col = 0, 2
+    buf.move_cursor_document_end()
+    assert (buf.cursor_row, buf.cursor_col) == (2, len("gamma"))
+
+
+def test_move_cursor_document_end_empty_buffer():
+    buf = TextBuffer.from_string("")
+    buf.move_cursor_document_end()
+    assert (buf.cursor_row, buf.cursor_col) == (0, 0)

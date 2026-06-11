@@ -88,7 +88,7 @@ from tyui.windowing import (
     show_modal,
 )
 from tyui.windowing.content import WindowContent
-from tyui.windowing.core.buffer import _copy_to_system
+from tyui.windowing.core import clipboard
 from tyui.windowing.editor.language_picker import show_language_picker
 from tyui.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from tyui.fm.key_probe import KeyProbeContent
@@ -3045,12 +3045,8 @@ class TyuiApp(App):
         if not isinstance(content, FilePanel):
             return
         path = str(content.cwd)
-        _copy_to_system(path)
-        # OSC 52 fallback (works over SSH where pbcopy/xclip aren't reachable).
-        try:
-            self.copy_to_clipboard(path)
-        except Exception:
-            pass
+        # System clipboard (pbcopy/xclip) + OSC 52 fallback for SSH.
+        clipboard.copy(path, app=self)
         self.notify(f"copied {path}")
 
     def action_insert_current_file(self) -> None:

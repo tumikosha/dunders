@@ -33,6 +33,7 @@ from textual.message import Message
 from textual.widgets import Static, TextArea
 
 from tyui.fm.console.history import History
+from tyui.windowing.core import clipboard
 
 
 # --- Patch missing ANSI sequence mappings -------------------------------
@@ -150,6 +151,27 @@ class _CmdInput(TextArea):
 
     def action_cmd_kill(self) -> None:
         self._owner.post_message(CommandLine.KillRequested())
+
+    # --- Clipboard: route TextArea copy/cut/paste through the system buffer --
+    # By default Textual's TextArea uses app.copy_to_clipboard / app.clipboard
+    # (its own internal buffer + OSC 52), which on Terminal.app does NOT reach
+    # the real system clipboard the editor uses. Override so the command line
+    # shares ONE system clipboard with the editor. (Cmd+V via bracketed paste
+    # is handled by the terminal itself and already inserts the system buffer.)
+    def action_copy(self) -> None:
+        if self.selected_text:
+            clipboard.copy(self.selected_text, app=self.app)
+
+    def action_cut(self) -> None:
+        selected = self.selected_text
+        if selected:
+            clipboard.copy(selected, app=self.app)
+            self.delete(*self.selection, maintain_selection_offset=False)
+
+    def action_paste(self) -> None:
+        text = clipboard.paste(app=self.app)
+        if text:
+            self.insert(text)
 
     def action_cmd_up(self) -> None:
         row, _col = self.cursor_location
@@ -331,6 +353,14 @@ class CommandLine(Container):
         self._submit(anonymous=True)
 
     def action_ctrl_c(self) -> None:
+        # Smart Ctrl+C: copy the selection to the system clipboard when there
+        # is one (works in every terminal, mirrors the editor's Ctrl+C). With
+        # no selection, keep the shell-like behaviour: clear buffer, else
+        # interrupt the running command.
+        selected = self._input.selected_text
+        if selected:
+            clipboard.copy(selected, app=self.app)
+            return
         if self._input.text:
             self._input.value = ""
             return
