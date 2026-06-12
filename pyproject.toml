@@ -51,10 +51,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage      = "https://github.com/tumikosha/qwe"
-Repository    = "https://github.com/tumikosha/qwe"
-Issues        = "https://github.com/tumikosha/qwe/issues"
-Documentation = "https://github.com/tumikosha/qwe#readme"
+Homepage      = "https://github.com/tumikosha/dunders"
+Repository    = "https://github.com/tumikosha/dunders"
+Issues        = "https://github.com/tumikosha/dunders/issues"
+Documentation = "https://github.com/tumikosha/dunders#readme"
 
 [project.scripts]
 dunders = "dunders.main:main"

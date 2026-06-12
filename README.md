@@ -140,7 +140,7 @@ the status bar when an editor window has focus.
 ## Development
 
 ```bash
-git clone https://github.com/tumikosha/qwe dunders
+git clone https://github.com/tumikosha/dunders dunders
 cd dunders
 uv sync --extra dev          # or: pip install -e '.[dev]'
 
