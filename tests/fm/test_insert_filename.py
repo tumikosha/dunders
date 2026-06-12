@@ -2,7 +2,7 @@ import shlex
 
 import pytest
 
-from tyui.app import TyuiApp
+from dunders.app import DundersApp
 
 
 def _cursor_to_name(panel, name) -> bool:
@@ -24,7 +24,7 @@ def _cursor_to_parent(panel) -> bool:
 @pytest.mark.asyncio
 async def test_ctrl_n_on_file_inserts_name(tmp_path):
     (tmp_path / "a.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app._active_panel()
@@ -37,7 +37,7 @@ async def test_ctrl_n_on_file_inserts_name(tmp_path):
 @pytest.mark.asyncio
 async def test_ctrl_n_on_folder_inserts_name(tmp_path):
     (tmp_path / "sub").mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app._active_panel()
@@ -53,7 +53,7 @@ async def test_ctrl_n_on_parent_inserts_cwd_path(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     (work / "a.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=str(work))
+    app = DundersApp(launch_mode="fm", initial_path=str(work))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app._active_panel()
@@ -66,7 +66,7 @@ async def test_ctrl_n_on_parent_inserts_cwd_path(tmp_path):
 @pytest.mark.asyncio
 async def test_ctrl_n_quotes_spaces(tmp_path):
     (tmp_path / "a b.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app._active_panel()
@@ -79,7 +79,7 @@ async def test_ctrl_n_quotes_spaces(tmp_path):
 @pytest.mark.asyncio
 async def test_ctrl_n_noop_when_cursor_out_of_range(tmp_path):
     (tmp_path / "a.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app._active_panel()

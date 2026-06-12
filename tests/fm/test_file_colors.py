@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tyui.fm.file_colors import classify, role_for
-from tyui.fm.file_entry import FileEntry
-from tyui.fm.file_panel import FilePanel
-from tyui.windowing.palette import Palette, Style, Theme
-from tyui.windowing.themes.modern_dark import modern_dark
+from dunders.fm.file_colors import classify, role_for
+from dunders.fm.file_entry import FileEntry
+from dunders.fm.file_panel import FilePanel
+from dunders.windowing.palette import Palette, Style, Theme
+from dunders.windowing.themes.modern_dark import modern_dark
 
 
 def _entry(name: str, *, is_dir=False, is_symlink=False, is_executable=False) -> FileEntry:

@@ -1,6 +1,6 @@
 """Tests for the shared clipboard helper (system buffer + OSC 52 fallback)."""
 
-from tyui.windowing.core import clipboard
+from dunders.windowing.core import clipboard
 
 
 class _FakeApp:

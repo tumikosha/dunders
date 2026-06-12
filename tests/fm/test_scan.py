@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.scan import scan_dir
+from dunders.fm.scan import scan_dir
 
 
 def test_scan_dir_returns_files_and_subdirs(tmp_path: Path):

@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Window
+from dunders.app import DundersApp
+from dunders.windowing import Window
 
 
-def _editor_window(app: TyuiApp) -> Window | None:
+def _editor_window(app: DundersApp) -> Window | None:
     if app.desktop is None:
         return None
     for w in app.desktop.windows + app.desktop.minimized_windows:
@@ -23,7 +23,7 @@ def _editor_window(app: TyuiApp) -> Window | None:
 async def test_chord_ctrl_w_then_1_restores_first_tray_icon(tmp_path: Path):
     f = tmp_path / "hello.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -53,7 +53,7 @@ async def test_chord_ctrl_w_then_1_restores_first_tray_icon(tmp_path: Path):
 async def test_chord_with_invalid_digit_is_cancelled(tmp_path: Path):
     f = tmp_path / "hello.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -81,7 +81,7 @@ async def test_chord_cancelled_by_non_digit(tmp_path: Path):
     """Pressing Ctrl+W then a non-digit cancels the chord without acting."""
     f = tmp_path / "hello.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -115,7 +115,7 @@ async def test_chord_restores_with_editor_focused_and_no_digit_leak(tmp_path: Pa
     f1.write_text("aaa")
     f2 = tmp_path / "b.txt"
     f2.write_text("bbb")
-    app = TyuiApp(launch_mode="we", initial_paths=[f1, f2])
+    app = DundersApp(launch_mode="we", initial_paths=[f1, f2])
     async with app.run_test(size=(120, 30)) as pilot:
         for _ in range(10):
             await pilot.pause()
@@ -147,7 +147,7 @@ async def test_normal_digit_typing_unaffected_when_not_in_chord(tmp_path: Path):
     typing a digit into an editor works as usual."""
     f1 = tmp_path / "a.txt"
     f1.write_text("x")
-    app = TyuiApp(launch_mode="we", initial_paths=[f1])
+    app = DundersApp(launch_mode="we", initial_paths=[f1])
     async with app.run_test(size=(120, 30)) as pilot:
         for _ in range(10):
             await pilot.pause()
@@ -163,7 +163,7 @@ async def test_normal_digit_typing_unaffected_when_not_in_chord(tmp_path: Path):
 async def test_icon_tray_shows_hint_and_position_number(tmp_path: Path):
     f = tmp_path / "hello.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -176,7 +176,7 @@ async def test_icon_tray_shows_hint_and_position_number(tmp_path: Path):
         assert win is not None
         app.desktop.minimize_window(win)
         await pilot.pause()
-        from tyui.windowing.desktop import IconTray
+        from dunders.windowing.desktop import IconTray
         tray = app.query_one(IconTray)
         strip = tray.render_line(0)
         text = "".join(seg.text for seg in strip)

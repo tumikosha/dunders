@@ -1,6 +1,6 @@
 import pytest
 from textual.app import App, ComposeResult
-from tyui.windowing.editor.search_panel import SearchPanel
+from dunders.windowing.editor.search_panel import SearchPanel
 
 class TestApp(App):
     def compose(self) -> ComposeResult:

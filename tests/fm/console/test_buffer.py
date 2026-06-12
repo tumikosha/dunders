@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tyui.fm.console.buffer import ConsoleBuffer
-from tyui.fm.console.ansi import Segment, Style
+from dunders.fm.console.buffer import ConsoleBuffer
+from dunders.fm.console.ansi import Segment, Style
 
 
 def test_append_plain_text_two_lines():

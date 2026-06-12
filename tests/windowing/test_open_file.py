@@ -1,9 +1,9 @@
-from tyui.app import TyuiApp
-from tyui.fm.dialogs import InputDialog
+from dunders.app import DundersApp
+from dunders.fm.dialogs import InputDialog
 
 
 async def test_file_menu_has_open_file():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         file_menu = next(m for m in app._all_menus if m.label == "File")
@@ -14,7 +14,7 @@ async def test_file_menu_has_open_file():
 async def test_open_file_dialog_opens_editor(tmp_path):
     f = tmp_path / "hello.py"
     f.write_text("print('hi')\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         app.action_open_file()

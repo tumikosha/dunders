@@ -1,4 +1,4 @@
-from tyui.windowing.core.fold_engine import FoldEngine, FoldRegistry, FoldRegion, FoldRule
+from dunders.windowing.core.fold_engine import FoldEngine, FoldRegistry, FoldRegion, FoldRule
 
 
 class TestFoldRule:

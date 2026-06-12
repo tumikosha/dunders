@@ -1,10 +1,10 @@
 """Unit tests for the JSON user-config store (theme persistence).
 
 The autouse fixture in tests/conftest.py points XDG_CONFIG_HOME at a tmp dir,
-so these never touch the developer's real ~/.config/tyui.
+so these never touch the developer's real ~/.config/dunders.
 """
 
-from tyui.config import user_config
+from dunders.config import user_config
 
 
 def test_missing_config_returns_empty():

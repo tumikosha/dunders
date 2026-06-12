@@ -4,9 +4,9 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
-from tyui.windowing.desktop import Desktop
-from tyui.windowing.frame import BorderSides, BorderStyle, Decorations, TitleSpec
-from tyui.windowing.window import Window
+from dunders.windowing.desktop import Desktop
+from dunders.windowing.frame import BorderSides, BorderStyle, Decorations, TitleSpec
+from dunders.windowing.window import Window
 
 
 class _App(App):

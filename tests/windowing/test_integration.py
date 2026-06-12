@@ -3,7 +3,7 @@
 import pytest
 from textual.widgets import Static
 
-from tyui.windowing import (
+from dunders.windowing import (
     BorderStyle,
     Decorations,
     Desktop,
@@ -12,7 +12,7 @@ from tyui.windowing import (
     make_window,
     show_modal,
 )
-from tyui.windowing.helpers import ModalWindow
+from dunders.windowing.helpers import ModalWindow
 
 
 class _TestApp:
@@ -31,7 +31,7 @@ class BareApp(App):
 class TestDemoBoots:
     @pytest.mark.asyncio
     async def test_demo_app_starts(self):
-        from tyui.windowing.demo.app import WindowingDemo
+        from dunders.windowing.demo.app import WindowingDemo
 
         app = WindowingDemo()
         async with app.run_test(size=(100, 30)) as pilot:
@@ -45,7 +45,7 @@ class TestDemoBoots:
 
     @pytest.mark.asyncio
     async def test_demo_toggle_theme(self):
-        from tyui.windowing.demo.app import WindowingDemo
+        from dunders.windowing.demo.app import WindowingDemo
 
         app = WindowingDemo()
         async with app.run_test(size=(100, 30)) as pilot:
@@ -58,7 +58,7 @@ class TestDemoBoots:
 
     @pytest.mark.asyncio
     async def test_demo_new_window(self):
-        from tyui.windowing.demo.app import WindowingDemo
+        from dunders.windowing.demo.app import WindowingDemo
 
         app = WindowingDemo()
         async with app.run_test(size=(100, 30)) as pilot:

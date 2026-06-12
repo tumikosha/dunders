@@ -1,9 +1,9 @@
 from pathlib import Path
 import stat
 
-from tyui.fm.file_entry import FileEntry
-from tyui.fm import panel_view as pv
-from tyui.fm.panel_view import PanelViewMode
+from dunders.fm.file_entry import FileEntry
+from dunders.fm import panel_view as pv
+from dunders.fm.panel_view import PanelViewMode
 
 
 def _entry(name, *, is_dir=False, is_symlink=False, is_executable=False, mode=0):

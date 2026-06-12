@@ -1,7 +1,7 @@
 [project]
-name = "tyui"
+name = "dunders"
 version = "0.1.0"
-description = "tyui — Terminal · Your · Universal · Intelligence. Norton Commander–style terminal file manager, editor, and LLM-agent CLI."
+description = "dunders — Terminal · Your · Universal · Intelligence. Norton Commander–style terminal file manager, editor, and LLM-agent CLI."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -57,24 +57,24 @@ Issues        = "https://github.com/tumikosha/qwe/issues"
 Documentation = "https://github.com/tumikosha/qwe#readme"
 
 [project.scripts]
-tyui = "tyui.main:main"
-we = "tyui.main:main_we"
-wew = "tyui.main:main_wew"
+dunders = "dunders.main:main"
+__ = "dunders.main:main_we"
+__w = "dunders.main:main_wew"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tyui"]
+packages = ["dunders"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"tyui/themes/dark.yaml"  = "tyui/themes/dark.yaml"
-"tyui/themes/light.yaml" = "tyui/themes/light.yaml"
+"dunders/themes/dark.yaml"  = "dunders/themes/dark.yaml"
+"dunders/themes/light.yaml" = "dunders/themes/light.yaml"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "tyui/**",
+    "dunders/**",
     "README.md",
     "LICENSE",
     "pyproject.toml",

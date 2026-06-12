@@ -2,8 +2,8 @@ import re
 
 import pytest
 
-from tyui.windowing.core.buffer import TextBuffer
-from tyui.windowing.core.search import SearchOptions, Match, find_matches
+from dunders.windowing.core.buffer import TextBuffer
+from dunders.windowing.core.search import SearchOptions, Match, find_matches
 
 
 def test_empty_pattern_returns_empty():

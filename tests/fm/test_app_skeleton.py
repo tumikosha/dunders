@@ -1,14 +1,14 @@
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.fm.file_panel import FilePanel
-from tyui.windowing import Desktop, MenuBar, StatusBar, Window
-from tyui.fm.commandline import CommandLine
+from dunders.app import DundersApp
+from dunders.fm.file_panel import FilePanel
+from dunders.windowing import Desktop, MenuBar, StatusBar, Window
+from dunders.fm.commandline import CommandLine
 
 
 @pytest.mark.asyncio
 async def test_app_mounts_chrome_widgets():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert len(app.query(MenuBar)) == 1
@@ -19,7 +19,7 @@ async def test_app_mounts_chrome_widgets():
 
 @pytest.mark.asyncio
 async def test_app_mounts_two_panel_windows_in_fm_mode():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -33,7 +33,7 @@ async def test_app_mounts_two_panel_windows_in_fm_mode():
 
 @pytest.mark.asyncio
 async def test_app_status_bar_shows_default_fkey_labels():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         sb = app.query_one(StatusBar)
@@ -45,8 +45,8 @@ async def test_app_status_bar_shows_default_fkey_labels():
 
 @pytest.mark.asyncio
 async def test_app_editor_mode_hides_panels_initially():
-    """tyui <file> should mount panels but hide them; editor placeholder is visible."""
-    app = TyuiApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+    """dunders <file> should mount panels but hide them; editor placeholder is visible."""
+    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -58,7 +58,7 @@ async def test_app_editor_mode_hides_panels_initially():
 
 async def test_editor_menu_exposes_syntax_commands():
     """The Editor menu must surface the syntax-highlight toggle and language picker."""
-    app = TyuiApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
     async with app.run_test() as pilot:
         await pilot.pause()
         editor_menu = next(m for m in app._all_menus if m.label == "Editor")
@@ -69,7 +69,7 @@ async def test_editor_menu_exposes_syntax_commands():
 
 async def test_view_menu_exposes_panels_fullscreen_and_console_toggle():
     """The View menu must surface Panels Fullscreen (Ctrl+P) and Toggle console (Ctrl+O)."""
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test() as pilot:
         await pilot.pause()
         view_menu = next(m for m in app._all_menus if m.label == "View")
@@ -80,7 +80,7 @@ async def test_view_menu_exposes_panels_fullscreen_and_console_toggle():
 
 @pytest.mark.asyncio
 async def test_app_cli_mode_hides_panels_and_mounts_agent_stub():
-    app = TyuiApp(launch_mode="cli")
+    app = DundersApp(launch_mode="cli")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -91,8 +91,8 @@ async def test_app_cli_mode_hides_panels_and_mounts_agent_stub():
 
 
 def test_main_arg_parsing(monkeypatch, tmp_path):
-    """tyui.main.main forwards the right launch_mode/initial_path to TyuiApp."""
-    import tyui.main as main_mod
+    """dunders.main.main forwards the right launch_mode/initial_path to DundersApp."""
+    import dunders.main as main_mod
 
     captured: dict = {}
 
@@ -104,16 +104,16 @@ def test_main_arg_parsing(monkeypatch, tmp_path):
         def run(self) -> None:
             captured["ran"] = True
 
-    monkeypatch.setattr(main_mod, "TyuiApp", _FakeApp)
+    monkeypatch.setattr(main_mod, "DundersApp", _FakeApp)
 
     # Case 1: no args -> fm mode, no path
-    monkeypatch.setattr("sys.argv", ["tyui"])
+    monkeypatch.setattr("sys.argv", ["dunders"])
     main_mod.main()
     assert captured == {"launch_mode": "fm", "initial_path": None, "ran": True}
 
     # Case 2: directory path -> fm mode with path
     captured.clear()
-    monkeypatch.setattr("sys.argv", ["tyui", str(tmp_path)])
+    monkeypatch.setattr("sys.argv", ["dunders", str(tmp_path)])
     main_mod.main()
     assert captured["launch_mode"] == "fm"
     assert captured["initial_path"] == str(tmp_path)
@@ -122,14 +122,14 @@ def test_main_arg_parsing(monkeypatch, tmp_path):
     captured.clear()
     file_path = tmp_path / "foo.txt"
     file_path.write_text("hi")
-    monkeypatch.setattr("sys.argv", ["tyui", str(file_path)])
+    monkeypatch.setattr("sys.argv", ["dunders", str(file_path)])
     main_mod.main()
     assert captured["launch_mode"] == "editor"
     assert captured["initial_path"] == str(file_path)
 
     # Case 4: --cli -> cli mode
     captured.clear()
-    monkeypatch.setattr("sys.argv", ["tyui", "--cli"])
+    monkeypatch.setattr("sys.argv", ["dunders", "--cli"])
     main_mod.main()
     assert captured["launch_mode"] == "cli"
     assert captured["initial_path"] is None
@@ -153,7 +153,7 @@ def _focused_panel_id(app):
 async def test_app_left_panel_has_focus_on_mount_in_fm_mode():
     # On startup with no file argument, panel-left holds Textual widget
     # focus so arrow keys move the selection out of the box.
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()  # allow call_after_refresh to fire
@@ -169,7 +169,7 @@ async def test_app_tab_alternates_panels(tmp_path):
     # Startup: panel-left has Textual focus.
     # Tab #1: panel-left → panel-right  (normal panel swap)
     # Tab #2: panel-right → panel-left  (normal panel swap)
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -184,7 +184,7 @@ async def test_app_tab_alternates_panels(tmp_path):
 
 @pytest.mark.asyncio
 async def test_app_alt_l_and_alt_r_force_focus(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("alt+r")
@@ -199,11 +199,11 @@ async def test_app_alt_l_and_alt_r_force_focus(tmp_path):
 async def test_app_panels_have_entries_after_mount(tmp_path):
     """Refreshing both panels at mount means they're usable immediately."""
     (tmp_path / "alpha.txt").write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop
         desktop = app.query_one(Desktop)
         for win in desktop.windows:
             if win.id in ("panel-left", "panel-right"):
@@ -216,7 +216,7 @@ async def test_app_panels_have_entries_after_mount(tmp_path):
 @pytest.mark.asyncio
 async def test_app_f9_then_esc_returns_focus_to_panel(tmp_path):
     """F9 enters the menu, Esc returns focus to whatever was focused before."""
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -242,9 +242,9 @@ async def test_app_panels_fill_full_desktop_width():
     """Two panels combined cover the full desktop width; each ~half wide.
     The console is no longer mounted at startup, so the panels fill the full
     usable desktop height (excluding the IconTray's bottom row)."""
-    from tyui.windowing import Desktop, Window
+    from dunders.windowing import Desktop, Window
 
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.pause()  # second tick lets call_after_refresh fire
@@ -265,13 +265,13 @@ async def test_app_panels_fill_full_desktop_width():
 @pytest.mark.asyncio
 async def test_app_f7_creates_directory_in_active_panel(tmp_path):
     """F7 -> input "newdir" -> Enter -> directory created under active panel cwd."""
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
         await pilot.press("f7")
         await pilot.pause()
-        from tyui.fm.dialogs import NewFileDialog
+        from dunders.fm.dialogs import NewFileDialog
         dialog = app.query_one(NewFileDialog)
         dialog._input.value = "newdir"
         dialog.action_submit()
@@ -281,13 +281,13 @@ async def test_app_f7_creates_directory_in_active_panel(tmp_path):
 
 @pytest.mark.asyncio
 async def test_app_f7_cancel_does_not_create_anything(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
         await pilot.press("f7")
         await pilot.pause()
-        from tyui.fm.dialogs import NewFileDialog
+        from dunders.fm.dialogs import NewFileDialog
         dialog = app.query_one(NewFileDialog)
         dialog.action_cancel()
         await pilot.pause()
@@ -300,13 +300,13 @@ async def test_app_f8_deletes_cursor_target_after_confirm(tmp_path):
     """F8 with cursor on a file -> ConfirmDialog -> Yes -> file removed."""
     target = tmp_path / "doomed.txt"
     target.write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
         # Move cursor onto doomed.txt in the left panel.
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         win = desktop.query_one("#panel-left", Window)
         panel = win.content
@@ -316,7 +316,7 @@ async def test_app_f8_deletes_cursor_target_after_confirm(tmp_path):
         # Press F8 — confirm dialog opens.
         await pilot.press("f8")
         await pilot.pause()
-        from tyui.fm.dialogs import ConfirmDialog
+        from dunders.fm.dialogs import ConfirmDialog
         dialog = app.query_one(ConfirmDialog)
         dialog.action_confirm()
         await pilot.pause()
@@ -328,12 +328,12 @@ async def test_app_f8_deletes_cursor_target_after_confirm(tmp_path):
 async def test_app_f8_cancel_keeps_file(tmp_path):
     target = tmp_path / "safe.txt"
     target.write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         win = desktop.query_one("#panel-left", Window)
         panel = win.content
@@ -341,7 +341,7 @@ async def test_app_f8_cancel_keeps_file(tmp_path):
         panel.cursor = idx
         await pilot.press("f8")
         await pilot.pause()
-        from tyui.fm.dialogs import ConfirmDialog
+        from dunders.fm.dialogs import ConfirmDialog
         dialog = app.query_one(ConfirmDialog)
         dialog.action_cancel()
         await pilot.pause()
@@ -353,7 +353,7 @@ async def test_app_f8_with_no_targets_is_noop(tmp_path):
     """Cursor on '..' with empty selection: F8 does nothing."""
     sub = tmp_path / "sub"
     sub.mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(sub))
+    app = DundersApp(launch_mode="fm", initial_path=str(sub))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -361,7 +361,7 @@ async def test_app_f8_with_no_targets_is_noop(tmp_path):
         await pilot.press("f8")
         await pilot.pause()
         # No ConfirmDialog should have been shown.
-        from tyui.fm.dialogs import ConfirmDialog
+        from dunders.fm.dialogs import ConfirmDialog
         assert not list(app.query(ConfirmDialog))
 
 
@@ -374,13 +374,13 @@ async def test_app_f5_copies_to_opposite_panel_cwd(tmp_path):
     dst_dir = tmp_path / "dst"
     dst_dir.mkdir()
 
-    app = TyuiApp(launch_mode="fm", initial_path=str(src_dir))
+    app = DundersApp(launch_mode="fm", initial_path=str(src_dir))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
         # Override right panel's cwd to dst_dir.
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         right = desktop.query_one("#panel-right", Window).content
         assert isinstance(right, FilePanel)
@@ -394,7 +394,7 @@ async def test_app_f5_copies_to_opposite_panel_cwd(tmp_path):
         # Press F5 -> copy dialog -> submit (input prefilled with dst path).
         await pilot.press("f5")
         await pilot.pause()
-        from tyui.fm.dialogs import CopyMoveDialog
+        from dunders.fm.dialogs import CopyMoveDialog
         dialog = app.query_one(CopyMoveDialog)
         dialog.action_submit()
         await pilot.pause()
@@ -407,14 +407,14 @@ async def test_app_f5_copies_to_opposite_panel_cwd(tmp_path):
 async def test_app_f5_with_no_targets_is_noop(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(sub))
+    app = DundersApp(launch_mode="fm", initial_path=str(sub))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
         # Cursor on ".." in both panels.
         await pilot.press("f5")
         await pilot.pause()
-        from tyui.fm.dialogs import ConfirmDialog, CopyMoveDialog
+        from dunders.fm.dialogs import ConfirmDialog, CopyMoveDialog
         assert not list(app.query(ConfirmDialog))
         assert not list(app.query(CopyMoveDialog))
 
@@ -427,12 +427,12 @@ async def test_app_f6_moves_to_opposite_panel_cwd(tmp_path):
     dst_dir = tmp_path / "dst"
     dst_dir.mkdir()
 
-    app = TyuiApp(launch_mode="fm", initial_path=str(src_dir))
+    app = DundersApp(launch_mode="fm", initial_path=str(src_dir))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         right = desktop.query_one("#panel-right", Window).content
         right.cwd = dst_dir
@@ -442,7 +442,7 @@ async def test_app_f6_moves_to_opposite_panel_cwd(tmp_path):
         left.cursor = idx
         await pilot.press("f6")
         await pilot.pause()
-        from tyui.fm.dialogs import CopyMoveDialog
+        from dunders.fm.dialogs import CopyMoveDialog
         dialog = app.query_one(CopyMoveDialog)
         dialog.action_submit()
         await pilot.pause()
@@ -457,7 +457,7 @@ async def test_app_f8_keeps_focus_on_originating_panel(tmp_path):
     the modal closes — not always on panel-left."""
     target = tmp_path / "doomed.txt"
     target.write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -466,7 +466,7 @@ async def test_app_f8_keeps_focus_on_originating_panel(tmp_path):
         await pilot.pause()
         assert _focused_panel_id(app) == "panel-right"
         # Position cursor on doomed.txt in the right panel.
-        from tyui.windowing import Desktop, Window
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         right = desktop.query_one("#panel-right", Window).content
         idx = next(i for i, e in enumerate(right.entries) if e.name == "doomed.txt")
@@ -474,7 +474,7 @@ async def test_app_f8_keeps_focus_on_originating_panel(tmp_path):
         # F8 -> confirm -> Yes
         await pilot.press("f8")
         await pilot.pause()
-        from tyui.fm.dialogs import ConfirmDialog
+        from dunders.fm.dialogs import ConfirmDialog
         dialog = app.query_one(ConfirmDialog)
         dialog.action_confirm()
         await pilot.pause()
@@ -489,12 +489,12 @@ async def test_app_tab_is_gated_while_modal_active(tmp_path):
     switch panels — focus must stay on the dialog so Esc/clicks land."""
     target = tmp_path / "x.txt"
     target.write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         win = desktop.query_one("#panel-left", Window)
         panel = win.content
@@ -502,7 +502,7 @@ async def test_app_tab_is_gated_while_modal_active(tmp_path):
         panel.cursor = idx
         await pilot.press("f8")
         await pilot.pause()
-        from tyui.fm.dialogs import ConfirmDialog, ShadowButton
+        from dunders.fm.dialogs import ConfirmDialog, ShadowButton
         confirm = app.query_one(ConfirmDialog)
         # Sanity: focus is on a button INSIDE the dialog (Yes by default).
         # The exact widget changed when keyboard-nav was added — what
@@ -531,12 +531,12 @@ async def test_app_inactive_panel_cursor_does_not_invert(tmp_path):
     """Cursor row in the inactive panel renders with bold (not reverse),
     so the user can tell which panel is active."""
     (tmp_path / "x.txt").write_text("")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         right = desktop.query_one("#panel-right", Window).content
@@ -574,13 +574,13 @@ async def test_app_f4_opens_editor_window_on_file(tmp_path):
     """F4 with cursor on a file opens an editor window with that file."""
     f = tmp_path / "x.txt"
     f.write_text("hello\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -597,13 +597,13 @@ async def test_app_f4_on_directory_is_noop(tmp_path):
     """F4 on a directory entry must not open an editor."""
     sub = tmp_path / "sub"
     sub.mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "sub")
@@ -618,13 +618,13 @@ async def test_app_enter_on_file_opens_editor_window(tmp_path):
     """Enter on a file (FilePanel.ItemActivated) routes to editor."""
     f = tmp_path / "y.txt"
     f.write_text("hi\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "y.txt")
@@ -644,13 +644,13 @@ async def test_app_closing_editor_returns_focus_to_panel(tmp_path):
     """Closing the editor window restores focus to the panel that opened it."""
     f = tmp_path / "x.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -671,13 +671,13 @@ async def test_app_editor_loads_file_contents(tmp_path):
     """When F4 opens a file, the editor buffer should contain the file text."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\nbeta\ngamma\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -697,13 +697,13 @@ async def test_app_esc_closes_editor_window(tmp_path):
     """Esc inside the editor closes it and returns focus to the panel."""
     f = tmp_path / "x.txt"
     f.write_text("hi")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -722,13 +722,13 @@ async def test_app_f3_opens_viewer_with_file_contents(tmp_path):
     """F3 opens a ViewerContent window with the file's text loaded."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\nbeta\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.fm.viewer import ViewerContent
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.fm.viewer import ViewerContent
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -744,13 +744,13 @@ async def test_app_f3_opens_viewer_with_file_contents(tmp_path):
 async def test_app_f3_on_directory_is_noop(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.fm.viewer import ViewerContent
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.fm.viewer import ViewerContent
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "sub")
@@ -765,13 +765,13 @@ async def test_app_viewer_does_not_modify_buffer_on_typing(tmp_path):
     """Viewer mode should ignore character keys — the file stays clean."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.fm.viewer import ViewerContent
-        from tyui.windowing import Desktop, Window
+        from dunders.fm.file_panel import FilePanel
+        from dunders.fm.viewer import ViewerContent
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -793,14 +793,14 @@ async def test_app_editor_widget_has_focus_after_f4(tmp_path):
     work immediately, not only after a mouse click."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\nbeta\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.fm.file_panel import FilePanel
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
-        from tyui.windowing.editor.widget import EditorWidget
+        from dunders.fm.file_panel import FilePanel
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
+        from dunders.windowing.editor.widget import EditorWidget
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -817,7 +817,7 @@ async def test_app_editor_widget_has_focus_after_f4(tmp_path):
 @pytest.mark.asyncio
 async def test_editor_menu_hidden_without_editor(tmp_path):
     """Editor menu is focus-scoped: must be absent when no editor is focused."""
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
@@ -830,11 +830,11 @@ async def test_editor_menu_visible_when_editor_focused(tmp_path):
     """Opening an editor (F4) must add Editor to the menu bar."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.windowing import Desktop, Window
+        from dunders.windowing import Desktop, Window
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -850,12 +850,12 @@ async def test_editor_menu_hidden_after_editor_closed(tmp_path):
     """Closing the editor must remove Editor menu again."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -878,12 +878,12 @@ async def test_editor_window_stays_on_top_after_editor_menu_command(tmp_path):
     focused_window."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\nbeta\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.pause()
-        from tyui.windowing import Desktop, Window
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing import Desktop, Window
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -921,10 +921,10 @@ async def test_editor_z_order_preserved_after_mouse_menu_open(tmp_path):
     still raise the editor back over the file panels."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -955,11 +955,11 @@ async def test_panel_items_filtered_out_when_editor_focused(tmp_path):
     rather than render the raw command_id as a label."""
     f = tmp_path / "x.txt"
     f.write_text("alpha\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
-        from tyui.windowing.menu_bar import Dropdown, MenuItem, MenuSeparator
+        from dunders.windowing.editor import EditorContent
+        from dunders.windowing.menu_bar import Dropdown, MenuItem, MenuSeparator
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -989,10 +989,10 @@ async def test_tab_in_editor_stays_in_editor(tmp_path):
     focus stays on the editor."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -1018,10 +1018,10 @@ async def test_ctrl_bracket_folds_in_editor(tmp_path):
     src = "def f():\n    a = 1\n    b = 2\n    return a + b\n"
     f = tmp_path / "x.py"
     f.write_text(src)
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.py")
@@ -1047,10 +1047,10 @@ async def test_ctrl_r_toggles_macro_recording_in_editor(tmp_path):
     of macro_storage_path so the command is actually registered."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -1076,10 +1076,10 @@ async def test_record_macro_menu_item_dispatches(tmp_path):
     but does nothing" when EditorContent's get_commands wasn't reachable."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -1101,11 +1101,11 @@ async def test_macro_assignment_dialog_opens_after_recording(tmp_path):
     the MacroAssignDialog so the user can bind a replay key."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
-        from tyui.windowing.editor.macro_dialog import MacroAssignDialog
+        from dunders.windowing.editor import EditorContent
+        from dunders.windowing.editor.macro_dialog import MacroAssignDialog
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -1132,10 +1132,10 @@ async def test_ctrl_z_undo_and_ctrl_y_redo_in_editor(tmp_path):
     own undo/redo stacks."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
@@ -1168,10 +1168,10 @@ async def test_ctrl_bracket_on_empty_line_folds_all(tmp_path):
     )
     f = tmp_path / "x.py"
     f.write_text(src)
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         desktop = app.query_one(Desktop)
         left = desktop.query_one("#panel-left", Window).content
         idx = next(i for i, e in enumerate(left.entries) if e.name == "x.py")
@@ -1202,7 +1202,7 @@ async def test_shift_tab_cycles_through_desktop_windows(tmp_path):
     just the two file panels. Regression for "no global window navigation"."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -1229,10 +1229,10 @@ async def test_windows_menu_lists_open_windows(tmp_path):
     window with a handler that focuses it."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.menu_bar import MenuBar, MenuItem, MenuSeparator
+        from dunders.windowing.menu_bar import MenuBar, MenuItem, MenuSeparator
         desktop = app.query_one(Desktop)
         # Trigger refresh as the menu bar would.
         idx = next(i for i, m in enumerate(app.menu_bar.menus) if m.label == "Windows")
@@ -1267,10 +1267,10 @@ async def test_windows_menu_lists_open_windows(tmp_path):
 
 @pytest.mark.asyncio
 async def test_view_mode_command_changes_active_panel_mode(tmp_path):
-    from tyui.fm.panel_view import PanelViewMode
-    from tyui.fm.file_panel import FilePanel
-    from tyui.windowing import Window
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    from dunders.fm.panel_view import PanelViewMode
+    from dunders.fm.file_panel import FilePanel
+    from dunders.windowing import Window
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         left = app.desktop.query_one("#panel-left", Window).content
@@ -1295,10 +1295,10 @@ async def test_windows_menu_pick_survives_menu_close(tmp_path):
     was active when the menu opened, defeating the user's selection."""
     f = tmp_path / "x.txt"
     f.write_text("a\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        from tyui.windowing.menu_bar import MenuBar, MenuItem
+        from dunders.windowing.menu_bar import MenuBar, MenuItem
         desktop = app.query_one(Desktop)
         # Open editor so we have at least 3 windows.
         left = desktop.query_one("#panel-left", Window).content
@@ -1339,7 +1339,7 @@ async def test_windows_menu_pick_survives_menu_close(tmp_path):
 
 @pytest.mark.asyncio
 async def test_options_menu_exposes_theme_switching():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         # An "Options" menu lists the cycle command plus one item per theme.
@@ -1362,7 +1362,7 @@ async def test_options_menu_exposes_theme_switching():
 @pytest.mark.asyncio
 async def test_theme_switch_repaints_file_panel_background():
     """Switching theme must repaint the panel body, not only window borders."""
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -1391,9 +1391,9 @@ async def test_theme_switch_repaints_file_panel_background():
 @pytest.mark.asyncio
 async def test_selected_theme_persists_across_restart():
     """Picking a theme writes it to user config; a fresh app re-applies it."""
-    from tyui.config import user_config
+    from dunders.config import user_config
 
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         # Cold start with empty (isolated) config -> built-in default.
@@ -1402,7 +1402,7 @@ async def test_selected_theme_persists_across_restart():
         await pilot.pause()
     assert user_config.get_theme() == "dracula"
 
-    restarted = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    restarted = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with restarted.run_test() as pilot:
         await pilot.pause()
         assert restarted.query_one(Desktop).palette.theme.name == "dracula"
@@ -1410,10 +1410,10 @@ async def test_selected_theme_persists_across_restart():
 
 @pytest.mark.asyncio
 async def test_unknown_persisted_theme_falls_back_to_default():
-    from tyui.config import user_config
+    from dunders.config import user_config
 
     user_config.set_theme("no_such_theme")
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.query_one(Desktop).palette.theme.name == "modern_dark"
@@ -1422,7 +1422,7 @@ async def test_unknown_persisted_theme_falls_back_to_default():
 @pytest.mark.asyncio
 async def test_edit_theme_opens_toml_for_file_backed_theme():
     """Options → Edit theme opens the current theme's .toml in an editor."""
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -1445,7 +1445,7 @@ async def test_edit_theme_opens_toml_for_file_backed_theme():
 @pytest.mark.asyncio
 async def test_edit_theme_on_builtin_opens_no_window():
     """modern_dark has no file: Edit theme shows a hint, opens nothing."""
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -1460,9 +1460,9 @@ async def test_edit_theme_on_builtin_opens_no_window():
 @pytest.mark.asyncio
 async def test_apply_theme_invalidates_registry_cache(monkeypatch):
     """Re-applying a theme drops its cached parse so file edits show up."""
-    from tyui.windowing.themes import loader
+    from dunders.windowing.themes import loader
 
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         calls = []
@@ -1477,7 +1477,7 @@ async def test_apply_theme_invalidates_registry_cache(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_palette_on_ctrl_k_not_ctrl_p():
     """Textual's built-in ctrl+p palette is disabled; ours lives on Ctrl+K."""
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         # Built-in Textual palette is off, so no priority ctrl+p binding exists.

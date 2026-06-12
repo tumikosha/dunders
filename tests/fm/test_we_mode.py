@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Desktop, Window
-from tyui.windowing.editor import EditorContent
+from dunders.app import DundersApp
+from dunders.windowing import Desktop, Window
+from dunders.windowing.editor import EditorContent
 
 
 def test_we_mode_constructor_stores_paths(tmp_path):
@@ -12,7 +12,7 @@ def test_we_mode_constructor_stores_paths(tmp_path):
     b = tmp_path / "b.py"
     a.write_text("print('a')\n")
     b.write_text("print('b')\n")
-    app = TyuiApp(launch_mode="we", initial_paths=[str(a), b])
+    app = DundersApp(launch_mode="we", initial_paths=[str(a), b])
     assert app.launch_mode == "we"
     assert app.initial_paths == [Path(a), Path(b)]
     # Single-path field stays None in we-mode; no accidental crossover.
@@ -23,7 +23,7 @@ def test_we_mode_constructor_stores_paths(tmp_path):
 async def test_make_editor_window_loads_file(tmp_path):
     f = tmp_path / "hello.py"
     f.write_text("print('hi')\n")
-    app = TyuiApp(launch_mode="we", initial_paths=[str(f)])
+    app = DundersApp(launch_mode="we", initial_paths=[str(f)])
     async with app.run_test() as pilot:
         await pilot.pause()
         win = app._make_editor_window(
@@ -37,7 +37,7 @@ async def test_make_editor_window_loads_file(tmp_path):
 
 @pytest.mark.asyncio
 async def test_make_editor_window_none_path_is_untitled(tmp_path):
-    app = TyuiApp(launch_mode="we", initial_paths=[])
+    app = DundersApp(launch_mode="we", initial_paths=[])
     async with app.run_test() as pilot:
         await pilot.pause()
         win = app._make_editor_window(
@@ -59,7 +59,7 @@ async def test_we_three_files_cascade(tmp_path):
         p = tmp_path / name
         p.write_text(f"# {name}\n")
         files.append(p)
-    app = TyuiApp(launch_mode="we", initial_paths=[str(p) for p in files])
+    app = DundersApp(launch_mode="we", initial_paths=[str(p) for p in files])
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
@@ -90,7 +90,7 @@ async def test_we_three_files_cascade(tmp_path):
 @pytest.mark.asyncio
 async def test_we_missing_file_opens_empty_buffer(tmp_path):
     missing = tmp_path / "nope.py"
-    app = TyuiApp(launch_mode="we", initial_paths=[str(missing)])
+    app = DundersApp(launch_mode="we", initial_paths=[str(missing)])
     async with app.run_test() as pilot:
         await pilot.pause()
         eds = _editor_windows(app)
@@ -101,7 +101,7 @@ async def test_we_missing_file_opens_empty_buffer(tmp_path):
 
 @pytest.mark.asyncio
 async def test_we_no_args_opens_one_untitled(tmp_path):
-    app = TyuiApp(launch_mode="we", initial_paths=[])
+    app = DundersApp(launch_mode="we", initial_paths=[])
     async with app.run_test() as pilot:
         await pilot.pause()
         eds = _editor_windows(app)
@@ -115,7 +115,7 @@ async def test_we_directory_arg_is_skipped(tmp_path):
     d.mkdir()
     f = tmp_path / "real.py"
     f.write_text("x = 1\n")
-    app = TyuiApp(launch_mode="we", initial_paths=[str(d), str(f)])
+    app = DundersApp(launch_mode="we", initial_paths=[str(d), str(f)])
     async with app.run_test() as pilot:
         await pilot.pause()
         eds = _editor_windows(app)

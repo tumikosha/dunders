@@ -5,22 +5,22 @@ from __future__ import annotations
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.fm.file_panel import FilePanel
+from dunders.app import DundersApp
+from dunders.fm.file_panel import FilePanel
 
 
-def _active_panel(app: TyuiApp) -> FilePanel:
+def _active_panel(app: DundersApp) -> FilePanel:
     return app._active_panel()
 
 
 @pytest.mark.asyncio
 async def test_panels_visible_predicate_tracks_window_stack():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._panels_visible() is True
 
-    app = TyuiApp(launch_mode="cli", initial_path="/tmp")
+    app = DundersApp(launch_mode="cli", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._panels_visible() is False
@@ -28,7 +28,7 @@ async def test_panels_visible_predicate_tracks_window_stack():
 
 @pytest.mark.asyncio
 async def test_cmdline_up_down_moves_panel_cursor_when_panels_visible():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = _active_panel(app)
@@ -50,7 +50,7 @@ async def test_cmdline_up_down_moves_panel_cursor_when_panels_visible():
 
 @pytest.mark.asyncio
 async def test_cmdline_up_down_uses_history_when_panels_hidden():
-    app = TyuiApp(launch_mode="cli", initial_path="/tmp")
+    app = DundersApp(launch_mode="cli", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         app.command_history.append("ls")
@@ -68,7 +68,7 @@ async def test_cmdline_up_down_uses_history_when_panels_hidden():
 
 @pytest.mark.asyncio
 async def test_cmdline_midbuffer_up_moves_text_cursor_not_panel():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = _active_panel(app)

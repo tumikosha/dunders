@@ -1,7 +1,7 @@
 import pytest
 from textual.app import App, ComposeResult
-from tyui.windowing.editor.search_panel import SearchPanel
-from tyui.windowing.editor.content import EditorContent
+from dunders.windowing.editor.search_panel import SearchPanel
+from dunders.windowing.editor.content import EditorContent
 
 
 class _Host(App):

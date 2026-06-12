@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.file_entry import FileEntry
-from tyui.fm.file_panel import FilePanel
-from tyui.fm.sort import SortOrder
+from dunders.fm.file_entry import FileEntry
+from dunders.fm.file_panel import FilePanel
+from dunders.fm.sort import SortOrder
 
 
 def _make_tree(tmp_path: Path) -> Path:
@@ -628,7 +628,7 @@ async def test_panel_shift_arrow_unselects_when_already_selected(tmp_path: Path)
 
 
 def test_scan_populates_mode(tmp_path: Path):
-    from tyui.fm.scan import scan_dir
+    from dunders.fm.scan import scan_dir
     (tmp_path / "f.txt").write_text("x")
     entries = scan_dir(tmp_path, include_parent=False)
     f = next(e for e in entries if e.name == "f.txt")
@@ -637,7 +637,7 @@ def test_scan_populates_mode(tmp_path: Path):
 
 
 def test_format_mtime_short_is_11_chars():
-    from tyui.fm.file_entry import format_mtime_short
+    from dunders.fm.file_entry import format_mtime_short
     import time
     s = format_mtime_short(time.time())
     assert len(s) == 11         # "MM-DD HH:MM"
@@ -645,7 +645,7 @@ def test_format_mtime_short_is_11_chars():
 
 
 def test_panel_default_view_mode_is_full(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     p = FilePanel(cwd=tmp_path)
     assert p.view_mode == PanelViewMode.FULL
 
@@ -661,7 +661,7 @@ def test_visible_rows_reserves_header_and_footer(tmp_path: Path):
 
 
 def test_multicolumn_cursor_scrolls_by_column(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     for i in range(40):
         (tmp_path / f"f{i:02d}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -678,7 +678,7 @@ def test_multicolumn_cursor_scrolls_by_column(tmp_path: Path):
 
 
 def test_multicolumn_snaps_unaligned_row_offset(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     for i in range(40):
         (tmp_path / f"f{i:02d}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -692,7 +692,7 @@ def test_multicolumn_snaps_unaligned_row_offset(tmp_path: Path):
 
 
 def test_multicol_click_index_clamps_to_last_column(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     for i in range(30):
         (tmp_path / f"f{i:02d}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -725,7 +725,7 @@ async def test_footer_shows_full_cursor_name(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_detailed_mode_row_shows_attrs(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     (tmp_path / "f.txt").write_text("x")
     p = FilePanel(cwd=tmp_path)
     p.refresh_listing()
@@ -739,7 +739,7 @@ async def test_detailed_mode_row_shows_attrs(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_brief_mode_packs_two_columns(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     for i in range(6):
         (tmp_path / f"f{i}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -761,7 +761,7 @@ async def test_brief_and_medium_differ_for_short_listing(tmp_path: Path):
     # short listing stacked entirely in column 0 and Brief (2 cols) / Medium
     # (3 cols) rendered identically. The column height must collapse to
     # ceil(n / k) so the extra columns are actually used.
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
     for n in ("alpha", "beta", "gamma", "delta"):
         (tmp_path / f"{n}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -783,7 +783,7 @@ async def test_multicol_no_duplicate_rows_below_column_height(tmp_path: Path):
     # Regression: rows below the (collapsed) column height must not re-render
     # the next column's entries. They still carry the column separators (which
     # run to the bottom of the panel), so the row is spaces + separators only.
-    from tyui.fm.panel_view import COL_SEP, PanelViewMode
+    from dunders.fm.panel_view import COL_SEP, PanelViewMode
     for n in ("alpha", "beta", "gamma", "delta"):
         (tmp_path / f"{n}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -800,7 +800,7 @@ async def test_multicol_no_duplicate_rows_below_column_height(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_multicol_columns_separated_by_vertical_bar(tmp_path: Path):
-    from tyui.fm.panel_view import COL_SEP, PanelViewMode
+    from dunders.fm.panel_view import COL_SEP, PanelViewMode
     for n in ("alpha", "beta", "gamma", "delta"):
         (tmp_path / f"{n}.txt").write_text("")
     p = FilePanel(cwd=tmp_path)
@@ -815,7 +815,7 @@ async def test_multicol_columns_separated_by_vertical_bar(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_header_labels_are_centered(tmp_path: Path):
-    from tyui.fm.panel_view import PanelViewMode, name_col_width
+    from dunders.fm.panel_view import PanelViewMode, name_col_width
     (tmp_path / "f.txt").write_text("x")
     p = FilePanel(cwd=tmp_path)
     p.refresh_listing()

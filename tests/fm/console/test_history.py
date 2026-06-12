@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tyui.fm.console.history import History
+from dunders.fm.console.history import History
 
 
 def test_append_and_recall(tmp_path: Path):

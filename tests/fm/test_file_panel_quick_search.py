@@ -12,7 +12,7 @@ from pathlib import Path
 
 from textual import events
 
-from tyui.fm.file_panel import FilePanel
+from dunders.fm.file_panel import FilePanel
 
 
 def _make_panel(tmp_path: Path, names: list[str]) -> FilePanel:

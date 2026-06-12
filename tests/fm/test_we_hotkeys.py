@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.fm.commandline import CommandLine
+from dunders.app import DundersApp
+from dunders.fm.commandline import CommandLine
 
 
 def _make_file(text: str = "print(1)\n") -> str:
@@ -23,7 +23,7 @@ def _make_file(text: str = "print(1)\n") -> str:
 
 @pytest.mark.asyncio
 async def test_we_ctrl_e_focuses_command_line():
-    app = TyuiApp(launch_mode="we", initial_paths=[_make_file()])
+    app = DundersApp(launch_mode="we", initial_paths=[_make_file()])
     async with app.run_test() as pilot:
         await pilot.pause()
         # Focus starts on the editor, not the command line.
@@ -36,7 +36,7 @@ async def test_we_ctrl_e_focuses_command_line():
 
 @pytest.mark.asyncio
 async def test_we_cascade_hotkey_dispatches():
-    app = TyuiApp(launch_mode="we", initial_paths=[_make_file()])
+    app = DundersApp(launch_mode="we", initial_paths=[_make_file()])
     async with app.run_test() as pilot:
         await pilot.pause()
         calls: list[str] = []
@@ -49,7 +49,7 @@ async def test_we_cascade_hotkey_dispatches():
 
 @pytest.mark.asyncio
 async def test_we_tile_vertical_hotkey_dispatches():
-    app = TyuiApp(launch_mode="we", initial_paths=[_make_file()])
+    app = DundersApp(launch_mode="we", initial_paths=[_make_file()])
     async with app.run_test() as pilot:
         await pilot.pause()
         calls: list[str] = []
@@ -62,7 +62,7 @@ async def test_we_tile_vertical_hotkey_dispatches():
 
 @pytest.mark.asyncio
 async def test_alt_h_toggles_show_hidden_on_active_panel(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         panel = app._active_panel()

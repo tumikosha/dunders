@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tyui.fm.console.window import ConsoleContent
+from dunders.fm.console.window import ConsoleContent
 
 
 async def test_append_increments_line_count():
@@ -46,12 +46,12 @@ async def test_mouse_wheel_scrolls_buffer(tmp_path):
     _on_mouse_scroll_{up,down} to scroll the buffer directly.
     """
     from textual import events
-    from tyui.app import TyuiApp
+    from dunders.app import DundersApp
 
     # Use a non-panel launch mode (cli): in fm/we-mc Ctrl+O now drops into the
     # mc-style command screen, while editor/cli still toggle the embedded
     # console window this test exercises.
-    app = TyuiApp(launch_mode="cli", initial_path=tmp_path)
+    app = DundersApp(launch_mode="cli", initial_path=tmp_path)
     async with app.run_test(size=(80, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()

@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from tyui.app import TyuiApp
-from tyui.fm.user_menu import MacroContext, expand_macros
-from tyui.fm.user_menu_dialog import UserMenuDialog
-from tyui.fm.user_menu_loader import global_menu_path
+from dunders.app import DundersApp
+from dunders.fm.user_menu import MacroContext, expand_macros
+from dunders.fm.user_menu_dialog import UserMenuDialog
+from dunders.fm.user_menu_loader import global_menu_path
 
 
 async def _settle(pilot):
@@ -12,7 +12,7 @@ async def _settle(pilot):
 
 
 async def test_f2_seeds_and_opens_editor_when_no_menu(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         app.action_user_menu()
@@ -22,10 +22,10 @@ async def test_f2_seeds_and_opens_editor_when_no_menu(tmp_path):
 
 
 async def test_f2_opens_dialog_when_menu_exists(tmp_path):
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Alpha\n```\necho alpha\n```\n", encoding="utf-8"
     )
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         app.action_user_menu()
@@ -53,10 +53,10 @@ class _FakeHandover:
 
 
 async def test_selecting_entry_runs_expanded_body_with_panel_cwd(tmp_path):
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Echo dir\n```\necho %d\n```\n", encoding="utf-8"
     )
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         fake = _FakeHandover()
@@ -78,10 +78,10 @@ async def test_entry_that_cds_moves_active_panel(tmp_path):
     # panel there (the handover reports the resulting cwd via last_cwd).
     sub = tmp_path / "sub"
     sub.mkdir()
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Go\n```\ncd sub\n```\n", encoding="utf-8"
     )
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         app._handover = _FakeHandover(ends_at=sub)
@@ -93,10 +93,10 @@ async def test_entry_that_cds_moves_active_panel(tmp_path):
 
 
 async def test_entry_without_cd_keeps_panel(tmp_path):
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Echo\n```\necho hi\n```\n", encoding="utf-8"
     )
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # last_cwd reports the same dir -> panel must not move.
@@ -109,10 +109,10 @@ async def test_entry_without_cd_keeps_panel(tmp_path):
 
 
 async def test_prompt_macro_asks_then_runs(tmp_path):
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Greet\n```\necho %{Name}\n```\n", encoding="utf-8"
     )
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         fake = _FakeHandover()
@@ -129,9 +129,9 @@ async def test_prompt_macro_asks_then_runs(tmp_path):
 
 
 async def test_f4_opens_menu_file_in_editor(tmp_path):
-    menu = tmp_path / ".tyui.menu.md"
+    menu = tmp_path / ".dunders.menu.md"
     menu.write_text("## X\n\n### (a) Alpha\n```\necho alpha\n```\n", encoding="utf-8")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         app.action_user_menu()
@@ -139,7 +139,7 @@ async def test_f4_opens_menu_file_in_editor(tmp_path):
         await pilot.press("f4")
         await _settle(pilot)
         # an editor window for the menu file is now open
-        from tyui.windowing.editor import EditorContent
+        from dunders.windowing.editor import EditorContent
         editors = [
             w for w in app.desktop.windows
             if isinstance(getattr(w, "content", None), EditorContent)
@@ -150,12 +150,12 @@ async def test_f4_opens_menu_file_in_editor(tmp_path):
 async def test_user_menu_in_editor_uses_edited_file_macros(tmp_path):
     # When the User Menu is invoked from a focused editor, %f/%d must resolve
     # to the edited file, not the (still-present) file panel.
-    (tmp_path / ".tyui.menu.md").write_text(
+    (tmp_path / ".dunders.menu.md").write_text(
         "## X\n\n### (a) Path\n```\necho %d/%f\n```\n", encoding="utf-8"
     )
     f = tmp_path / "myfile.py"
     f.write_text("x = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         fake = _FakeHandover()

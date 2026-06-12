@@ -8,8 +8,8 @@ hex values get approximated.
 
 import pytest
 
-from tyui.windowing.themes.loader import list_themes, load_theme
-from tyui.windowing.themes.modern_dark import modern_dark
+from dunders.windowing.themes.loader import list_themes, load_theme
+from dunders.windowing.themes.modern_dark import modern_dark
 
 # xterm-256 colour cube: each channel is one of these six levels.
 CUBE = frozenset({0x00, 0x5F, 0x87, 0xAF, 0xD7, 0xFF})

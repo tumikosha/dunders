@@ -1,5 +1,5 @@
-import tyui.windowing.core.buffer as buffer_mod
-from tyui.windowing.core.buffer import TextBuffer
+import dunders.windowing.core.buffer as buffer_mod
+from dunders.windowing.core.buffer import TextBuffer
 
 
 class TestTextBufferCut:

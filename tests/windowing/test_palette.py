@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from tyui.windowing.frame import BorderStyle
-from tyui.windowing.palette import (
+from dunders.windowing.frame import BorderStyle
+from dunders.windowing.palette import (
     DotBackground,
     GridBackground,
     Palette,
@@ -13,8 +13,8 @@ from tyui.windowing.palette import (
     Style,
     Theme,
 )
-from tyui.windowing.themes import modern_dark
-from tyui.windowing.themes.loader import (
+from dunders.windowing.themes import modern_dark
+from dunders.windowing.themes.loader import (
     ThemeLoadError,
     list_themes,
     load_theme,

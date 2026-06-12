@@ -1,5 +1,5 @@
 import json
-from tyui.windowing.core.macro import MacroRecorder, MacroAction, MacroStorage
+from dunders.windowing.core.macro import MacroRecorder, MacroAction, MacroStorage
 
 
 class TestMacroRecorder:

@@ -5,9 +5,9 @@ from textual.app import App, ComposeResult
 
 from textual.widgets.text_area import Selection
 
-from tyui.fm.commandline import CommandLine
-from tyui.fm.console.history import History
-from tyui.windowing.core import clipboard
+from dunders.fm.commandline import CommandLine
+from dunders.fm.console.history import History
+from dunders.windowing.core import clipboard
 
 
 class _Probe(App):

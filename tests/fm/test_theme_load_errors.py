@@ -9,9 +9,9 @@ file) and therefore in the Options menu. Selecting it routes through
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.config import user_config
-from tyui.windowing.themes import loader
+from dunders.app import DundersApp
+from dunders.config import user_config
+from dunders.windowing.themes import loader
 
 
 def _seed_theme(tmp_path, monkeypatch, name, body):
@@ -42,7 +42,7 @@ def test_load_theme_rejects_invalid_color(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_apply_broken_theme_does_not_crash(tmp_path, monkeypatch):
     _seed_broken_theme(tmp_path, monkeypatch)
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         before = app.desktop.palette.theme.name
         notes: list[tuple] = []
@@ -64,7 +64,7 @@ async def test_startup_falls_back_and_notifies_when_persisted_theme_broken(
     # Persist the broken theme as the one to paint on startup.
     user_config.set_theme("broken")
 
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     notes: list[tuple] = []
     monkeypatch.setattr(app, "notify", lambda *a, **k: notes.append((a, k)))
     async with app.run_test() as pilot:
@@ -82,7 +82,7 @@ async def test_startup_falls_back_when_persisted_theme_has_invalid_color(
     _seed_theme(tmp_path, monkeypatch, "badcolor", _BAD_COLOR_THEME)
     user_config.set_theme("badcolor")
 
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     notes: list[tuple] = []
     monkeypatch.setattr(app, "notify", lambda *a, **k: notes.append((a, k)))
     async with app.run_test() as pilot:

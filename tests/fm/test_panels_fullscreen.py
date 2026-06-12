@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Window
-from tyui.windowing.editor import EditorContent
+from dunders.app import DundersApp
+from dunders.windowing import Window
+from dunders.windowing.editor import EditorContent
 
 
 async def _settle(pilot):
@@ -29,7 +29,7 @@ def _focus_panel_on_file(app, panel_id, file_path):
 
 @pytest.mark.asyncio
 async def test_ctrl_p_resolves_to_panels_fullscreen():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         cmd = app.dispatcher.hotkey_lookup("ctrl+p")
@@ -40,7 +40,7 @@ async def test_ctrl_p_resolves_to_panels_fullscreen():
 async def test_panels_fullscreen_minimizes_editor_and_tiles(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Enter Project View to spawn an editor and narrow the tree.
@@ -69,7 +69,7 @@ async def test_panels_fullscreen_minimizes_editor_and_tiles(tmp_path):
         assert right.region.x + right.region.width == W
 
         # Focus landed on a file panel.
-        from tyui.fm.file_panel import FilePanel
+        from dunders.fm.file_panel import FilePanel
         assert isinstance(app.focused, FilePanel)
         assert app.desktop.focused_window in (left, right)
 
@@ -77,7 +77,7 @@ async def test_panels_fullscreen_minimizes_editor_and_tiles(tmp_path):
 @pytest.mark.asyncio
 async def test_panels_fullscreen_fills_full_height_over_console(tmp_path):
     """With a console open, panels normally get the top half; Ctrl+P fills all."""
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Bring up the default console (bottom-half split).
@@ -108,7 +108,7 @@ async def test_panels_fullscreen_fills_full_height_over_console(tmp_path):
 
 @pytest.mark.asyncio
 async def test_panels_fullscreen_reveals_hidden_panel(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Hide the right panel (Ctrl+2 toggle path).

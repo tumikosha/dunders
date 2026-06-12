@@ -1,6 +1,6 @@
 """Smoke + behaviour tests for the F3 hex viewer.
 
-The integration tests boot a real `TyuiApp` to confirm that opening a binary
+The integration tests boot a real `DundersApp` to confirm that opening a binary
 or oversized file routes F3 through `HexViewerContent` (mmap-backed) instead
 of pre-loading the file via `read_text()`.
 """
@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.fm.hex_viewer import HexViewerContent, HexViewerWidget
-from tyui.windowing import Desktop
+from dunders.app import DundersApp
+from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
+from dunders.windowing import Desktop
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ async def test_f3_on_binary_file_opens_hex_viewer(
     target = workdir / "blob.bin"
     target.write_bytes(big_binary_file.read_bytes())
 
-    app = TyuiApp(launch_mode="fm", initial_path=str(workdir))
+    app = DundersApp(launch_mode="fm", initial_path=str(workdir))
     async with app.run_test() as pilot:
         await pilot.pause()
         # Sanity: the heuristic agrees this file goes to the hex viewer.
@@ -98,7 +98,7 @@ async def test_f3_on_small_text_file_uses_text_viewer(tmp_path: Path) -> None:
     """Heuristic: small ASCII file should NOT trigger the hex viewer."""
     target = tmp_path / "tiny.txt"
     target.write_text("hello world\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._should_use_hex_viewer(target) is False

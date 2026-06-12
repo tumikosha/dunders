@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.file_entry import FileEntry
-from tyui.fm.sort import SortOrder, sort_entries
+from dunders.fm.file_entry import FileEntry
+from dunders.fm.sort import SortOrder, sort_entries
 
 
 def _entry(name: str, *, is_dir: bool = False, size: int = 0, mtime: float = 0.0) -> FileEntry:

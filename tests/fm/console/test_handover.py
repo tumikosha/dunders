@@ -5,11 +5,11 @@ from contextlib import contextmanager
 
 import pytest
 
-from tyui.fm.console.handover import SubprocessHandover
+from dunders.fm.console.handover import SubprocessHandover
 
 
 class _FakeApp:
-    """Stand-in for TyuiApp: suspend() is a no-op context manager."""
+    """Stand-in for DundersApp: suspend() is a no-op context manager."""
 
     def __init__(self):
         self.notes = []
@@ -46,7 +46,7 @@ def test_subprocess_handover_runs_in_suspend_and_returns_rc(tmp_path):
     # command still leads and its exit status is preserved.
     assert calls["cmd"].startswith("htop\n")
     assert "pwd >" in calls["cmd"]
-    assert "exit $__tyui_rc" in calls["cmd"]
+    assert "exit $__dunders_rc" in calls["cmd"]
 
 
 def test_subprocess_handover_captures_cwd_after_cd(tmp_path):
@@ -69,7 +69,7 @@ def test_subprocess_handover_cwd_unchanged_without_cd(tmp_path):
     assert h.last_cwd.resolve() == tmp_path.resolve()
 
 
-from tyui.fm.console.handover import RelayHandover, make_handover
+from dunders.fm.console.handover import RelayHandover, make_handover
 
 
 def test_make_handover_suspend_mode_picks_subprocess():
@@ -159,7 +159,7 @@ def test_relay_send_command_cds_to_cwd_and_carries_no_sentinel():
     assert text.endswith("htop\n")
     assert "cd " in text
     assert "'/tmp/some dir'" in text  # shlex-quoted path
-    assert "TYUI_END" not in text
+    assert "DUNDERS_END" not in text
 
 
 def test_relay_sync_cwd_cds_to_panel_dir_with_no_command():
@@ -224,14 +224,14 @@ def test_relay_command_screen_syncs_cwd_to_panel(monkeypatch, tmp_path):
 
 
 def test_prompt_hook_setup_writes_rc_to_fifo():
-    from tyui.fm.console.handover import _prompt_hook_setup
+    from dunders.fm.console.handover import _prompt_hook_setup
 
-    fifo = "/tmp/tyui-test.fifo"
+    fifo = "/tmp/dunders-test.fifo"
     for shell in ("zsh", "bash", "sh", "fish-unknown"):
         setup = _prompt_hook_setup(shell, fifo)
         assert fifo in setup          # the marker is routed to the FIFO path
         assert "printf" in setup
-        assert "TYUI_END" not in setup  # no in-band stdout sentinel anymore
+        assert "DUNDERS_END" not in setup  # no in-band stdout sentinel anymore
 
 
 def test_subprocess_command_screen_delegates_to_relay_on_posix_tty(
@@ -254,7 +254,7 @@ def test_subprocess_command_screen_falls_back_without_tty(monkeypatch, tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     ran = []
     monkeypatch.setattr(
-        "tyui.fm.console.handover.subprocess.run",
+        "dunders.fm.console.handover.subprocess.run",
         lambda *a, **k: ran.append((a, k)),
     )
     h = SubprocessHandover(_FakeApp())
@@ -294,7 +294,7 @@ def test_relay_runs_real_command(tmp_path):
         rc = h._pump([], h._proc.fd, out)
         assert rc == 0
         assert b"marker-hi" in out.getvalue()
-        assert b"TYUI_END" not in out.getvalue()  # no marker leaks to stdout
+        assert b"DUNDERS_END" not in out.getvalue()  # no marker leaks to stdout
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
@@ -330,16 +330,16 @@ def test_relay_capture_cwd_follows_cd(tmp_path):
 
 
 def test_cwd_capture_wrap_preserves_command_and_exit_status():
-    from tyui.fm.console.handover import _cwd_capture_wrap
+    from dunders.fm.console.handover import _cwd_capture_wrap
 
     wrapped = _cwd_capture_wrap("make all", "/tmp/x")
     assert wrapped.startswith("make all\n")
     assert "pwd > /tmp/x" in wrapped
-    assert wrapped.strip().endswith("exit $__tyui_rc")
+    assert wrapped.strip().endswith("exit $__dunders_rc")
 
 
 def test_read_pwd_file_reads_and_unlinks(tmp_path):
-    from tyui.fm.console.handover import _read_pwd_file
+    from dunders.fm.console.handover import _read_pwd_file
 
     f = tmp_path / "pwd"
     f.write_text("/some/dir\n", encoding="utf-8")
@@ -416,7 +416,7 @@ def test_interactive_relay_consumes_fifo_markers_without_exiting():
         out = io.BytesIO()
         h._interactive_relay(stdin_r, master, out)
         assert b"out" in out.getvalue()
-        assert b"TYUI_END" not in out.getvalue()
+        assert b"DUNDERS_END" not in out.getvalue()
     finally:
         os.close(fr)
         os.close(fw)

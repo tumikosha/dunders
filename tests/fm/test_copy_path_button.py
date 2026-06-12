@@ -1,8 +1,8 @@
 import pytest
 from textual.geometry import Offset
 
-from tyui.app import TyuiApp
-from tyui.windowing.core import clipboard
+from dunders.app import DundersApp
+from dunders.windowing.core import clipboard
 
 
 def _panel_window(app, win_id):
@@ -14,7 +14,7 @@ def _panel_window(app, win_id):
 
 @pytest.mark.asyncio
 async def test_panels_have_copy_box(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         for wid in ("panel-left", "panel-right"):
@@ -26,7 +26,7 @@ async def test_panels_have_copy_box(tmp_path):
 
 @pytest.mark.asyncio
 async def test_hit_test_copy_box_after_close(tmp_path):
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         win = _panel_window(app, "panel-left")
@@ -38,7 +38,7 @@ async def test_hit_test_copy_box_after_close(tmp_path):
 @pytest.mark.asyncio
 async def test_copy_box_click_copies_cwd_and_notifies(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         copied = []

@@ -1,8 +1,8 @@
 """Tests for EditorWidget."""
 
 import pytest
-from tyui.windowing.editor.widget import EditorWidget
-from tyui.windowing.core.buffer import TextBuffer
+from dunders.windowing.editor.widget import EditorWidget
+from dunders.windowing.core.buffer import TextBuffer
 
 
 def test_editor_widget_creates_with_empty_buffer():

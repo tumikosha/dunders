@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tyui.fm.console.ansi import AnsiParser, Segment, Style
+from dunders.fm.console.ansi import AnsiParser, Segment, Style
 
 
 def _parse_all(text: bytes) -> list[list[Segment]]:

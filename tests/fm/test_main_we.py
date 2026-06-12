@@ -1,4 +1,4 @@
-from tyui.main import _resolve_we_args, main_we
+from dunders.main import _resolve_we_args, main_we
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def test_wew_forces_suspend(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# main_we integration (monkeypatched TyuiApp)
+# main_we integration (monkeypatched DundersApp)
 # ---------------------------------------------------------------------------
 
 def _capture_app(monkeypatch):
@@ -88,7 +88,7 @@ def _capture_app(monkeypatch):
         def run(self):
             captured["ran"] = True
 
-    monkeypatch.setattr("tyui.main.TyuiApp", _FakeApp)
+    monkeypatch.setattr("dunders.main.DundersApp", _FakeApp)
     return captured
 
 

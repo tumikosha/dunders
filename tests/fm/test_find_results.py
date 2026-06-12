@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 
-from tyui.fm.find_file import FindOptions, FindResult
-from tyui.fm.find_results import SearchResultsContent
+from dunders.fm.find_file import FindOptions, FindResult
+from dunders.fm.find_results import SearchResultsContent
 
 
 def _opts() -> FindOptions:

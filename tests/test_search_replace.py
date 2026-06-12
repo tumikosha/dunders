@@ -1,6 +1,6 @@
-from tyui.windowing.core.buffer import TextBuffer
-from tyui.windowing.core.search import SearchOptions
-from tyui.windowing.editor.widget import EditorWidget
+from dunders.windowing.core.buffer import TextBuffer
+from dunders.windowing.core.search import SearchOptions
+from dunders.windowing.editor.widget import EditorWidget
 
 
 def _w(text: str) -> EditorWidget:

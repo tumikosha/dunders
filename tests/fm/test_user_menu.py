@@ -1,4 +1,4 @@
-from tyui.fm.user_menu import MenuEntry, parse_menu
+from dunders.fm.user_menu import MenuEntry, parse_menu
 
 SAMPLE = """\
 # User Menu
@@ -53,7 +53,7 @@ def test_parse_menu_empty_and_garbage():
     assert parse_menu("just prose, no headings\n") == []
 
 
-from tyui.fm.user_menu import MacroContext, collect_prompts, expand_macros
+from dunders.fm.user_menu import MacroContext, collect_prompts, expand_macros
 
 
 def _ctx(**kw):

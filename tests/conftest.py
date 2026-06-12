@@ -2,7 +2,7 @@
 
 Redirect XDG_CONFIG_HOME to a per-test tmp dir so anything that reads or
 writes the user config (e.g. theme persistence) is fully isolated from the
-developer's real ``~/.config/tyui`` and starts from a clean slate.
+developer's real ``~/.config/dunders`` and starts from a clean slate.
 """
 
 import pytest

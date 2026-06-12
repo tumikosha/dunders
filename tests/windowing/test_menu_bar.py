@@ -4,7 +4,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
-from tyui.windowing import (
+from dunders.windowing import (
     Desktop,
     Dropdown,
     Menu,
@@ -151,7 +151,7 @@ class TestDropdown:
 
     @pytest.mark.asyncio
     async def test_demo_menu_bar_integration(self):
-        from tyui.windowing.demo.app import WindowingDemo
+        from dunders.windowing.demo.app import WindowingDemo
 
         app = WindowingDemo()
         async with app.run_test(size=(100, 30)) as pilot:

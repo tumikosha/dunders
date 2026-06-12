@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.actions import (
+from dunders.fm.actions import (
     OpError,
     OpResult,
     copy_paths,

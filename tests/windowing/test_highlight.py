@@ -1,4 +1,4 @@
-from tyui.windowing.core.highlight import SyntaxHighlighter, token_to_role
+from dunders.windowing.core.highlight import SyntaxHighlighter, token_to_role
 
 
 def test_detect_by_filename_python():
@@ -83,7 +83,7 @@ def test_tokenize_multiline_string():
 
 
 def test_palette_has_syntax_roles():
-    from tyui.windowing.themes.modern_dark import modern_dark
+    from dunders.windowing.themes.modern_dark import modern_dark
     for role in (
         "keyword", "name", "function", "class", "string",
         "number", "comment", "operator", "builtin", "error",
@@ -93,9 +93,9 @@ def test_palette_has_syntax_roles():
 
 
 def test_should_highlight_threshold(monkeypatch):
-    from tyui.windowing.editor import widget as widget_mod
-    from tyui.windowing.editor.widget import EditorWidget
-    from tyui.windowing.core.buffer import TextBuffer
+    from dunders.windowing.editor import widget as widget_mod
+    from dunders.windowing.editor.widget import EditorWidget
+    from dunders.windowing.core.buffer import TextBuffer
 
     buf = TextBuffer.from_string("x = 1\n")
     buf.file_path = "foo.py"

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Window
+from dunders.app import DundersApp
+from dunders.windowing import Window
 
 
 async def _settle(pilot):
@@ -19,7 +19,7 @@ async def _settle(pilot):
 
 @pytest.mark.asyncio
 async def test_panels_have_close_box_and_hide_on_close_flag():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await _settle(pilot)
         for pid in ("panel-left", "panel-right"):
@@ -30,7 +30,7 @@ async def test_panels_have_close_box_and_hide_on_close_flag():
 
 @pytest.mark.asyncio
 async def test_close_box_hides_panel_instead_of_destroying_it():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await _settle(pilot)
         win = app.desktop.query_one("#panel-left", Window)
@@ -48,7 +48,7 @@ async def test_close_box_hides_panel_instead_of_destroying_it():
 
 @pytest.mark.asyncio
 async def test_toggle_visibility_hides_then_shows_only_that_panel():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await _settle(pilot)
         right = app.desktop.query_one("#panel-right", Window)
@@ -69,7 +69,7 @@ async def test_toggle_visibility_hides_then_shows_only_that_panel():
 
 @pytest.mark.asyncio
 async def test_toggle_commands_registered_with_hotkeys():
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await _settle(pilot)
         reg = app.command_registry
@@ -88,7 +88,7 @@ async def test_toggle_commands_registered_with_hotkeys():
 @pytest.mark.asyncio
 async def test_toggle_hotkey_routes_through_on_key():
     """The full key path (App.on_key -> router) toggles the panel."""
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await _settle(pilot)
         right = app.desktop.query_one("#panel-right", Window)

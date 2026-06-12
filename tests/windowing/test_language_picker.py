@@ -2,9 +2,9 @@ from pathlib import Path
 
 from pygments.lexers import get_lexer_by_name
 
-from tyui.app import TyuiApp
-from tyui.windowing.editor.content import EditorContent
-from tyui.windowing.editor.language_picker import (
+from dunders.app import DundersApp
+from dunders.windowing.editor.content import EditorContent
+from dunders.windowing.editor.language_picker import (
     LanguagePickerContent,
     language_entries,
 )
@@ -44,7 +44,7 @@ async def test_picker_sets_editor_language(tmp_path):
     f.write_text('{"a": 1}\n')
     # `editor` launch mode mounts a placeholder; open a real editor window so
     # we have a live EditorContent whose highlighter we can assert on.
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         app._open_editor_window(Path(f))

@@ -11,29 +11,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`tyui` — terminal text editor + Norton Commander/mc-style file manager built on
+`dunders` — terminal text editor + Norton Commander/mc-style file manager built on
 [Textual](https://textual.textualize.io/), with a Turbo Vision-inspired
 windowing layer, code folding, macros, and an embedded CLI/agent mode. Python
-≥3.12, single binary `tyui` exposed via `tyui.main:main`.
+≥3.12, single binary `dunders` exposed via `dunders.main:main`.
 
 ## Commands
 
 Project uses `uv` (lockfile present) but standard `pip`/`pipx` works.
 
 ```bash
-# Install in editable mode (creates `tyui` script in PATH)
+# Install in editable mode (creates `dunders` script in PATH)
 pipx install --force -e .            # see install_global.sh
 # or for dev with the test extra
 uv sync --extra dev                  # or: pip install -e '.[dev]'
 
 # Run the app
-tyui                                  # fm-mode (two panels)
-tyui path/to/file                     # editor on a file
-tyui path/to/dir                      # fm seeded at dir
-tyui --cli                            # agent/CLI mode
+dunders                                  # fm-mode (two panels)
+dunders path/to/file                     # editor on a file
+dunders path/to/dir                      # fm seeded at dir
+dunders --cli                            # agent/CLI mode
 
 # Run the windowing demo (separate executable inside the repo)
-python -m tyui.windowing.demo
+python -m dunders.windowing.demo
 
 # Tests
 pytest                               # full suite (pytest-asyncio in auto mode)
@@ -52,10 +52,10 @@ async test functions don't need explicit `@pytest.mark.asyncio`.
 
 The codebase is split into three concentric layers. Read in this order:
 
-### 1. `tyui.windowing` — Turbo Vision-style framework on Textual
+### 1. `dunders.windowing` — Turbo Vision-style framework on Textual
 
 Generic, app-agnostic windowing system. Public API is re-exported from
-`tyui/windowing/__init__.py`; never reach into submodules from outside.
+`dunders/windowing/__init__.py`; never reach into submodules from outside.
 
 - `Desktop` (`desktop.py`) hosts a stack of `Window`s with z-order and
   `focused_window` tracking. `WindowManager` provides tile/cascade/maximize.
@@ -77,12 +77,12 @@ Generic, app-agnostic windowing system. Public API is re-exported from
 - `windowing/editor/` is the embeddable editor: `EditorWidget` (focusable
   text widget) and `EditorContent` (the `WindowContent` wrapper with split
   view, search panel, replace, macro dialog).
-- `windowing/themes/` loads palettes from YAML (`tyui/themes/*.yaml`) plus the
+- `windowing/themes/` loads palettes from YAML (`dunders/themes/*.yaml`) plus the
   `modern_dark` default.
-- `windowing/demo/` is a standalone `python -m tyui.windowing.demo` runner
-  used to exercise the framework in isolation; it does NOT pull in `tyui.fm`.
+- `windowing/demo/` is a standalone `python -m dunders.windowing.demo` runner
+  used to exercise the framework in isolation; it does NOT pull in `dunders.fm`.
 
-### 2. `tyui.fm` — file-manager domain
+### 2. `dunders.fm` — file-manager domain
 
 NC-style panels and file ops, built on top of `windowing`.
 
@@ -103,9 +103,9 @@ NC-style panels and file ops, built on top of `windowing`.
   sniff as binary, so multi-GB files don't slurp into memory.
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 
-### 3. `tyui.app` — top-level shell
+### 3. `dunders.app` — top-level shell
 
-`TyuiApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and
+`DundersApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and
 mounts the initial window set based on `launch_mode`
 (`fm`/`editor`/`cli`). It owns:
 
@@ -129,7 +129,7 @@ mounts the initial window set based on `launch_mode`
   registered by `FilePanel.get_commands()` and routed via the focused window
   through `CommandRouter`. Editor hotkeys (Save/Find/Split/Fold) come from
   `EditorContent.get_commands()`. Only mechanical keys (F9 menu, F10 quit,
-  Esc, Tab, Alt+L/R, Shift+Tab) live in `TyuiApp.BINDINGS`. Don't add a
+  Esc, Tab, Alt+L/R, Shift+Tab) live in `DundersApp.BINDINGS`. Don't add a
   panel/editor action to `BINDINGS` — both paths firing will call the action
   twice.
 - **Modal gating.** Almost every `action_*` calls `_has_active_modal()` first
@@ -158,27 +158,27 @@ tests; widgets and the app shell have async smoke/integration tests
 
 ### Configuration
 
-- `tyui/config/defaults.py` — fold rules, default key bindings, default
+- `dunders/config/defaults.py` — fold rules, default key bindings, default
   settings (tab size, line numbers, fold-by-indent, etc.).
-- `tyui/config/user_config.py` — persisted user preferences in
-  `$XDG_CONFIG_HOME/tyui/config.json` (stdlib JSON, atomic best-effort
+- `dunders/config/user_config.py` — persisted user preferences in
+  `$XDG_CONFIG_HOME/dunders/config.json` (stdlib JSON, atomic best-effort
   writes, fault-tolerant reads). Currently stores the selected `theme`;
   `app._resolve_initial_theme()` reads it at startup and `_apply_theme(...,
   persist=True)` writes it on a user switch. Tests isolate it via an autouse
   `XDG_CONFIG_HOME` fixture in `tests/conftest.py`.
 - Theme palettes load from TOML: the built-in `modern_dark` plus example
-  themes in `tyui/windowing/themes/examples/*.toml`, discovered by
-  `list_themes()` and parsed by `tyui/windowing/themes/loader.py`. The
+  themes in `dunders/windowing/themes/examples/*.toml`, discovered by
+  `list_themes()` and parsed by `dunders/windowing/themes/loader.py`. The
   Options menu / `theme.cycle` (Ctrl+T) are built dynamically from that list.
   A complete theme defines all 42 roles in `modern_dark` (older `turbo_blue`
   / `midnight_commander` examples are partial at 21 roles).
 - Per-`vibe/general.md`, user hotkeys/macros are also intended to live under
-  `~/.config/tyui/` (those loaders not implemented yet).
+  `~/.config/dunders/` (those loaders not implemented yet).
 - User Menu (F2): mc/far-style command menu defined in Markdown. Loaded from
-  `./.tyui.menu.md` (active panel dir) merged over `~/.config/tyui/menu.md`.
+  `./.dunders.menu.md` (active panel dir) merged over `~/.config/dunders/menu.md`.
   `##` = section, `###` = entry with optional `(x)` hotkey, body = first fenced
   code block. Macros: `%f %d %t %s %F %D %x %b %%` and interactive `%{Prompt}`.
   Bodies run through the handover (panel cwd). F4 in the dialog edits the source
-  file; first F2 with no file seeds an example. See `tyui/fm/user_menu.py`
+  file; first F2 with no file seeds an example. See `dunders/fm/user_menu.py`
   (pure parser/macros), `user_menu_loader.py` (I/O), `user_menu_dialog.py`
   (modal).

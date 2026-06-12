@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.console.backends.subprocess_be import SubprocessBackend
+from dunders.fm.console.backends.subprocess_be import SubprocessBackend
 
 
 pytestmark = pytest.mark.skipif(

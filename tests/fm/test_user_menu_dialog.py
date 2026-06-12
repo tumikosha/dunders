@@ -2,9 +2,9 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 
-from tyui.fm.user_menu import MenuEntry
-from tyui.fm.user_menu_loader import Row
-from tyui.fm.user_menu_dialog import UserMenuDialog
+from dunders.fm.user_menu import MenuEntry
+from dunders.fm.user_menu_loader import Row
+from dunders.fm.user_menu_dialog import UserMenuDialog
 
 
 def _rows():
@@ -12,7 +12,7 @@ def _rows():
     glob = MenuEntry(hotkey="g", title="Global cmd", body="echo global", section="Global")
     return [
         Row(kind="header", text="Local"),
-        Row(kind="entry", entry=local, source=Path("/local/.tyui.menu.md")),
+        Row(kind="entry", entry=local, source=Path("/local/.dunders.menu.md")),
         Row(kind="separator"),
         Row(kind="header", text="Global"),
         Row(kind="entry", entry=glob, source=Path("/global/menu.md")),

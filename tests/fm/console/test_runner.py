@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.console.registry import ConsoleRegistry
-from tyui.fm.console.runner import CommandRunner, ParsedCommand
+from dunders.fm.console.registry import ConsoleRegistry
+from dunders.fm.console.runner import CommandRunner, ParsedCommand
 
 
 # --- mock target -------------------------------------------------------

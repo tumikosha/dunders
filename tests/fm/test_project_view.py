@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Window
-from tyui.windowing.editor import EditorContent
+from dunders.app import DundersApp
+from dunders.windowing import Window
+from dunders.windowing.editor import EditorContent
 
 
 async def _settle(pilot):
@@ -19,7 +19,7 @@ def _editor_windows(app):
 
 
 async def test_layout_project_view_left_tree_geometry():
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         left = app.desktop.query_one("#panel-left", Window)
@@ -38,7 +38,7 @@ async def test_layout_project_view_left_tree_geometry():
 
 
 async def test_layout_project_view_right_tree_geometry():
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         left = app.desktop.query_one("#panel-left", Window)
@@ -69,7 +69,7 @@ def _focus_panel_on_file(app, panel_id, file_path):
 async def test_f2_in_left_panel_opens_project_view(tmp_path):
     f = tmp_path / "hello.py"
     f.write_text("print('hi')\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)
@@ -97,7 +97,7 @@ async def test_f2_in_left_panel_opens_project_view(tmp_path):
 async def test_f2_in_right_panel_docks_tree_right(tmp_path):
     f = tmp_path / "hello.py"
     f.write_text("print('hi')\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-right", f)
@@ -122,7 +122,7 @@ async def test_f2_minimizes_existing_editor(tmp_path):
     f1.write_text("a = 1\n")
     f2 = tmp_path / "b.py"
     f2.write_text("b = 2\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f1)
@@ -144,7 +144,7 @@ async def test_f2_minimizes_existing_editor(tmp_path):
 
 async def test_f2_on_directory_is_noop(tmp_path):
     (tmp_path / "subdir").mkdir()
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", tmp_path / "subdir")
@@ -160,7 +160,7 @@ async def test_f2_on_directory_is_noop(tmp_path):
 async def test_f2_in_editor_reveals_left_tree(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Enter Project View from the left panel to get a real editor window.
@@ -191,7 +191,7 @@ async def test_f2_in_editor_reveals_left_tree(tmp_path):
 async def test_f2_in_editor_focuses_tree(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)
@@ -214,7 +214,7 @@ async def test_f2_in_editor_focuses_tree(tmp_path):
 async def test_f2_in_editor_uses_remembered_tree_side(tmp_path):
     f1 = tmp_path / "a.py"
     f1.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Enter Project View from the RIGHT panel so the tree side is remembered.
@@ -240,7 +240,7 @@ async def test_f2_in_editor_uses_remembered_tree_side(tmp_path):
 async def test_f2_commands_registered(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         panel = _focus_panel_on_file(app, "panel-left", f)
@@ -255,7 +255,7 @@ async def test_f2_commands_registered(tmp_path):
 async def test_f1_hotkey_routes_from_panel(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)
@@ -271,7 +271,7 @@ async def test_f1_hotkey_routes_from_panel(tmp_path):
 async def test_toggle_panel_clears_project_view_state(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)
@@ -288,11 +288,11 @@ async def test_toggle_panel_clears_project_view_state(tmp_path):
 async def test_f2_switches_tree_to_short_view(tmp_path):
     """Entering Project View narrows the tree panel to Short view; exiting via
     a panel toggle restores the panel's previous view mode."""
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
 
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         panel = app.desktop.query_one("#panel-left", Window).content
@@ -312,11 +312,11 @@ async def test_f2_switches_tree_to_short_view(tmp_path):
 
 async def test_closing_editor_restores_tree_view_mode(tmp_path):
     """Closing the Project View editor restores the tree's previous view mode."""
-    from tyui.fm.panel_view import PanelViewMode
+    from dunders.fm.panel_view import PanelViewMode
 
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         panel = app.desktop.query_one("#panel-left", Window).content
@@ -337,7 +337,7 @@ async def test_closing_editor_exits_project_view(tmp_path):
     _project_tree_panel_id and restore the normal two-panel layout."""
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)
@@ -370,7 +370,7 @@ async def test_closing_editor_exits_project_view(tmp_path):
 async def test_project_view_survives_resize(tmp_path, width, height):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
-    app = TyuiApp(launch_mode="fm", initial_path=str(tmp_path))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         _focus_panel_on_file(app, "panel-left", f)

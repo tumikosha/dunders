@@ -1,6 +1,6 @@
 import pytest
 
-from tyui.app import TyuiApp
+from dunders.app import DundersApp
 
 
 def _panel_windows(app):
@@ -11,7 +11,7 @@ def _panel_windows(app):
 @pytest.mark.asyncio
 async def test_we_mc_mounts_visible_panels_and_handover(tmp_path):
     # Force suspend mode so no real PTY/tty is needed under pytest.
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         panels = _panel_windows(app)
@@ -23,20 +23,20 @@ async def test_we_mc_mounts_visible_panels_and_handover(tmp_path):
 
 
 def test_we_mc_constructor_stores_terminal_mode():
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     assert app.launch_mode == "we-mc"
     assert app.terminal_mode == "suspend"
 
 
 def test_terminal_mode_defaults_to_relay():
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     assert app.terminal_mode == "relay"
 
 
 def test_is_panel_mode_covers_fm_and_we_mc():
-    assert TyuiApp(launch_mode="fm")._is_panel_mode() is True
-    assert TyuiApp(launch_mode="we-mc")._is_panel_mode() is True
-    assert TyuiApp(launch_mode="editor")._is_panel_mode() is False
+    assert DundersApp(launch_mode="fm")._is_panel_mode() is True
+    assert DundersApp(launch_mode="we-mc")._is_panel_mode() is True
+    assert DundersApp(launch_mode="editor")._is_panel_mode() is False
 
 
 class _SpyHandover:
@@ -58,7 +58,7 @@ class _SpyHandover:
 
 @pytest.mark.asyncio
 async def test_we_mc_command_routes_to_handover(tmp_path):
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         spy = _SpyHandover()
@@ -69,7 +69,7 @@ async def test_we_mc_command_routes_to_handover(tmp_path):
 
 @pytest.mark.asyncio
 async def test_we_mc_cd_does_not_invoke_handover(tmp_path):
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         spy = _SpyHandover()
@@ -84,7 +84,7 @@ async def test_we_mc_command_that_cds_moves_active_panel(tmp_path):
     # reports it via last_cwd) follows the active panel — like User Menu entries.
     sub = tmp_path / "sub"
     sub.mkdir()
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend",
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend",
                   initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -99,7 +99,7 @@ async def test_we_mc_command_that_cds_moves_active_panel(tmp_path):
 
 @pytest.mark.asyncio
 async def test_we_mc_ctrl_o_shows_command_screen(tmp_path):
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         spy = _SpyHandover()
@@ -113,7 +113,7 @@ async def test_fm_ctrl_o_shows_command_screen(tmp_path):
     # fm mode Ctrl+O drops into the mc-style command screen too: every typed
     # command already routes through the handover, so the old embedded console
     # window would just be empty. Ctrl+O should match we-mc behaviour.
-    app = TyuiApp(launch_mode="fm", terminal_mode="suspend")
+    app = DundersApp(launch_mode="fm", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         spy = _SpyHandover()
@@ -124,7 +124,7 @@ async def test_fm_ctrl_o_shows_command_screen(tmp_path):
 
 @pytest.mark.asyncio
 async def test_we_mc_shutdown_called_on_unmount(tmp_path):
-    app = TyuiApp(launch_mode="we-mc", terminal_mode="suspend")
+    app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
         await pilot.pause()
         spy = _SpyHandover()
@@ -135,11 +135,11 @@ async def test_we_mc_shutdown_called_on_unmount(tmp_path):
 
 @pytest.mark.asyncio
 async def test_wheel_over_inactive_panel_activates_and_scrolls(tmp_path):
-    from tyui.fm.file_panel import FilePanel
+    from dunders.fm.file_panel import FilePanel
 
     for i in range(10):
         (tmp_path / f"f{i:02d}.txt").write_text("x")
-    app = TyuiApp(launch_mode="fm", initial_path=tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
         panels = list(app.query(FilePanel))

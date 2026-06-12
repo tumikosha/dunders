@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from tyui.app import TyuiApp
-from tyui.windowing import Window
+from dunders.app import DundersApp
+from dunders.windowing import Window
 
 
 async def _settle(pilot):
@@ -26,7 +26,7 @@ async def _settle(pilot):
 
 @pytest.mark.parametrize("width,height", [(160, 50), (70, 20)])
 async def test_fm_panels_stay_tiled_after_resize(width, height):
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         await pilot.resize_terminal(width, height)
@@ -42,7 +42,7 @@ async def test_fm_panels_stay_tiled_after_resize(width, height):
 
 @pytest.mark.parametrize("width,height", [(160, 50), (200, 60), (70, 20)])
 async def test_maximized_window_tracks_desktop_on_resize(width, height):
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         left = app.desktop.query_one("#panel-left", Window)
@@ -63,7 +63,7 @@ async def test_maximized_window_tracks_desktop_on_resize(width, height):
 async def test_we_mode_relayout_on_resize(tmp_path, width, height):
     f = tmp_path / "a.py"
     f.write_text("x = 1\n")
-    app = TyuiApp(launch_mode="we", initial_paths=[str(f)])
+    app = DundersApp(launch_mode="we", initial_paths=[str(f)])
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot)
         # Reveal both file panels (hidden by default in we mode).

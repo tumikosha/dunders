@@ -1,10 +1,10 @@
 from textual.app import App, ComposeResult
 
-from tyui.windowing.editor.widget import EditorWidget
-from tyui.windowing.core.buffer import TextBuffer
-from tyui.windowing.palette import Palette
-from tyui.windowing.themes.modern_dark import modern_dark
-from tyui.windowing.editor.content import EditorContent
+from dunders.windowing.editor.widget import EditorWidget
+from dunders.windowing.core.buffer import TextBuffer
+from dunders.windowing.palette import Palette
+from dunders.windowing.themes.modern_dark import modern_dark
+from dunders.windowing.editor.content import EditorContent
 
 
 class _Host(App):

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from textual.app import App, ComposeResult
 
-from tyui.fm.dialogs import FindFileDialog
-from tyui.fm.find_file import FindOptions
+from dunders.fm.dialogs import FindFileDialog
+from dunders.fm.find_file import FindOptions
 
 
 class _Harness(App):

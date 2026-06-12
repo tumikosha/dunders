@@ -3,8 +3,8 @@
 import pytest
 from textual.app import App, ComposeResult
 
-from tyui.fm.dialogs import DialogButton
-from tyui.windowing.editor.replace_dialog import ReplaceAllDialog
+from dunders.fm.dialogs import DialogButton
+from dunders.windowing.editor.replace_dialog import ReplaceAllDialog
 
 
 class _RHarness(App):

@@ -1,4 +1,4 @@
-# tyui
+# dunders
 
 > **T**erminal · **Y**our · **U**niversal · **I**ntelligence
 
@@ -6,10 +6,10 @@ A Norton Commander–style terminal file manager, text editor, and LLM-agent
 CLI for the modern shell — built on
 [Textual](https://textual.textualize.io/).
 
-The name `tyui` is the four QWERTY keys right after `qwer`y — picked in the
-same spirit as vim's `hjkl`. The CLI command is **`tyui`**.
+The name `dunders` is the four QWERTY keys right after `qwer`y — picked in the
+same spirit as vim's `hjkl`. The CLI command is **`dunders`**.
 
-`tyui` brings back the dual-pane workflow of `mc` / Far Manager — but with a
+`dunders` brings back the dual-pane workflow of `mc` / Far Manager — but with a
 real windowing layer (Turbo Vision–inspired), code folding, recordable
 macros, a command palette, and an embedded LLM/agent CLI mode.
 
@@ -19,22 +19,22 @@ macros, a command palette, and an embedded LLM/agent CLI mode.
 ## Quick install (any OS — one line)
 
 Installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, then installs
-`tyui` (plus the `we` / `wew` launchers) into an isolated environment — no
+`dunders` (plus the `__` / `__w` launchers) into an isolated environment — no
 system Python needed.
 
 **Linux / macOS / WSL** (bash/zsh):
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force git+https://github.com/tumikosha/tyui.git
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force git+https://github.com/tumikosha/dunders.git
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force git+https://github.com/tumikosha/tyui.git
+irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force git+https://github.com/tumikosha/dunders.git
 ```
 
-Then run `tyui`. (Already have `uv`? Just `uv tool install git+https://github.com/tumikosha/tyui.git`.)
+Then run `dunders`. (Already have `uv`? Just `uv tool install git+https://github.com/tumikosha/dunders.git`.)
 
 ## Features
 
@@ -46,7 +46,7 @@ Then run `tyui`. (Already have `uv`? Just `uv tool install git+https://github.co
 - **Recordable macros** with persistent storage.
 - **Hex viewer** for binary or large files (mmap-backed, switches in
   automatically above 4 MiB).
-- **Turbo Vision–style windowing layer** (`tyui.windowing`) — reusable in
+- **Turbo Vision–style windowing layer** (`dunders.windowing`) — reusable in
   other Textual apps. Tile, cascade, maximize, modal dialogs, command
   palette, themable via YAML.
 - **Mouse support** everywhere, including the menu bar and status bar.
@@ -57,7 +57,7 @@ Then run `tyui`. (Already have `uv`? Just `uv tool install git+https://github.co
 ### Zero-Python install via [uv](https://docs.astral.sh/uv/) (recommended)
 
 `uv` is a single static binary. It installs Python for you, then installs
-`tyui` into an isolated environment and puts the `tyui` command on your
+`dunders` into an isolated environment and puts the `dunders` command on your
 `PATH`. No system Python required.
 
 ```bash
@@ -67,32 +67,32 @@ curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS / Linux
 #   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 # Or via package manager: brew install uv  /  pipx install uv  /  scoop install uv
 
-# 2. Install tyui (uv fetches Python 3.12+ automatically if missing)
-uv tool install tyui
+# 2. Install dunders (uv fetches Python 3.12+ automatically if missing)
+uv tool install dunders
 
 # 3. Run
-tyui
+dunders
 ```
 
 Try it once without installing:
 
 ```bash
-uvx --from tyui tyui          # downloads, runs in a temp env, then forgets
+uvx --from dunders dunders          # downloads, runs in a temp env, then forgets
 ```
 
 Upgrade / uninstall:
 
 ```bash
-uv tool upgrade tyui
-uv tool uninstall tyui
+uv tool upgrade dunders
+uv tool uninstall dunders
 ```
 
 ### If you already have Python 3.12+
 
 ```bash
-pipx install tyui            # preferred — isolated, on $PATH
+pipx install dunders            # preferred — isolated, on $PATH
 # or, inside an active venv:
-pip install tyui
+pip install dunders
 ```
 
 Requires Python 3.12+ in any path above.
@@ -100,11 +100,25 @@ Requires Python 3.12+ in any path above.
 ## Usage
 
 ```bash
-tyui                  # two-panel file manager (default)
-tyui path/to/dir      # file manager seeded at a directory
-tyui path/to/file     # open a file in the editor
-tyui --cli            # agent / CLI mode (stub)
+dunders                  # two-panel file manager (default)
+dunders path/to/dir      # file manager seeded at a directory
+dunders path/to/file     # open a file in the editor
+dunders --cli            # agent / CLI mode (stub)
 ```
+
+### Short launchers
+
+Two extra console scripts are installed alongside `dunders`, differing only in
+how embedded shell commands hand off the terminal:
+
+| Command | Terminal mode | Platform |
+| ------- | ------------- | -------- |
+| `__`    | **relay** — persistent relay subshell | Linux / macOS |
+| `__w`   | **suspend** — suspend + subprocess, no persistent session | cross-platform (use this on Windows) |
+
+Both take the same arguments (files open in cascaded editor windows; a lone
+directory or no args open the mc-style file manager) and accept `--suspend`
+explicitly; `__w` is just `__ --suspend`.
 
 Inside the app:
 
@@ -126,8 +140,8 @@ the status bar when an editor window has focus.
 ## Development
 
 ```bash
-git clone https://github.com/tumikosha/qwe tyui
-cd tyui
+git clone https://github.com/tumikosha/qwe dunders
+cd dunders
 uv sync --extra dev          # or: pip install -e '.[dev]'
 
 pytest                       # full suite
@@ -139,17 +153,17 @@ The repository ships a standalone windowing demo to exercise the framework
 without the file-manager layer:
 
 ```bash
-python -m tyui.windowing.demo
+python -m dunders.windowing.demo
 ```
 
 ## Project layout
 
-The PyPI distribution is named **`tyui`**; the importable Python package and
-the CLI command are both **`tyui`**.
+The PyPI distribution is named **`dunders`**; the importable Python package and
+the CLI command are both **`dunders`**.
 
 ```
-tyui/
-├── app.py            # TyuiApp shell — wires menus, panels, dispatcher
+dunders/
+├── app.py            # DundersApp shell — wires menus, panels, dispatcher
 ├── main.py           # entry point (argparse)
 ├── fm/               # file-manager domain (panels, dialogs, file ops)
 ├── windowing/        # Turbo Vision–style framework on Textual
@@ -167,7 +181,7 @@ contributors and AI coding assistants.
 ## Terminal limitations on macOS
 
 macOS **Terminal.app** does not report several modifier+key combinations to
-the application, so some editor shortcuts can't reach `tyui` there:
+the application, so some editor shortcuts can't reach `dunders` there:
 
 - `Shift+↑` / `Shift+↓` / `Shift+Home` / `Shift+End` — selection by line / to
   start/end of line. Terminal.app sends the same sequence as the unmodified

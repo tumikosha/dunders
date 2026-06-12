@@ -4,9 +4,9 @@ import pytest
 from textual import events
 from textual.app import App, ComposeResult
 
-from tyui.windowing.editor.content import EditorContent
-from tyui.windowing.editor.splitter import Splitter
-from tyui.windowing.content import WindowCommand
+from dunders.windowing.editor.content import EditorContent
+from dunders.windowing.editor.splitter import Splitter
+from dunders.windowing.content import WindowCommand
 
 
 def test_editor_content_creates_with_defaults():

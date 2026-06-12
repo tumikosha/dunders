@@ -1,11 +1,11 @@
 """Key Probe diagnostic window: opens via command and logs incoming keys."""
 
-from tyui.app import TyuiApp
-from tyui.fm.key_probe import KeyProbeContent
+from dunders.app import DundersApp
+from dunders.fm.key_probe import KeyProbeContent
 
 
 async def test_key_probe_command_opens_window():
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test() as pilot:
         assert app.dispatcher is not None
         app.dispatcher.dispatch("help.key_probe")
@@ -18,7 +18,7 @@ async def test_key_probe_command_opens_window():
 
 
 async def test_key_probe_logs_keypress():
-    app = TyuiApp(launch_mode="fm")
+    app = DundersApp(launch_mode="fm")
     async with app.run_test() as pilot:
         assert app.dispatcher is not None
         app.dispatcher.dispatch("help.key_probe")

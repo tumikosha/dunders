@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from tyui.fm.console.registry import ConsoleRegistry
+from dunders.fm.console.registry import ConsoleRegistry
 
 
 @dataclass

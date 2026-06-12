@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tyui.fm.file_entry import FileEntry, format_mtime, format_size
+from dunders.fm.file_entry import FileEntry, format_mtime, format_size
 
 
 def test_file_entry_is_frozen_dataclass():

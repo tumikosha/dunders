@@ -1,11 +1,11 @@
-"""Unit tests for the TV-style command dispatcher (tyui.windowing.commands)."""
+"""Unit tests for the TV-style command dispatcher (dunders.windowing.commands)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
 
-from tyui.windowing import (
+from dunders.windowing import (
     CommandDispatcher,
     CommandRegistry,
     CommandRouter,

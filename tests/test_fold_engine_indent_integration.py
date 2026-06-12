@@ -1,5 +1,5 @@
-from tyui.windowing.core.fold_engine import FoldEngine, FoldRegistry, FoldRule
-from tyui.windowing.core.indent_fold import IndentFoldRule
+from dunders.windowing.core.fold_engine import FoldEngine, FoldRegistry, FoldRule
+from dunders.windowing.core.indent_fold import IndentFoldRule
 
 
 def _engine(rules):

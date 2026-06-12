@@ -1,8 +1,8 @@
 import json
 import pytest
 from textual.app import App, ComposeResult
-from tyui.windowing.editor.content import EditorContent
-from tyui.windowing.editor.search_panel import SearchPanel
+from dunders.windowing.editor.content import EditorContent
+from dunders.windowing.editor.search_panel import SearchPanel
 
 
 class _Host(App):
@@ -60,7 +60,7 @@ async def test_records_replace_all_action_with_confirmation():
 async def test_replay_search_and_replace_all():
     app = _Host("foo foo foo")
     async with app.run_test() as pilot:
-        from tyui.windowing.core.macro import MacroAction
+        from dunders.windowing.core.macro import MacroAction
         actions = [
             MacroAction(
                 kind="search",
@@ -85,7 +85,7 @@ async def test_replay_search_and_replace_all():
 async def test_replay_old_keypress_macro_still_works():
     app = _Host("")
     async with app.run_test() as pilot:
-        from tyui.windowing.core.macro import MacroAction
+        from dunders.windowing.core.macro import MacroAction
         actions = [MacroAction(kind="keypress", data="a|a")]
         app.content._register_macro_replay(app, "ctrl+m", actions)
         await pilot.press("ctrl+m")
@@ -97,7 +97,7 @@ async def test_replay_old_keypress_macro_still_works():
 async def test_replay_bad_regex_search_does_not_crash():
     app = _Host("foo")
     async with app.run_test() as pilot:
-        from tyui.windowing.core.macro import MacroAction
+        from dunders.windowing.core.macro import MacroAction
         actions = [
             MacroAction(
                 kind="search",

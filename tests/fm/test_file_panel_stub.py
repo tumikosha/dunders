@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tyui.fm.file_panel import FilePanel
+from dunders.fm.file_panel import FilePanel
 
 
 def test_file_panel_stores_cwd_as_path():

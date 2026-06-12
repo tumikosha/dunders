@@ -1,8 +1,8 @@
-"""Unit tests for tyui.windowing.frame — pure rendering primitives."""
+"""Unit tests for dunders.windowing.frame — pure rendering primitives."""
 
 import pytest
 
-from tyui.windowing.frame import (
+from dunders.windowing.frame import (
     BorderSides,
     BorderStyle,
     Decorations,

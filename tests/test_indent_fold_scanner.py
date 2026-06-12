@@ -1,5 +1,5 @@
-from tyui.windowing.core.fold_engine import FoldRegion
-from tyui.windowing.core.indent_fold import IndentFoldRule, scan_indent_regions
+from dunders.windowing.core.fold_engine import FoldRegion
+from dunders.windowing.core.indent_fold import IndentFoldRule, scan_indent_regions
 
 
 def _rule(**overrides) -> IndentFoldRule:

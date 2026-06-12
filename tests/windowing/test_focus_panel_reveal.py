@@ -1,13 +1,13 @@
 """Focusing a panel must reveal it when it was mounted hidden (editor/cli modes)."""
 
-from tyui.app import TyuiApp
-from tyui.fm.file_panel import FilePanel
-from tyui.windowing import Window
+from dunders.app import DundersApp
+from dunders.fm.file_panel import FilePanel
+from dunders.windowing import Window
 
 
 async def test_focus_panel_reveals_only_requested_panel_on_top():
     # Editor launch mode mounts both panels hidden, with the editor on top.
-    app = TyuiApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.desktop is not None
@@ -37,7 +37,7 @@ async def test_focus_panel_survives_menu_close_restoration():
     # Reproduce the menu path: open the menu (captures the editor as the
     # pre-menu window), pick "focus panel", then close the menu — the panel
     # must remain on top rather than the editor being raised back.
-    app = TyuiApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.desktop is not None
@@ -54,7 +54,7 @@ async def test_focus_panel_survives_menu_close_restoration():
 
 async def test_focus_panel_focuses_already_visible_panel():
     # FM mode shows both panels; focusing must not break anything.
-    app = TyuiApp(launch_mode="fm", initial_path="/tmp")
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.desktop is not None

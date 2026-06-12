@@ -1,4 +1,4 @@
-"""Pure-logic tests for tyui.fm.find_file.walk."""
+"""Pure-logic tests for dunders.fm.find_file.walk."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 import threading
 from pathlib import Path
 
-from tyui.fm.find_file import FindOptions, parse_masks, walk
+from dunders.fm.find_file import FindOptions, parse_masks, walk
 
 
 def _opts(

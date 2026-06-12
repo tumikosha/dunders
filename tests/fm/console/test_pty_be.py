@@ -10,7 +10,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="pty backend is POSIX-only"
 )
 
-from tyui.fm.console.backends.pty_be import PtyBackend  # noqa: E402
+from dunders.fm.console.backends.pty_be import PtyBackend  # noqa: E402
 
 
 async def _drain(be: PtyBackend, cmd: str, cwd: Path, timeout: float = 10.0) -> tuple[bytes, int]:

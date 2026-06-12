@@ -1,7 +1,7 @@
 import pytest
 from textual.app import App, ComposeResult
 
-from tyui.fm.dialogs import ConfirmDialog
+from dunders.fm.dialogs import ConfirmDialog
 
 
 class _Harness(App):
@@ -69,7 +69,7 @@ async def test_confirm_dialog_renders_prompt():
         assert "Delete 7 items?" in str(prompt_widget.render())
 
 
-from tyui.fm.dialogs import InputDialog
+from dunders.fm.dialogs import InputDialog
 
 
 class _InputHarness(App):
@@ -122,7 +122,7 @@ async def test_input_dialog_initial_value():
 
 
 
-from tyui.fm.dialogs import ProgressDialog
+from dunders.fm.dialogs import ProgressDialog
 
 
 @pytest.mark.asyncio
@@ -237,7 +237,7 @@ async def test_progress_dialog_mouse_click_outside_button_is_ignored():
 # Tab / Shift+Tab / Left / Right and activate it via Enter — without
 # touching the mouse.
 
-from tyui.fm.dialogs import (
+from dunders.fm.dialogs import (
     CopyMoveDialog,
     NewFileDialog,
     ShadowButton,

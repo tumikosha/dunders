@@ -1,4 +1,4 @@
-from tyui.fm.user_menu_loader import (
+from dunders.fm.user_menu_loader import (
     Row,
     build_rows,
     global_menu_path,
@@ -12,7 +12,7 @@ GLOBAL = "## Global\n\n### (g) Global cmd\n```\necho global\n```\n"
 
 
 def test_load_merges_local_then_separator_then_global(tmp_path):
-    (tmp_path / ".tyui.menu.md").write_text(LOCAL, encoding="utf-8")
+    (tmp_path / ".dunders.menu.md").write_text(LOCAL, encoding="utf-8")
     global_menu_path().parent.mkdir(parents=True, exist_ok=True)
     global_menu_path().write_text(GLOBAL, encoding="utf-8")
 
@@ -46,7 +46,7 @@ def test_load_no_files(tmp_path):
 
 
 def test_seed_writes_once_and_is_parseable(tmp_path):
-    from tyui.fm.user_menu import parse_menu
+    from dunders.fm.user_menu import parse_menu
 
     path = seed_global_menu()
     assert path == global_menu_path()

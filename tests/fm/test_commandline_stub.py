@@ -1,7 +1,7 @@
 import pytest
 from textual.app import App, ComposeResult
 
-from tyui.fm.commandline import CommandLine
+from dunders.fm.commandline import CommandLine
 
 
 class _Harness(App):
