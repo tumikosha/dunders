@@ -1,7 +1,7 @@
 [project]
 name = "dunders"
 version = "0.1.0"
-description = "dunders — Terminal · Your · Universal · Intelligence. Norton Commander–style terminal file manager, editor, and LLM-agent CLI."
+description = "dunders — Norton Commander–style terminal file manager, text editor, and LLM-agent CLI built on Textual."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
