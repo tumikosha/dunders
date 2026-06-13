@@ -122,6 +122,13 @@ def default_registry() -> VfsRegistry:
     reg.register(LocalProvider())
     reg.register(ZipProvider())
     reg.register(FtpProvider())  # network provider; opened via "_" menu / ftp: prefix
+    # SFTP needs paramiko (optional dep); register only when it imports so the
+    # "sftp:" scheme simply doesn't appear otherwise.
+    try:
+        from dunders.fm.providers.sftp_provider import SftpProvider
+        reg.register(SftpProvider())
+    except ImportError:
+        pass
     # 7z is browsed via the external CLI; only offer the scheme when a binary
     # is present, so the panel never tries to enter a .7z it cannot open.
     if find_7z() is not None:
