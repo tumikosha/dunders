@@ -132,6 +132,10 @@ class FilePanel(WindowContent):
         # (стрелки, Enter, F-keys, ...).
         self._qs_query: str = ""
         self._qs_active: bool = False
+        # Async listing (network providers): a monotonic token discards stale
+        # scan results when the user navigates again before one returns.
+        self._scan_token: int = 0
+        self._loading: bool = False
 
     # ------------------------------------------------------------------
     # Location (VfsPath-backed, Path-compatible)
@@ -182,31 +186,115 @@ class FilePanel(WindowContent):
     # Listing
     # ------------------------------------------------------------------
 
-    def refresh_listing(self) -> None:
-        """Re-scan cwd, re-sort, clamp cursor, prune stale selections."""
+    def refresh_listing(self, *, focus_loc: VfsPath | None = None) -> None:
+        """Re-scan cwd, re-sort, clamp cursor, prune stale selections.
+
+        ``focus_loc``: after the listing is ready, move the cursor onto the entry
+        with this locator if present (used to keep the cursor on the same entry
+        across a re-sort, or to land on the dir/archive we came out of).
+        """
+        # Any new listing invalidates a pending async scan (its older token is
+        # discarded when it returns).
+        self._scan_token += 1
         provider = self._registry.resolve(self.cwd_loc)
+        if self._should_scan_async(provider):
+            self._scan_async(provider, self._scan_token, focus_loc)
+        else:
+            self._apply_rows(self._scan_now(provider), focus_loc)
+
+    def _should_scan_async(self, provider) -> bool:
+        """Off-thread scan for slow (network) providers — but only when mounted,
+        since a worker needs the running app. Unmounted (tests) → sync."""
+        if "slow" not in getattr(provider, "capabilities", frozenset()):
+            return False
         try:
-            raw = provider.scan(
+            return self.app is not None
+        except Exception:
+            return False
+
+    def _scan_async(self, provider, token: int, focus_loc: VfsPath | None) -> None:
+        """Show a loading row immediately, scan on a worker thread, then apply
+        the result on the UI thread — discarding it if a newer scan superseded."""
+        self._loading = True
+        self.cursor = 0
+        self.row_offset = 0
+        self.entries = MaterializedRowSource([self._loading_entry()])
+        self.window_title = f"{self._cwd_display()}  [loading…]"
+        self.refresh()
+        loc = self.cwd_loc
+        show_hidden = self.show_hidden
+
+        def _work() -> None:
+            try:
+                rows = provider.scan(loc, show_hidden=show_hidden, include_parent=True)
+                err: Exception | None = None
+            except Exception as exc:
+                rows, err = [], exc
+            try:
+                self.app.call_from_thread(
+                    self._finish_async_scan, token, loc, rows, err, focus_loc
+                )
+            except Exception:
+                pass  # app went away
+
+        self.run_worker(_work, thread=True, exclusive=False, group="panel-scan")
+
+    def _finish_async_scan(self, token, loc, rows, err, focus_loc) -> None:
+        # Stale: the user navigated again before this scan returned.
+        if token != self._scan_token or loc != self.cwd_loc:
+            return
+        self._loading = False
+        if err is not None:
+            try:
+                self.app.notify(f"Listing failed: {err}", severity="warning")
+            except Exception:
+                pass
+        self._apply_rows(rows, focus_loc)
+        self.refresh()
+
+    def _loading_entry(self) -> FileEntry:
+        return FileEntry(
+            loc=self.cwd_loc.child("\x00loading"),
+            name="⟳  loading…",
+            size=0, mtime=0.0, is_dir=False,
+        )
+
+    def _scan_now(self, provider) -> list[FileEntry]:
+        """Synchronous scan with the never-crash guard (local/zip/7z; also the
+        fallback when no app is mounted)."""
+        try:
+            return provider.scan(
                 self.cwd_loc, show_hidden=self.show_hidden, include_parent=True
             )
         except Exception as exc:
             # A provider scan must never crash the TUI (network drop, protocol
             # error, …). Degrade to an empty listing — Backspace/ascend still
             # works (it uses cwd_loc, not the entries) so the user can back out.
-            raw = []
             try:
                 self.app.notify(f"Listing failed: {exc}", severity="warning")
             except Exception:
                 pass  # unmounted (no active app) or notify unavailable
+            return []
+
+    def _apply_rows(
+        self, rows: list[FileEntry], focus_loc: VfsPath | None = None
+    ) -> None:
+        """Sort rows into the listing, place the cursor, prune selection."""
         self.entries = MaterializedRowSource(
-            sort_entries(raw, self.sort_order, descending=self.sort_descending)
+            sort_entries(rows, self.sort_order, descending=self.sort_descending)
         )
         if self.cursor >= len(self.entries):
             self.cursor = max(0, len(self.entries) - 1)
+        if focus_loc is not None:
+            for i, e in enumerate(self.entries):
+                if e.loc == focus_loc:
+                    self.cursor = i
+                    break
         live = {e.loc for e in self.entries}
         self.selection &= live
         self._ensure_cursor_visible()
         self.window_title = self._cwd_display()
+        self._loading = False
 
     def set_sort_order(
         self, order: SortOrder, *, descending: bool | None = None
@@ -223,13 +311,7 @@ class FilePanel(WindowContent):
         self.sort_descending = (
             descending if descending is not None else default_descending(order)
         )
-        self.refresh_listing()
-        if focused_loc is not None:
-            for i, e in enumerate(self.entries):
-                if e.loc == focused_loc:
-                    self.cursor = i
-                    self._ensure_cursor_visible()
-                    return
+        self.refresh_listing(focus_loc=focused_loc)
 
     def toggle_show_hidden(self) -> None:
         self.show_hidden = not self.show_hidden
@@ -283,26 +365,20 @@ class FilePanel(WindowContent):
         self.cursor = 0
         self.row_offset = 0
         self.selection.clear()
-        self.refresh_listing()
         # Cursor placement after a cwd change: if the prior location is visible
-        # in the new listing — i.e. we ascended (the parent dir is now
-        # showing the child we left) — put the cursor on it. Covers both
-        # Backspace (ascend) and Enter on the ".." row, which both go
-        # through this method. Descending leaves cursor at row 0 (which
-        # the entry-search below silently leaves alone since `return_loc` won't
-        # appear under a fresh child listing).
+        # in the new listing — i.e. we ascended (the parent dir is now showing
+        # the child we left) — land the cursor on it. Covers Backspace and Enter
+        # on "..". Descending leaves the cursor at row 0 (return_loc won't appear
+        # under a fresh child listing, so it's silently ignored).
+        return_loc = None
         if old != new_loc:
             return_loc = old
             if old.scheme != "file" and old.is_source_root:
-                # Exited an archive: land on the archive file itself, whose
-                # local path is the source root (old.loc never appears as an
-                # entry in the parent's local listing).
+                # Exited an archive: land on the archive file itself, whose local
+                # path is the source root (old.loc never appears as an entry in
+                # the parent's local listing).
                 return_loc = VfsPath.local(Path(old.root))
-            for i, e in enumerate(self.entries):
-                if e.loc == return_loc:
-                    self.cursor = i
-                    self._ensure_cursor_visible()
-                    break
+        self.refresh_listing(focus_loc=return_loc)
         self._post_path_changed(old, new_loc)
 
     def _post_path_changed(self, old: VfsPath, new: VfsPath) -> None:

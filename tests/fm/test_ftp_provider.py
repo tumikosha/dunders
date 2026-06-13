@@ -342,8 +342,12 @@ async def test_open_ftp_via_dunders_menu_navigates_panel(ftp_server, tmp_path):
         panel = app._active_panel()
         # "_" menu → FTP → type the connection string → opens & lists it.
         app._do_open_dunder("ftp", f"bob:secret@127.0.0.1:{port}/")
-        await pilot.pause()
         assert panel.cwd_loc.scheme == "ftp"
+        # FTP is a slow provider: listing is async, so wait for it to land.
+        for _ in range(30):
+            await pilot.pause()
+            if not panel._loading:
+                break
         names = {e.name for e in panel.entries if not e.is_parent}
         assert names == {"hello.txt", "dir"}
 

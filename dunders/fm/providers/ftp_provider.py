@@ -133,7 +133,7 @@ class FtpProvider:
 
     scheme = "ftp"
     display_name = "FTP"
-    capabilities = frozenset({"read", "write", "stream"})
+    capabilities = frozenset({"read", "write", "stream", "slow"})
 
     def __init__(self) -> None:
         self._creds: dict[str, tuple[str, int, str, str]] = {}
