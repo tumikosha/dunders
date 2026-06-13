@@ -19,9 +19,12 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+from dunders.core.vfs import VfsPath
 
 
 __all__ = [
@@ -32,17 +35,51 @@ __all__ = [
     "move_paths",
     "delete_paths",
     "mkdir_at",
+    "pack_paths",
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class OpError:
-    path: Path
+    """A per-item failure, identified by a VfsPath.
+
+    Cross-provider transfers (e.g. a failed read of a zip member) can report a
+    non-local locator, while local callers keep passing ``path=`` and reading
+    ``.path`` exactly as before.
+    """
+
+    loc: VfsPath
     reason: str
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        loc: VfsPath | None = None,
+        path: Path | str | None = None,
+    ) -> None:
+        if loc is None:
+            if path is None:
+                raise TypeError("OpError requires either loc= or path=")
+            loc = VfsPath.local(Path(path))
+        object.__setattr__(self, "loc", loc)
+        object.__setattr__(self, "reason", reason)
+
+    @property
+    def path(self) -> Path:
+        """Local path of the failed item (``file`` scheme only)."""
+        return self.loc.to_local()
+
+    def __str__(self) -> str:
+        where = self.loc.to_local() if self.loc.scheme == "file" else self.loc.as_uri()
+        return f"{where}: {self.reason}"
 
 
 @dataclass
 class OpResult:
+    # Destinations written (copy/move) or items affected (delete/mkdir/chmod).
+    # Local for filesystem ops and for extraction (zip -> local); a future
+    # upload (local -> sftp) would record remote VfsPaths here.
     succeeded: list[Path] = field(default_factory=list)
     errors: list[OpError] = field(default_factory=list)
     cancelled: bool = False
@@ -296,3 +333,105 @@ def delete_paths(
             continue
         result.succeeded.append(p)
     return result
+
+
+# --------------------------------------------------------------------------
+# Pack (create a new .zip from a local selection)
+# --------------------------------------------------------------------------
+
+
+def pack_paths(
+    sources: list[Path],
+    dest_zip: Path,
+    *,
+    base: Path,
+    on_progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> OpResult:
+    """Pack ``sources`` into a new ``dest_zip`` (ZIP_DEFLATED).
+
+    Arcnames are computed relative to ``base`` (the panel cwd) so a selection
+    packs by its visible names (``dir/sub/f.txt``, ``a.txt``), not by absolute
+    paths. Refuses to overwrite an existing ``dest_zip``. Per-file progress;
+    on cancel the partial archive is removed. Directory entries (including
+    empty dirs) are preserved.
+    """
+    result = OpResult()
+    if dest_zip.exists():
+        result.errors.append(
+            OpError(path=dest_zip, reason="destination already exists")
+        )
+        return result
+
+    total = _count_entries(sources)
+    counter = [0]
+
+    def _bump() -> None:
+        counter[0] += 1
+        if on_progress is not None:
+            on_progress(counter[0], total)
+
+    if on_progress is not None:
+        on_progress(0, total)
+
+    try:
+        with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for src in sources:
+                if _check_cancelled(cancel_event):
+                    raise _Cancelled
+                try:
+                    _pack_one(zf, src, base, _bump, cancel_event)
+                except _Cancelled:
+                    raise
+                except OSError as e:
+                    result.errors.append(OpError(path=src, reason=str(e)))
+                    continue
+        # _count_entries counts directories too, while we bump per file; land
+        # the bar at 100% on success regardless of that over-count.
+        if on_progress is not None:
+            on_progress(total, total)
+        result.succeeded.append(dest_zip)
+    except _Cancelled:
+        result.cancelled = True
+        dest_zip.unlink(missing_ok=True)
+    return result
+
+
+def _pack_one(
+    zf: zipfile.ZipFile,
+    src: Path,
+    base: Path,
+    bump: Callable[[], None],
+    cancel_event: threading.Event | None,
+) -> None:
+    """Write ``src`` (file or directory tree) into ``zf`` under base-relative
+    arcnames."""
+    if src.is_dir() and not src.is_symlink():
+        wrote_child = False
+        for dirpath, dirnames, filenames in os.walk(src):
+            if _check_cancelled(cancel_event):
+                raise _Cancelled
+            for name in filenames:
+                fpath = Path(dirpath) / name
+                zf.write(fpath, _arcname(fpath, base))
+                wrote_child = True
+                bump()
+            # Preserve empty directories with an explicit "dir/" entry.
+            if not dirnames and not filenames:
+                arc = _arcname(Path(dirpath), base)
+                zf.writestr(arc + "/", "")
+                wrote_child = True
+        if not wrote_child:
+            bump()
+    else:
+        zf.write(src, _arcname(src, base))
+        bump()
+
+
+def _arcname(path: Path, base: Path) -> str:
+    """Path inside the archive, relative to ``base`` (POSIX separators)."""
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        rel = Path(path.name)
+    return rel.as_posix()

@@ -2,8 +2,6 @@ import os
 import stat
 from pathlib import Path
 
-import pytest
-
 from dunders.fm.scan import scan_dir
 
 
@@ -76,35 +74,71 @@ def test_scan_dir_marks_executable_files(tmp_path: Path):
 
 
 def test_scan_dir_handles_unreadable_dir(tmp_path: Path, monkeypatch):
-    """If iterdir() raises, return parent-only (or empty) result, don't crash."""
+    """If os.scandir() raises, return parent-only (or empty) result, don't crash."""
     target = tmp_path / "locked"
     target.mkdir()
 
     def _raise(*_a, **_kw):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(Path, "iterdir", _raise)
+    monkeypatch.setattr(os, "scandir", _raise)
     entries = scan_dir(target, show_hidden=False, include_parent=True)
-    # Parent entry is still reachable through stat() of target.parent.
-    # The body of the listing is empty.
+    # Parent entry is still reachable through stat() of target.parent
+    # (which does not go through os.scandir). The body of the listing is empty.
     body = [e for e in entries if e.name != ".."]
     assert body == []
 
 
-def test_scan_dir_skips_vanished_children(tmp_path: Path, monkeypatch):
-    """A child whose lstat() raises (e.g., it was deleted between iterdir
-    and lstat) is silently skipped instead of crashing."""
-    (tmp_path / "alive").write_text("")
-    (tmp_path / "dead").write_text("")
+class _FakeDirEntry:
+    """Minimal os.DirEntry stand-in; `vanish` makes stat() raise."""
 
-    real_lstat = Path.lstat
+    def __init__(self, real: Path, *, vanish: bool = False):
+        self.name = real.name
+        self.path = str(real)
+        self._real = real
+        self._vanish = vanish
 
-    def _maybe_raise(self):
-        if self.name == "dead":
+    def stat(self, *, follow_symlinks: bool = True):
+        if self._vanish:
             raise FileNotFoundError("vanished")
-        return real_lstat(self)
+        return os.stat(self.path, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(Path, "lstat", _maybe_raise)
+    def is_symlink(self):
+        return self._real.is_symlink()
+
+    def is_dir(self, *, follow_symlinks: bool = True):
+        return self._real.is_dir()
+
+
+class _FakeScandir:
+    """Context-managed, iterable stand-in for os.scandir()'s return value."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def __iter__(self):
+        return iter(self._entries)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+def test_scan_dir_skips_vanished_children(tmp_path: Path, monkeypatch):
+    """A child whose stat() raises (e.g. deleted between readdir and stat)
+    is silently skipped instead of crashing."""
+    alive = tmp_path / "alive"
+    alive.write_text("")
+    dead = tmp_path / "dead"
+    dead.write_text("")
+
+    fake = _FakeScandir([
+        _FakeDirEntry(alive),
+        _FakeDirEntry(dead, vanish=True),
+    ])
+    monkeypatch.setattr(os, "scandir", lambda *_a, **_kw: fake)
     entries = scan_dir(tmp_path, show_hidden=False, include_parent=False)
     names = {e.name for e in entries}
     assert names == {"alive"}

@@ -8,6 +8,7 @@ and must not blow up on missing/locked filesystem state.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from dunders.fm.file_entry import FileEntry
@@ -55,36 +56,44 @@ def scan_dir(
                 # Parent unreadable — no parent row, just skip.
                 pass
 
+    # os.scandir reads d_type with the directory entry, so is_symlink/is_dir
+    # come for free without a syscall on regular files. Only the metadata
+    # (size/mtime/mode) costs one lstat-equivalent per child — down from the
+    # ~3 stats per child the old iterdir + lstat + is_dir + is_symlink did.
     try:
-        children = list(cwd.iterdir())
+        scan = os.scandir(cwd)
     except OSError:
         return entries
 
-    for child in children:
-        name = child.name
-        if not show_hidden and name.startswith("."):
-            continue
-        try:
-            st = child.lstat()
-        except OSError:
-            # vanished / permission-denied — skip silently
-            continue
-        is_symlink = child.is_symlink()
-        # is_dir() follows symlinks; that's the right behaviour for
-        # navigation (Enter on a symlink-to-dir descends into the target).
-        try:
-            is_dir = child.is_dir()
-        except OSError:
-            is_dir = False
-        is_executable = (not is_dir) and bool(st.st_mode & 0o111)
-        entries.append(FileEntry(
-            path=child,
-            name=name,
-            size=0 if is_dir else st.st_size,
-            mtime=st.st_mtime,
-            is_dir=is_dir,
-            is_symlink=is_symlink,
-            is_executable=is_executable,
-            mode=st.st_mode,
-        ))
+    with scan:
+        for entry in scan:
+            name = entry.name
+            if not show_hidden and name.startswith("."):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)  # lstat-equivalent, cached
+            except OSError:
+                # vanished / permission-denied — skip silently
+                continue
+            try:
+                is_symlink = entry.is_symlink()
+            except OSError:
+                is_symlink = False
+            # is_dir() follows symlinks; that's the right behaviour for
+            # navigation (Enter on a symlink-to-dir descends into the target).
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            is_executable = (not is_dir) and bool(st.st_mode & 0o111)
+            entries.append(FileEntry(
+                path=Path(entry.path),
+                name=name,
+                size=0 if is_dir else st.st_size,
+                mtime=st.st_mtime,
+                is_dir=is_dir,
+                is_symlink=is_symlink,
+                is_executable=is_executable,
+                mode=st.st_mode,
+            ))
     return entries

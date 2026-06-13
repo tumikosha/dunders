@@ -136,7 +136,7 @@ def test_panel_toggle_selection_marks_entry_and_advances_cursor(tmp_path: Path):
     a_idx = p.cursor
     a_path = p.entries[a_idx].path
     p.toggle_selection()
-    assert a_path in p.selection
+    assert a_path in p.selected_paths()
     assert p.cursor == a_idx + 1
 
 
@@ -199,10 +199,10 @@ def test_panel_refresh_drops_selection_for_vanished_entries(tmp_path: Path):
     p.refresh_listing()
     p.move_cursor(+1)
     p.toggle_selection()
-    assert f in p.selection
+    assert f in p.selected_paths()
     f.unlink()
     p.refresh_listing()
-    assert f not in p.selection
+    assert f not in p.selected_paths()
 
 
 from textual.app import App, ComposeResult  # noqa: E402
@@ -480,7 +480,7 @@ async def test_panel_keybinding_insert_toggles_selection(tmp_path: Path):
         p.focus()
         await pilot.press("insert")
         await pilot.pause()
-        assert (tmp_path / "a.txt") in p.selection
+        assert (tmp_path / "a.txt") in p.selected_paths()
 
 
 @pytest.mark.asyncio
@@ -583,9 +583,9 @@ async def test_panel_keybinding_shift_down_marks_and_moves_down(tmp_path: Path):
         await pilot.press("shift+down")
         await pilot.press("shift+down")
         await pilot.pause()
-        assert tmp_path / "a.txt" in p.selection
-        assert tmp_path / "b.txt" in p.selection
-        assert tmp_path / "c.txt" not in p.selection
+        assert tmp_path / "a.txt" in p.selected_paths()
+        assert tmp_path / "b.txt" in p.selected_paths()
+        assert tmp_path / "c.txt" not in p.selected_paths()
         assert p.entries[p.cursor].name == "c.txt"
 
 
@@ -603,9 +603,9 @@ async def test_panel_keybinding_shift_up_marks_and_moves_up(tmp_path: Path):
         await pilot.press("shift+up")
         await pilot.press("shift+up")
         await pilot.pause()
-        assert tmp_path / "c.txt" in p.selection
-        assert tmp_path / "b.txt" in p.selection
-        assert tmp_path / "a.txt" not in p.selection
+        assert tmp_path / "c.txt" in p.selected_paths()
+        assert tmp_path / "b.txt" in p.selected_paths()
+        assert tmp_path / "a.txt" not in p.selected_paths()
         assert p.entries[p.cursor].name == "a.txt"
 
 
@@ -623,8 +623,8 @@ async def test_panel_shift_arrow_unselects_when_already_selected(tmp_path: Path)
         await pilot.press("shift+up")
         await pilot.press("shift+down")
         await pilot.pause()
-        assert tmp_path / "a.txt" not in p.selection
-        assert tmp_path / "b.txt" in p.selection
+        assert tmp_path / "a.txt" not in p.selected_paths()
+        assert tmp_path / "b.txt" in p.selected_paths()
 
 
 def test_scan_populates_mode(tmp_path: Path):

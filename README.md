@@ -1,17 +1,23 @@
 # dunders
 
-> **T**erminal · **Y**our · **U**niversal · **I**ntelligence
+> **We ship the underscores. You write what goes between them.**
 
-A Norton Commander–style terminal file manager, text editor, and LLM-agent
-CLI for the modern shell — built on
-[Textual](https://textual.textualize.io/).
+An open-source **terminal platform** built on
+[Textual](https://textual.textualize.io/), where _everything is a panel_. At its
+core it's a Norton Commander–style dual-pane manager with an embedded text
+editor and an LLM-agent CLI — but the bigger idea is the blank between the
+underscores: the core ships `__`, and you fill in the rest.
 
-The name `dunders` is the four QWERTY keys right after `qwer`y — picked in the
-same spirit as vim's `hjkl`. The CLI command is **`dunders`**.
+Two panels aren't really about files. They're about any two sets of objects you
+can copy between — folders, archives, remote/cloud filesystems, containers,
+databases, API responses. `dunders` brings back the dual-pane workflow of `mc` /
+Far Manager — with a real windowing layer (Turbo Vision–inspired), code folding,
+recordable macros, a command palette, and an embedded LLM/agent CLI mode — and
+makes that surface extensible.
 
-`dunders` brings back the dual-pane workflow of `mc` / Far Manager — but with a
-real windowing layer (Turbo Vision–inspired), code folding, recordable
-macros, a command palette, and an embedded LLM/agent CLI mode.
+The CLI command is **`__`** or **`dunders`** (the four QWERTY keys right after `qwer`y,
+picked in the same spirit as vim's `hjkl`); the `__` is the platform's blank,
+waiting to be filled.
 
 > Status: **alpha**. Core file-manager and editor are usable; agent/CLI
 > mode is a stub.

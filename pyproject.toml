@@ -1,7 +1,7 @@
 [project]
 name = "dunders"
 version = "0.1.0"
-description = "dunders — Norton Commander–style terminal file manager, text editor, and LLM-agent CLI built on Textual."
+description = "dunders — fill in the blank: an open-source terminal platform on Textual where everything is a panel. We ship the underscores; you write what goes between them — a dual-pane EVERYTHING manager: files, editor, LLM-agent CLI, and whatever you plug in."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

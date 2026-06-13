@@ -25,14 +25,16 @@ from textual.containers import Vertical
 from textual.geometry import Offset, Size
 from textual.strip import Strip
 
+from dunders.core.vfs import VfsPath
 from dunders.fm.actions import (
     OpResult,
     chmod_paths,
-    copy_paths,
     delete_paths,
     mkdir_at,
-    move_paths,
+    pack_paths,
 )
+from dunders.fm.vfs_engine import transfer
+from dunders.fm.vfs_local import default_registry
 from dunders.fm.commandline import CommandLine
 from dunders.fm.console.backends import make_backend
 import dunders.fm.console.backends.subprocess_be as _subprocess_be  # noqa: F401 — registers "subprocess"
@@ -156,13 +158,22 @@ from dunders.windowing.helpers import ModalWindow  # noqa: E402
 @dataclass(frozen=True)
 class CopyMoveRequest:
     op: Literal["copy", "move"]
-    targets: list[Path]
+    targets: list[VfsPath]  # scheme-agnostic so archive members can be extracted
     dest: Path
+    base: Path  # source panel cwd — arcname root when the dest is a "zip:" target
 
 
 @dataclass(frozen=True)
 class DeleteRequest:
     targets: list[Path]
+
+
+@dataclass(frozen=True)
+class PackRequest:
+    """Create a new .zip from a local selection (F-menu "Create archive…")."""
+
+    targets: list[Path]
+    base: Path  # arcnames are relative to this (the source panel cwd)
 
 
 @dataclass(frozen=True)
@@ -341,6 +352,8 @@ class DundersApp(App):
             Path(p).expanduser() for p in (initial_paths or [])
         ]
         self.terminal_mode: TerminalMode = terminal_mode
+        # VFS provider registry for file operations routed through transfer().
+        self._vfs_registry = default_registry()
         # The active terminal-handover strategy in we-mc mode (None otherwise).
         self._handover = None
         self.desktop: Desktop | None = None
@@ -527,8 +540,32 @@ class DundersApp(App):
         if not isinstance(ctx, CopyMoveRequest):
             return
         raw = (event.value or "").strip()
+        # "zip:" prefix on the destination name packs the selection into a new
+        # archive instead of a plain copy (mirrors the zip VFS scheme).
+        if raw.startswith("zip:"):
+            self._pack_from_copy_dest(ctx, raw[len("zip:"):].strip())
+            return
         user_dest = Path(raw).expanduser() if raw else ctx.dest
         self._run_copy_move(ctx, user_dest)
+
+    def _pack_from_copy_dest(self, ctx: CopyMoveRequest, name: str) -> None:
+        """F5 with a 'zip:'-prefixed destination → pack the selection."""
+        if not name:
+            return
+        if not name.lower().endswith(".zip"):
+            name += ".zip"
+        target = Path(name).expanduser()
+        if not target.is_absolute():
+            target = ctx.dest / target
+        # Only local sources can be packed (extraction-from-archive is separate).
+        local: list[Path] = []
+        for loc in ctx.targets:
+            if loc.scheme == "file":
+                local.append(loc.to_local())
+        if not local:
+            self._warn_archive_unsupported()
+            return
+        self._run_pack(local, target, ctx.base)
 
     def on_copy_move_dialog_cancelled(
         self, event: CopyMoveDialog.Cancelled
@@ -553,22 +590,15 @@ class DundersApp(App):
             def _on_progress(i: int, n: int) -> None:
                 self.call_from_thread(progress.set_progress, i, n)
 
-            if req.op == "copy":
-                result = copy_paths(
-                    req.targets,
-                    dest_dir,
-                    rename_to=rename_to,
-                    on_progress=_on_progress,
-                    cancel_event=progress.cancel_event,
-                )
-            else:
-                result = move_paths(
-                    req.targets,
-                    dest_dir,
-                    rename_to=rename_to,
-                    on_progress=_on_progress,
-                    cancel_event=progress.cancel_event,
-                )
+            result = transfer(
+                self._vfs_registry,
+                req.targets,  # already VfsPath (may be zip-scheme for extraction)
+                VfsPath.local(dest_dir),
+                mode=req.op,
+                rename_to=rename_to,
+                on_progress=_on_progress,
+                cancel_event=progress.cancel_event,
+            )
             self.call_from_thread(self._finish_op, req.op, progress, result)
 
         self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
@@ -590,6 +620,28 @@ class DundersApp(App):
                 cancel_event=progress.cancel_event,
             )
             self.call_from_thread(self._finish_op, "delete", progress, result)
+
+        self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
+
+    def _run_pack(self, targets: list[Path], dest_zip: Path, base: Path) -> None:
+        if self.desktop is None:
+            return
+        progress = ProgressDialog(title="Packing", total=len(targets))
+        show_modal(self.desktop, progress, title="Create archive", size=(60, 7))
+        self.call_after_refresh(progress.focus)
+
+        def _worker() -> None:
+            def _on_progress(i: int, n: int) -> None:
+                self.call_from_thread(progress.set_progress, i, n)
+
+            result = pack_paths(
+                targets,
+                dest_zip,
+                base=base,
+                on_progress=_on_progress,
+                cancel_event=progress.cancel_event,
+            )
+            self.call_from_thread(self._finish_op, "pack", progress, result)
 
         self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
 
@@ -1038,6 +1090,7 @@ class DundersApp(App):
                 MenuItem(command_id="panel.move"),
                 MenuItem(command_id="panel.mkdir"),
                 MenuItem(command_id="panel.delete"),
+                MenuItem(command_id="panel.pack"),
                 MenuItem(command_id="panel.find_file"),
             ]),
             Menu("Right", [
@@ -1757,6 +1810,9 @@ class DundersApp(App):
         panel = self._active_panel()
         if panel is None or self.desktop is None:
             return
+        if panel.cwd_loc.scheme != "file":
+            self._warn_archive_unsupported()
+            return
         self._remember_active_panel_id()
         cwd = panel.cwd
         dialog = NewFileDialog(
@@ -1766,6 +1822,31 @@ class DundersApp(App):
             title="Mkdir",
         )
         show_modal(self.desktop, dialog, title="Mkdir", size=(60, 7))
+        self.call_after_refresh(dialog.focus_input)
+
+    def action_pack(self) -> None:
+        """Create a new .zip from the selection (File → Create archive…)."""
+        if self._has_active_modal():
+            return
+        panel = self._active_panel()
+        if panel is None or self.desktop is None:
+            return
+        if panel.cwd_loc.scheme != "file":
+            self._warn_archive_unsupported()  # packing from inside an archive: later
+            return
+        targets = panel.effective_targets()
+        if not targets:
+            return
+        self._remember_active_panel_id()
+        default = f"{targets[0].name}.zip" if len(targets) == 1 else "archive.zip"
+        dialog = NewFileDialog(
+            prompt=f"Create archive in {panel.cwd}:",
+            initial=default,
+            context=PackRequest(targets=targets, base=panel.cwd),
+            submit_label="Pack",
+            title="Create archive",
+        )
+        show_modal(self.desktop, dialog, title="Create archive", size=(60, 7))
         self.call_after_refresh(dialog.focus_input)
 
     def action_new(self) -> None:
@@ -1989,6 +2070,14 @@ class DundersApp(App):
             self._report_op_result("mkdir", result)
             self._refresh_panels()
             return
+        if isinstance(ctx, PackRequest):
+            name = event.value.strip()
+            if not name:
+                return
+            if not name.lower().endswith(".zip"):
+                name += ".zip"
+            self._run_pack(ctx.targets, ctx.base / name, ctx.base)
+            return
         if isinstance(ctx, NewFileRequest):
             name = event.value.strip()
             if not name:
@@ -2064,11 +2153,16 @@ class DundersApp(App):
         panel = self._active_panel()
         if panel is None or self.desktop is None:
             return
-        targets = panel.effective_targets()
+        # Source may be a non-local panel (e.g. inside a zip) — copy then
+        # extracts via the cross-provider transfer engine. VfsPath targets.
+        targets = panel.effective_target_locs()
         if not targets:
             return
         opposite = self._opposite_panel(panel)
         if opposite is None:
+            return
+        if opposite.cwd_loc.scheme != "file":
+            self._warn_archive_unsupported()  # can't write into an archive
             return
         self._remember_active_panel_id()
         dest = opposite.cwd
@@ -2084,7 +2178,7 @@ class DundersApp(App):
             initial=initial,
             ok_label=verb,
             title=verb,
-            context=CopyMoveRequest(op=op, targets=targets, dest=dest),
+            context=CopyMoveRequest(op=op, targets=targets, dest=dest, base=panel.cwd),
         )
         show_modal(self.desktop, dialog, title=verb, size=(72, 9))
         self.call_after_refresh(dialog.focus_input)
@@ -2100,7 +2194,25 @@ class DundersApp(App):
         entry = panel.entries[panel.cursor]
         if entry.is_dir:
             return  # F4 on a dir is a no-op
+        if not self._is_local_entry(entry):
+            self._warn_archive_unsupported()
+            return
         self._open_editor_window(entry.path, read_only=False)
+
+    @staticmethod
+    def _is_local_entry(entry) -> bool:
+        """True if `entry` is a real local-filesystem file/dir.
+
+        Inside a non-local source (e.g. a browsed zip) entry.path would raise,
+        and view/edit/mkdir there are not wired yet — read-only browse only.
+        """
+        return entry.loc.scheme == "file"
+
+    def _warn_archive_unsupported(self) -> None:
+        self.notify(
+            "Not available inside archives yet (read-only browse)",
+            severity="warning",
+        )
 
     def action_view(self) -> None:
         if self._has_active_modal():
@@ -2113,6 +2225,9 @@ class DundersApp(App):
         entry = panel.entries[panel.cursor]
         if entry.is_dir:
             return  # F3 on a dir is a no-op
+        if not self._is_local_entry(entry):
+            self._open_member_view(entry)  # read through the VFS provider
+            return
         self._open_editor_window(entry.path, read_only=True)
 
     def action_toggle_hidden(self) -> None:
@@ -2326,6 +2441,72 @@ class DundersApp(App):
         # the file listing immediately (the editor stays open on the right).
         self.desktop.focus_window(tree_win)
 
+    def _mount_maximized_content(self, content, *, title: str, win_id: str) -> None:
+        """Wrap a WindowContent in a born-maximized Window and add it.
+
+        Shared by the path-based editor/viewer and the in-archive member
+        viewer so window plumbing lives in one place.
+        """
+        dw, dh = self.desktop.usable_size.width, self.desktop.usable_size.height
+        win = make_window(
+            content,
+            title=title,
+            position=(0, 0),
+            size=(dw, dh),
+            decorations=Decorations(close_box=True, zoom_box=True, minimize_box=True, resize_grip=True),
+            id=win_id,
+        )
+        # Born maximized: pre-seed the restore rect so F5 / [↕] toggles back
+        # to a sensible windowed size instead of being a no-op.
+        win._saved_rect = (Offset(2, 1), Size(max(1, dw - 4), max(1, dh - 2)))
+        win.maximized = True
+        self.desktop.add_window(win)
+        # If the action was kicked off from the menu (File → View / Edit),
+        # the post-menu restore in `_on_menu_active_index_changed` would
+        # otherwise raise the original FilePanel back on top of the new
+        # editor. Redirect the restore target to the window we just made.
+        if self._pre_menu_focus is not None or self._pre_menu_window is not None:
+            self._pre_menu_window = win
+            self._pre_menu_focus = None
+
+    def _open_member_view(self, entry) -> None:
+        """F3/Enter on a file inside a non-local source (e.g. a browsed zip):
+        read it through its VFS provider and open a read-only text viewer.
+
+        Binary and oversized members are declined with a notification — the
+        hex viewer is mmap/path-based and can't yet back a virtual member.
+        """
+        if self.desktop is None:
+            return
+        if entry.size > self._HEX_VIEW_SIZE_THRESHOLD:
+            self.notify(
+                f"{entry.name}: too large to view inside an archive yet",
+                severity="warning",
+            )
+            return
+        provider = self._vfs_registry.resolve(entry.loc)
+        try:
+            with provider.open_read(entry.loc) as fh:
+                data = fh.read()
+        except OSError as exc:
+            self.notify(f"Cannot read {entry.name}: {exc}", severity="warning")
+            return
+        if b"\x00" in data[:8192]:
+            self.notify(
+                f"{entry.name}: binary file (not viewable in archives yet)",
+                severity="warning",
+            )
+            return
+        self._remember_active_panel_id()
+        self._editor_seq += 1
+        content = ViewerContent(
+            initial_text=data.decode("utf-8", errors="replace"),
+            file_path=entry.name,
+        )
+        self._mount_maximized_content(
+            content, title=f"View: {entry.name}", win_id=f"viewer-{self._editor_seq}"
+        )
+
     def _open_editor_window(self, path: Path, *, read_only: bool = False) -> None:
         if self.desktop is None:
             return
@@ -2373,27 +2554,7 @@ class DundersApp(App):
                     self._pre_menu_window = win
                     self._pre_menu_focus = None
                 return
-        dw, dh = self.desktop.usable_size.width, self.desktop.usable_size.height
-        win = make_window(
-            content,
-            title=title,
-            position=(0, 0),
-            size=(dw, dh),
-            decorations=Decorations(close_box=True, zoom_box=True, minimize_box=True, resize_grip=True),
-            id=win_id,
-        )
-        # Born maximized: pre-seed the restore rect so F5 / [↕] toggles back
-        # to a sensible windowed size instead of being a no-op.
-        win._saved_rect = (Offset(2, 1), Size(max(1, dw - 4), max(1, dh - 2)))
-        win.maximized = True
-        self.desktop.add_window(win)
-        # If the action was kicked off from the menu (File → View / Edit),
-        # the post-menu restore in `_on_menu_active_index_changed` would
-        # otherwise raise the original FilePanel back on top of the new
-        # editor. Redirect the restore target to the editor we just made.
-        if self._pre_menu_focus is not None or self._pre_menu_window is not None:
-            self._pre_menu_window = win
-            self._pre_menu_focus = None
+        self._mount_maximized_content(content, title=title, win_id=win_id)
 
     def on_file_panel_item_activated(
         self, event: FilePanel.ItemActivated
@@ -2403,6 +2564,9 @@ class DundersApp(App):
         # non-dir entries. An executable / runnable script is launched in the
         # console; everything else opens in the editor.
         if event.entry.is_dir:
+            return
+        if not self._is_local_entry(event.entry):
+            self._open_member_view(event.entry)  # read-only inside archives
             return
         cmd = self._executable_command(event.entry.path)
         if cmd is not None and self._run_in_console(cmd):
@@ -2681,6 +2845,9 @@ class DundersApp(App):
             return
         panel = self._active_panel()
         if panel is None or self.desktop is None:
+            return
+        if panel.cwd_loc.scheme != "file":
+            self._warn_archive_unsupported()
             return
         targets = panel.effective_targets()
         if not targets:

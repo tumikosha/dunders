@@ -18,6 +18,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.strip import Strip
 
+from dunders.core.vfs import VfsPath, VfsRegistry
 from dunders.fm.file_entry import FileEntry
 from dunders.fm.panel_view import (
     COL_SEP,
@@ -27,8 +28,9 @@ from dunders.fm.panel_view import (
     empty_row_text,
     is_multicolumn,
 )
-from dunders.fm.scan import scan_dir
+from dunders.fm.row_source import MaterializedRowSource, RowSource
 from dunders.fm.sort import SortOrder, default_descending, sort_entries
+from dunders.fm.vfs_local import default_registry
 from dunders.windowing.content import WindowCommand, WindowContent
 
 
@@ -92,20 +94,28 @@ class FilePanel(WindowContent):
         Binding("shift+up", "shift_select_up", show=False),
     ]
 
-    def __init__(self, cwd: str | Path = ".") -> None:
+    def __init__(
+        self, cwd: str | Path = ".", *, registry: VfsRegistry | None = None
+    ) -> None:
         super().__init__()
+        # The panel addresses its location with a VfsPath (`cwd_loc`) and reaches
+        # the filesystem only through a provider from `registry`, so the same
+        # widget lists a local dir, an archive, or a remote tree. `cwd` stays a
+        # Path property (getter/setter below) for backward compatibility with
+        # every host-app consumer and test that still speaks pathlib.
+        self._registry = registry if registry is not None else default_registry()
         # expanduser but NOT resolve: see dunders/fm/file_panel.py history —
         # canonicalising /tmp -> /private/tmp on macOS breaks user-visible
         # paths and round-trip equality in tests.
-        self.cwd: Path = Path(cwd).expanduser()
-        self.entries: list[FileEntry] = []
+        self.cwd = Path(cwd).expanduser()  # property setter -> self.cwd_loc
+        self.entries: RowSource = MaterializedRowSource()
         self.cursor: int = 0
         self.row_offset: int = 0
         self.sort_order: SortOrder = SortOrder.NAME
         self.sort_descending: bool = default_descending(SortOrder.NAME)
         self.show_hidden: bool = True
         self.view_mode: PanelViewMode = PanelViewMode.FULL
-        self.selection: set[Path] = set()
+        self.selection: set[VfsPath] = set()
         # Stash the cwd into the reactive backing field so consumers reading
         # window_title before mount (e.g. Phase-1 stub test) see something
         # meaningful. The reactive watcher won't fire until mount, at which
@@ -124,19 +134,62 @@ class FilePanel(WindowContent):
         self._qs_active: bool = False
 
     # ------------------------------------------------------------------
+    # Location (VfsPath-backed, Path-compatible)
+    # ------------------------------------------------------------------
+
+    @property
+    def cwd(self) -> Path:
+        """Current location as a local ``Path``.
+
+        Backed by :attr:`cwd_loc`; assigning a ``Path``/str rewraps it into a
+        ``file``-scheme locator. Inside a non-local source (e.g. a zip), there
+        is no real local path, so this degrades to the source's own path (the
+        ``.zip`` on disk) — a real ``Path`` — so host-app features that still
+        speak pathlib error cleanly rather than crash. File operations inside
+        archives are not wired yet (read-only browse).
+        """
+        if self.cwd_loc.scheme == "file":
+            return self.cwd_loc.to_local()
+        return Path(self.cwd_loc.root)
+
+    @cwd.setter
+    def cwd(self, value: str | Path | VfsPath) -> None:
+        self.cwd_loc = value if isinstance(value, VfsPath) else VfsPath.local(Path(value))
+
+    def _cwd_display(self) -> str:
+        """User-facing location string (window title), valid for any scheme."""
+        if self.cwd_loc.scheme == "file":
+            return str(self.cwd_loc.to_local())
+        return self.cwd_loc.as_uri()
+
+    def _is_archive_entry(self, entry: FileEntry) -> bool:
+        """A local ``.zip`` we can enter as a panel, given a zip provider."""
+        return (
+            entry.loc.scheme == "file"
+            and not entry.is_dir
+            and entry.loc.name.lower().endswith(".zip")
+            and "zip" in self._registry.schemes()
+        )
+
+    # ------------------------------------------------------------------
     # Listing
     # ------------------------------------------------------------------
 
     def refresh_listing(self) -> None:
         """Re-scan cwd, re-sort, clamp cursor, prune stale selections."""
-        raw = scan_dir(self.cwd, show_hidden=self.show_hidden, include_parent=True)
-        self.entries = sort_entries(raw, self.sort_order, descending=self.sort_descending)
+        provider = self._registry.resolve(self.cwd_loc)
+        raw = provider.scan(
+            self.cwd_loc, show_hidden=self.show_hidden, include_parent=True
+        )
+        self.entries = MaterializedRowSource(
+            sort_entries(raw, self.sort_order, descending=self.sort_descending)
+        )
         if self.cursor >= len(self.entries):
             self.cursor = max(0, len(self.entries) - 1)
-        live_paths = {e.path for e in self.entries}
-        self.selection &= live_paths
+        live = {e.loc for e in self.entries}
+        self.selection &= live
         self._ensure_cursor_visible()
-        self.window_title = str(self.cwd)
+        self.window_title = self._cwd_display()
 
     def set_sort_order(
         self, order: SortOrder, *, descending: bool | None = None
@@ -146,17 +199,17 @@ class FilePanel(WindowContent):
         ``descending`` defaults to the order's natural direction (e.g. NAME=A→Z,
         MTIME=newest first). Pass an explicit bool to flip direction.
         """
-        focused_path = (
-            self.entries[self.cursor].path if 0 <= self.cursor < len(self.entries) else None
+        focused_loc = (
+            self.entries[self.cursor].loc if 0 <= self.cursor < len(self.entries) else None
         )
         self.sort_order = order
         self.sort_descending = (
             descending if descending is not None else default_descending(order)
         )
         self.refresh_listing()
-        if focused_path is not None:
+        if focused_loc is not None:
             for i, e in enumerate(self.entries):
-                if e.path == focused_path:
+                if e.loc == focused_loc:
                     self.cursor = i
                     self._ensure_cursor_visible()
                     return
@@ -181,38 +234,58 @@ class FilePanel(WindowContent):
             return
         entry = self.entries[self.cursor]
         if entry.is_dir:
-            self._change_cwd(entry.path)
+            self._change_cwd_loc(entry.loc)
+            return
+        if self._is_archive_entry(entry):
+            # Enter a .zip as if it were a directory: switch to a zip locator
+            # at the archive root; the registry routes scans to ZipProvider.
+            archive = VfsPath(scheme="zip", root=str(entry.loc.to_local()), parts=())
+            self._change_cwd_loc(archive)
             return
         self.post_message(FilePanel.ItemActivated(self, entry))
 
     def ascend(self) -> None:
         """Backspace == cd .., positioning the cursor on the row we left."""
-        parent = self.cwd.parent
-        if parent == self.cwd:
-            return  # already at filesystem root
-        self._change_cwd(parent)
+        parent = self.cwd_loc.parent
+        if parent is None:
+            # At the source root. Inside an archive, step back out to the
+            # local folder that holds it; at a filesystem root, do nothing.
+            if self.cwd_loc.scheme == "file":
+                return
+            parent = VfsPath.local(Path(self.cwd_loc.root).parent)
+        self._change_cwd_loc(parent)
 
     def _change_cwd(self, new_cwd: Path) -> None:
-        old = self.cwd
-        self.cwd = new_cwd
+        """Back-compat Path entry point (host app / tests)."""
+        self._change_cwd_loc(VfsPath.local(Path(new_cwd)))
+
+    def _change_cwd_loc(self, new_loc: VfsPath) -> None:
+        old = self.cwd_loc
+        self.cwd_loc = new_loc
         self.cursor = 0
         self.row_offset = 0
         self.selection.clear()
         self.refresh_listing()
-        # Cursor placement after a cwd change: if the prior cwd is visible
+        # Cursor placement after a cwd change: if the prior location is visible
         # in the new listing — i.e. we ascended (the parent dir is now
         # showing the child we left) — put the cursor on it. Covers both
         # Backspace (ascend) and Enter on the ".." row, which both go
         # through this method. Descending leaves cursor at row 0 (which
         # the entry-search below silently leaves alone since `old` won't
         # appear under a fresh child listing).
-        if old != new_cwd:
+        if old != new_loc:
             for i, e in enumerate(self.entries):
-                if e.path == old:
+                if e.loc == old:
                     self.cursor = i
                     self._ensure_cursor_visible()
                     break
-        self.post_message(FilePanel.PathChanged(self, old, new_cwd))
+        self._post_path_changed(old, new_loc)
+
+    def _post_path_changed(self, old: VfsPath, new: VfsPath) -> None:
+        # PathChanged carries local Paths; only emit between file locations
+        # (its sole consumer is local navigation). Skip across archive edges.
+        if old.scheme == "file" and new.scheme == "file":
+            self.post_message(FilePanel.PathChanged(self, old.to_local(), new.to_local()))
 
     # ------------------------------------------------------------------
     # Selection
@@ -237,10 +310,10 @@ class FilePanel(WindowContent):
         if 0 <= self.cursor < len(self.entries):
             entry = self.entries[self.cursor]
             if not entry.is_parent:
-                if entry.path in self.selection:
-                    self.selection.remove(entry.path)
+                if entry.loc in self.selection:
+                    self.selection.remove(entry.loc)
                 else:
-                    self.selection.add(entry.path)
+                    self.selection.add(entry.loc)
                 changed = True
         self.move_cursor(delta)
         if changed:
@@ -250,23 +323,48 @@ class FilePanel(WindowContent):
         self.selection.clear()
 
     def selected_paths(self) -> list[Path]:
-        """Selection in current listing order (deterministic for ops)."""
-        return [e.path for e in self.entries if e.path in self.selection]
+        """Selection in current listing order (deterministic for ops).
+
+        Only ``file``-scheme entries yield a local ``Path``; entries inside a
+        non-local source (e.g. a zip) are skipped — extraction is not wired
+        yet, so the host app's pathlib-based ops simply see nothing there.
+        """
+        return [
+            e.loc.to_local()
+            for e in self.entries
+            if e.loc in self.selection and e.loc.scheme == "file"
+        ]
 
     def effective_targets(self) -> list[Path]:
         """Paths this panel's actions (F5/F6/F7/F8) should operate on.
 
         Selection wins if non-empty; otherwise the entry under the cursor,
-        unless that entry is the synthetic '..' parent row (then []).
+        unless that entry is the synthetic '..' parent row (then []). Non-local
+        entries (inside an archive) yield nothing — read-only browse for now.
         """
         if self.selection:
             return self.selected_paths()
         if not (0 <= self.cursor < len(self.entries)):
             return []
         entry = self.entries[self.cursor]
+        if entry.is_parent or entry.loc.scheme != "file":
+            return []
+        return [entry.loc.to_local()]
+
+    def effective_target_locs(self) -> list[VfsPath]:
+        """Like :meth:`effective_targets`, but as scheme-agnostic VfsPaths.
+
+        Used by copy/move so a selection inside an archive (zip-scheme locs)
+        can be extracted out through the cross-provider transfer engine.
+        """
+        if self.selection:
+            return [e.loc for e in self.entries if e.loc in self.selection]
+        if not (0 <= self.cursor < len(self.entries)):
+            return []
+        entry = self.entries[self.cursor]
         if entry.is_parent:
             return []
-        return [entry.path]
+        return [entry.loc]
 
     # ------------------------------------------------------------------
     # Cursor + scroll
@@ -765,7 +863,7 @@ class FilePanel(WindowContent):
             return Strip([Segment(empty_row_text(self.view_mode, width), self._base_style())])
         entry = self.entries[idx]
         is_cursor = idx == self.cursor
-        is_selected = entry.path in self.selection
+        is_selected = entry.loc in self.selection
 
         from dunders.fm.panel_view import name_col_width, row_text_single
         name_col = name_col_width(self.view_mode, width)
@@ -839,7 +937,7 @@ class FilePanel(WindowContent):
             cell = format_cell(entry, col_w)
             style = self._row_style(
                 is_cursor=(idx == self.cursor),
-                is_selected=(entry.path in self.selection),
+                is_selected=(entry.loc in self.selection),
                 focused=self._is_active_panel,
                 entry=entry,
             )
@@ -1071,6 +1169,7 @@ class FilePanel(WindowContent):
             WindowCommand(id="panel.mkdir",  label="Mkdir",  handler=_bind("mkdir"),  hotkey="f7"),
             WindowCommand(id="panel.delete", label="Delete", handler=_bind("delete"), hotkey="f8"),
             WindowCommand(id="panel.chmod",  label="Chmod",  handler=_bind("chmod"), hotkey="ctrl+a"),
+            WindowCommand(id="panel.pack",   label="Create archive…", handler=_bind("pack")),
             WindowCommand(id="panel.find_file", label="Find file…", handler=_bind("find_file"), hotkey="alt+f7"),
             WindowCommand(id="panel.toggle_hidden", label="Show hidden files", handler=_bind("toggle_hidden"), hotkey="alt+h"),
         ]
