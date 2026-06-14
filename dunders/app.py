@@ -990,7 +990,9 @@ class DundersApp(App):
         """(scheme, display_name) for providers that can be opened from "_",
         i.e. those declaring both a display name and a resolve_target."""
         out: list[tuple[str, str]] = []
-        for scheme in sorted(self._vfs_registry.schemes()):
+        # "file" (Local files) first — the quick way home/back to the local FS —
+        # then the rest alphabetically.
+        for scheme in sorted(self._vfs_registry.schemes(), key=lambda s: (s != "file", s)):
             provider = self._vfs_registry.for_scheme(scheme)
             label = getattr(provider, "display_name", None)
             if label and hasattr(provider, "resolve_target"):
@@ -1296,6 +1298,27 @@ class DundersApp(App):
         ]
         self._recompute_menu_bar()
 
+    def _provider_menu(self) -> "Menu | None":
+        """A contextual menu of the focused panel's provider actions (e.g.
+        Docker lifecycle), or None when the focused scheme has no actions."""
+        panel = self._active_panel()
+        if panel is None:
+            return None
+        try:
+            provider = panel._registry.resolve(panel.cwd_loc)
+        except Exception:
+            return None
+        actions = getattr(provider, "actions", None)
+        if not callable(actions):
+            return None
+        title = getattr(provider, "display_name", provider.scheme)
+        items = [
+            MenuItem(label=f"{a.icon} {a.label}".strip(),
+                     command_id=f"provider.{a.id}")
+            for a in actions()
+        ]
+        return Menu(title, items) if items else None
+
     def _recompute_menu_bar(self) -> None:
         """Show focus-scoped menus only when relevant.
 
@@ -1312,6 +1335,9 @@ class DundersApp(App):
             m for m in self._all_menus
             if m.label != "Editor" or show_editor
         ]
+        provider_menu = self._provider_menu()
+        if provider_menu is not None:
+            self.menu_bar.menus = [*self.menu_bar.menus, provider_menu]
         # Reset highlight if the active menu got filtered out.
         if (
             self.menu_bar.active_index is not None
@@ -2006,15 +2032,36 @@ class DundersApp(App):
             return
         provider = self._vfs_registry.for_scheme(scheme)
         label = getattr(provider, "display_name", scheme)
+        # A provider may guide the prompt: `open_placeholder` is a greyed hint
+        # shown in the empty field; `default_open_spec` pre-fills a value the
+        # user can accept or edit. Both may be a plain str or a callable.
+        placeholder = self._provider_hint(provider, "open_placeholder")
+        initial = self._provider_hint(provider, "default_open_spec")
         self._remember_active_panel_id()
         dialog = NewFileDialog(
             prompt=f"Open {label} — name or address:",
             context=OpenDunderRequest(scheme=scheme),
             submit_label="Open",
             title=label,
+            initial=initial,
+            placeholder=placeholder,
         )
-        show_modal(self.desktop, dialog, title=label, size=(60, 7))
+        # Wider than the default modal so a provider's hint (e.g. Docker's
+        # ssh:// URL form) fits in the input placeholder without truncation.
+        width = max(60, len(placeholder) + 8) if placeholder else 60
+        show_modal(self.desktop, dialog, title=label, size=(width, 7))
         self.call_after_refresh(dialog.focus_input)
+
+    @staticmethod
+    def _provider_hint(provider: object, attr: str) -> str:
+        """Read an optional provider hint (e.g. ``open_placeholder``); accept a
+        plain str or a callable, and tolerate its absence / failure."""
+        hint = getattr(provider, attr, "")
+        try:
+            hint = hint() if callable(hint) else hint
+        except Exception:
+            return ""
+        return hint if isinstance(hint, str) else ""
 
     def _do_open_dunder(self, scheme: str, spec: str, *, password: str | None = None) -> None:
         panel = self._active_panel()
@@ -2047,6 +2094,41 @@ class DundersApp(App):
                 pass  # app went away
 
         self.run_worker(_work, thread=True, exclusive=False, group="dunder-connect")
+
+    def _run_provider_action(self, action, targets=None) -> None:
+        """Run a ProviderAction on the active panel's selection, off the UI thread."""
+        if self._has_active_modal():
+            return
+        panel = self._active_panel()
+        if panel is None:
+            return
+        if targets is None:
+            locs = set(panel.effective_target_locs())
+            targets = [e.loc for e in panel.entries
+                       if e.loc in locs and action.applies_to(e)]
+        if not targets:
+            return
+        self.notify(f"{action.label}…", severity="information", timeout=2)
+
+        focus = targets[0]  # keep the cursor on the acted container after re-scan
+
+        def _work() -> None:
+            result = action.run(targets)
+            try:
+                self.call_from_thread(self._after_provider_action, panel, result, focus)
+            except Exception:
+                pass  # app went away
+
+        self.run_worker(_work, thread=True, exclusive=False, group="provider-action")
+
+    def _after_provider_action(self, panel, result, focus_loc=None) -> None:
+        errors = getattr(result, "errors", None)
+        if errors:
+            self.notify(str(errors[0]), severity="error")
+        # Restore the cursor onto the acted container (the slow/async re-scan
+        # otherwise resets it to the top). A removed container won't match and
+        # the cursor simply clamps.
+        panel.refresh_listing(focus_loc=focus_loc)
 
     @staticmethod
     def _resolve_safe(resolver, spec, base, password):
@@ -2087,6 +2169,15 @@ class DundersApp(App):
         except KeyError:
             return False
         return "slow" in getattr(provider, "capabilities", frozenset())
+
+    def _scheme_accepts_empty_open(self, scheme: str) -> bool:
+        """Whether opening this provider with an empty spec is meaningful
+        (e.g. Docker → the container index). Defaults to False."""
+        try:
+            provider = self._vfs_registry.for_scheme(scheme)
+        except KeyError:
+            return False
+        return bool(getattr(provider, "accepts_empty_open", False))
 
     def action_add_bookmark(self) -> None:
         if self._has_active_modal():
@@ -2421,7 +2512,11 @@ class DundersApp(App):
             return
         if isinstance(ctx, OpenDunderRequest):
             spec = event.value.strip()
-            if spec:
+            # Empty spec is meaningful for providers that expose a "default
+            # landing" (Docker → the container index); for host-based ones
+            # (FTP/SFTP) it stays a no-op. Providers opt in via
+            # ``accepts_empty_open``.
+            if spec or self._scheme_accepts_empty_open(ctx.scheme):
                 self._do_open_dunder(ctx.scheme, spec)
             return
         if isinstance(ctx, NewFileRequest):
@@ -3620,7 +3715,7 @@ class DundersApp(App):
         content = getattr(win, "content", None)
         if not isinstance(content, FilePanel):
             return
-        path = str(content.cwd)
+        path = content.cwd_loc.display()  # full clean URL (not the truncated root)
         # System clipboard (pbcopy/xclip) + OSC 52 fallback for SSH.
         clipboard.copy(path, app=self)
         self.notify(f"copied {path}")

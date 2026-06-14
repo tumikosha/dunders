@@ -125,6 +125,7 @@ class SftpProvider:
     scheme = "sftp"
     display_name = "SFTP"
     capabilities = frozenset({"read", "write", "stream", "slow"})
+    open_placeholder = "[user[:pass]@]host[:port][/path]"
 
     def __init__(self) -> None:
         self._creds: dict[str, tuple[str, int, str, str | None]] = {}
@@ -170,9 +171,14 @@ class SftpProvider:
     # -- prefix target ("sftp:user@host/path" opens a connection) ----------
 
     def needs_password(self, spec: str) -> bool:
-        _host, _port, user, passwd, _path = _parse_spec(spec)
+        host, port, user, passwd, _path = _parse_spec(spec)
         if user is None or passwd is not None:
             return False
+        if _canonical_root(host, port, user) in self._creds:
+            return False  # already authenticated this session — reuse it
+        from dunders.fm import netrc_store
+        if netrc_store.lookup(host) is not None:
+            return False  # remembered in ~/.netrc
         return not _have_local_keys()  # only prompt when no key can be tried
 
     def resolve_target(
@@ -183,8 +189,14 @@ class SftpProvider:
             return None
         if not 0 < port <= 65535:
             raise OSError(f"Invalid port {port} (must be 1-65535)")
-        if password is not None:
+        prompted = password is not None
+        if prompted:
             passwd = password
+        if passwd is None:  # no key/inline/prompt → try a remembered ~/.netrc
+            from dunders.fm import netrc_store
+            auth = netrc_store.lookup(host)
+            if auth and (user is None or user == auth[0]):
+                user, passwd = (user or auth[0]), auth[1]
         login_user = user or "root"
         root = _canonical_root(host, port, user)
         self._creds[root] = (host, port, login_user, passwd)
@@ -193,6 +205,9 @@ class SftpProvider:
         except Exception as exc:
             self._creds.pop(root, None)
             raise OSError(_connect_error(exc, host, port, login_user)) from exc
+        if prompted and passwd:  # remember a freshly-typed password
+            from dunders.fm import netrc_store
+            netrc_store.save(host, login_user, passwd)
         parts = tuple(p for p in path.split("/") if p)
         return VfsPath(scheme="sftp", root=root, parts=parts)
 

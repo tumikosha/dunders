@@ -628,6 +628,7 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
         submit_hotkey: str | None = None,
         title: str = "New",
         initial: str = "",
+        placeholder: str = "",
     ) -> None:
         super().__init__()
         self.prompt = prompt
@@ -641,7 +642,7 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
             submit_hotkey or CopyMoveDialog._auto_ok_hotkey(submit_label)
         ).lower()
         self._initial = initial
-        self._input = Input(id="nf-input")
+        self._input = Input(id="nf-input", placeholder=placeholder)
 
     def compose(self) -> ComposeResult:
         yield Static(self.prompt, id="nf-prompt")

@@ -1549,3 +1549,112 @@ async def test_command_palette_on_ctrl_k_not_ctrl_p():
         # Ctrl+P no longer opens any palette — it's the panels-fullscreen key.
         cmd_p = app.dispatcher.hotkey_lookup("ctrl+p")
         assert cmd_p is not None and cmd_p.id == "panels.fullscreen"
+
+
+@pytest.mark.asyncio
+async def test_panel_exposes_docker_actions_in_docker_scheme(monkeypatch):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        ids = {c.id for c in panel.get_commands()}
+        assert "provider.docker.start" in ids
+        assert "provider.docker.rebuild" in ids
+
+
+@pytest.mark.asyncio
+async def test_docker_menu_present_only_in_docker_scheme(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        def labels():
+            return [m.label for m in app.menu_bar.menus]
+        assert "Docker" not in labels()          # local scheme by default
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        app._recompute_menu_bar()
+        assert "Docker" in labels()
+
+
+@pytest.mark.asyncio
+async def test_open_dunder_empty_spec_opens_docker_but_not_ftp(monkeypatch, tmp_path):
+    """An empty spec must reach Docker (→ container index) but stay a no-op for
+    host-based providers like FTP."""
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import OpenDunderRequest
+    from dunders.fm.dialogs import NewFileDialog
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        calls = []
+        monkeypatch.setattr(app, "_do_open_dunder",
+                            lambda scheme, spec: calls.append((scheme, spec)))
+        monkeypatch.setattr(app, "_close_modal", lambda dlg: None)
+
+        dlg = NewFileDialog(prompt="x", context=OpenDunderRequest(scheme="docker"))
+        app.on_new_file_dialog_submitted(NewFileDialog.Submitted(dlg, ""))
+        assert calls == [("docker", "")]
+
+        calls.clear()
+        ftp = NewFileDialog(prompt="x", context=OpenDunderRequest(scheme="ftp"))
+        app.on_new_file_dialog_submitted(NewFileDialog.Submitted(ftp, ""))
+        assert calls == []  # empty host spec stays a no-op for FTP
+
+
+@pytest.mark.asyncio
+async def test_exit_docker_container_focuses_it_in_index(tmp_path, monkeypatch):
+    """Leaving a container (.. to the index) lands the cursor on that container,
+    not at the top. Exiting a real archive still focuses the archive file."""
+    from pathlib import Path
+
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        captured = {}
+        monkeypatch.setattr(
+            panel, "refresh_listing",
+            lambda *, focus_loc=None: captured.__setitem__("focus_loc", focus_loc),
+        )
+        # Exit a docker container → focus_loc is the container entry itself.
+        container = VfsPath(scheme="docker", root="", parts=("web",))
+        panel.cwd_loc = container
+        panel._change_cwd_loc(VfsPath(scheme="docker", root="", parts=()))
+        assert captured["focus_loc"] == container
+
+        # Regression: exiting a zip archive into a local folder still focuses
+        # the .zip file (remap to the local source-root path).
+        panel.cwd_loc = VfsPath(scheme="zip", root="/tmp/a.zip", parts=())
+        panel._change_cwd_loc(VfsPath.local("/tmp"))
+        assert captured["focus_loc"] == VfsPath.local(Path("/tmp/a.zip"))
+
+
+@pytest.mark.asyncio
+async def test_provider_action_keeps_cursor_on_acted_container(monkeypatch, tmp_path):
+    # After start/stop/… the async re-scan must re-focus the acted container,
+    # not jump the cursor to the top of the list.
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        captured = {}
+        monkeypatch.setattr(panel, "refresh_listing",
+                            lambda *, focus_loc=None: captured.__setitem__("f", focus_loc))
+        loc = VfsPath(scheme="docker", root="", parts=("web",))
+
+        class _Res:
+            errors = []
+
+        app._after_provider_action(panel, _Res(), loc)
+        assert captured["f"] == loc

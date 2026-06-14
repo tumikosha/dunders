@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dunders.fm.file_colors import classify, role_for
+from dunders.fm.file_colors import classify, glyph_role_color, role_for
 from dunders.fm.file_entry import FileEntry
 from dunders.fm.file_panel import FilePanel
 from dunders.windowing.palette import Palette, Style, Theme
@@ -138,3 +138,16 @@ def test_row_style_focused_cursor_is_uniform_across_types():
     # And it matches the plain themed base reversed (no type fg).
     plain = p._base_style()
     assert str(img.color) == str(plain.color)
+
+
+# --- glyph_role_color ---------------------------------------------------------
+
+
+def test_glyph_role_color_known():
+    assert glyph_role_color("success") == "green"
+    assert glyph_role_color("warning") == "yellow"
+    assert glyph_role_color("muted") == "bright_black"
+
+
+def test_glyph_role_color_unknown_is_none():
+    assert glyph_role_color("nope") is None

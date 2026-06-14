@@ -113,7 +113,10 @@ def describe_entry(entry: FileEntry) -> str:
 
 
 def _name_prefix(entry: FileEntry) -> str:
-    """ls -F style prefix: '/' dir/parent, '*' executable, ' ' otherwise."""
+    """ls -F style prefix: '/' dir/parent, '*' executable, ' ' otherwise.
+
+    (Provider state glyphs, e.g. Docker container status, live in a dedicated
+    provider column — see FilePanel — not glued to the name.)"""
     if entry.is_dir or entry.is_parent:
         return "/"
     if entry.is_executable:

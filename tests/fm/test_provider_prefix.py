@@ -108,3 +108,49 @@ async def test_f5_prefix_creates_archive_and_opens_it_in_panel(tmp_path):
             assert "dir/inner.txt" in zf.namelist()
         # The destination panel is now browsing INSIDE the new archive.
         assert right.cwd_loc == VfsPath(scheme="zip", root=str(out), parts=())
+
+
+class TestLocalResolveTarget:
+    """LocalProvider is an openable dunder ("Local files" in the "_" menu) — a
+    one-keystroke way back to the local filesystem; empty spec = home."""
+
+    def test_conforms_to_target_resolver(self):
+        from dunders.fm.vfs_local import LocalProvider
+        assert isinstance(LocalProvider(), TargetResolver)
+
+    def test_openable_metadata(self):
+        from dunders.fm.vfs_local import LocalProvider
+        p = LocalProvider()
+        assert p.display_name == "Local files"
+        assert p.accepts_empty_open is True
+
+    def test_empty_spec_is_home(self):
+        from pathlib import Path
+        from dunders.fm.vfs_local import LocalProvider
+        loc = LocalProvider().resolve_target("", base=VfsPath.local("/"))
+        assert loc == VfsPath.local(Path.home())
+
+    def test_absolute_path(self, tmp_path):
+        from dunders.fm.vfs_local import LocalProvider
+        loc = LocalProvider().resolve_target(str(tmp_path), base=VfsPath.local("/"))
+        assert loc == VfsPath.local(tmp_path.resolve())
+
+    def test_relative_resolves_under_base(self, tmp_path):
+        from dunders.fm.vfs_local import LocalProvider
+        (tmp_path / "sub").mkdir()
+        loc = LocalProvider().resolve_target("sub", base=VfsPath.local(tmp_path))
+        assert loc == VfsPath.local((tmp_path / "sub").resolve())
+
+    def test_non_directory_raises(self, tmp_path):
+        from dunders.fm.vfs_local import LocalProvider
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        with pytest.raises(OSError):
+            LocalProvider().resolve_target(str(f), base=VfsPath.local("/"))
+
+    def test_appears_in_registry_as_openable(self):
+        from dunders.fm.vfs_local import default_registry
+        reg = default_registry()
+        prov = reg.for_scheme("file")
+        assert getattr(prov, "display_name", None) == "Local files"
+        assert hasattr(prov, "resolve_target")

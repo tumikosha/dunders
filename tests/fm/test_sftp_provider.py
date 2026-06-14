@@ -68,6 +68,16 @@ class TestNeedsPassword:
     def test_inline_password_no_prompt(self):
         assert SftpProvider().needs_password("bob:pw@host/") is False
 
+    def test_no_prompt_when_already_connected_this_session(self, monkeypatch):
+        # Even without a key, a host authenticated earlier is reused — no re-ask.
+        monkeypatch.setattr(
+            "dunders.fm.providers.sftp_provider._have_local_keys", lambda: False
+        )
+        p = SftpProvider()
+        assert p.needs_password("bob@host/") is True  # first time
+        p._creds[_canonical_root("host", 22, "bob")] = ("host", 22, "bob", "pw")
+        assert p.needs_password("bob@host/") is False  # reconnect reuses creds
+
 
 # ---- in-process SFTP server (paramiko stub backed by a temp dir) ----------
 

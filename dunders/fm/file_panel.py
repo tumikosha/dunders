@@ -113,6 +113,25 @@ class FilePanel(WindowContent):
         self.row_offset: int = 0
         self.sort_order: SortOrder = SortOrder.NAME
         self.sort_descending: bool = default_descending(SortOrder.NAME)
+        # Active provider-layout sort: a (id, key) pair used instead of
+        # sort_order when the panel shows provider columns (e.g. Docker). The id
+        # ("name" or a column key) drives the header highlight/arrow. Cleared on
+        # cwd change.
+        self._sort_key_id: str | None = None
+        self._sort_key = None
+        # Location to fall back to if the just-entered directory fails to list
+        # (e.g. a stopped Docker container): navigation stays atomic — you never
+        # get stranded in an unlistable, ".."-less panel. Set on cwd change,
+        # consumed by the first listing attempt.
+        self._return_to: VfsPath | None = None
+        # Sort state (id, key, descending) captured at the same time, restored
+        # on revert so a bounced navigation leaves the listing exactly as it was.
+        self._return_sort: tuple | None = None
+        # Remembered provider-layout sort per location (loc -> (sort_id, desc)),
+        # so e.g. the Docker index keeps its "S"/Name sort after you dive into a
+        # container and come back. The key is re-resolved against that location's
+        # columns on return (a column may not exist elsewhere).
+        self._sort_memory: dict[VfsPath, tuple[str, bool]] = {}
         self.show_hidden: bool = True
         self.view_mode: PanelViewMode = PanelViewMode.FULL
         self.selection: set[VfsPath] = set()
@@ -164,7 +183,7 @@ class FilePanel(WindowContent):
         """User-facing location string (window title), valid for any scheme."""
         if self.cwd_loc.scheme == "file":
             return str(self.cwd_loc.to_local())
-        return self.cwd_loc.as_uri()
+        return self.cwd_loc.display()
 
     # Filename suffix -> the VFS scheme that browses it as a directory tree.
     _ARCHIVE_SUFFIXES = {".zip": "zip", ".7z": "7z"}
@@ -199,8 +218,20 @@ class FilePanel(WindowContent):
         provider = self._registry.resolve(self.cwd_loc)
         if self._should_scan_async(provider):
             self._scan_async(provider, self._scan_token, focus_loc)
-        else:
-            self._apply_rows(self._scan_now(provider), focus_loc)
+            return
+        try:
+            rows = provider.scan(
+                self.cwd_loc, show_hidden=self.show_hidden, include_parent=True
+            )
+        except Exception as exc:
+            # A provider scan must never crash the TUI. Prefer reverting to where
+            # we came from (atomic navigation); otherwise degrade to an empty
+            # listing with a warning.
+            if self._maybe_revert(exc):
+                return
+            self._notify_listing_failed(exc)
+            rows = []
+        self._apply_rows(rows, focus_loc)
 
     def _should_scan_async(self, provider) -> bool:
         """Off-thread scan for slow (network) providers — but only when mounted,
@@ -245,10 +276,9 @@ class FilePanel(WindowContent):
             return
         self._loading = False
         if err is not None:
-            try:
-                self.app.notify(f"Listing failed: {err}", severity="warning")
-            except Exception:
-                pass
+            if self._maybe_revert(err):
+                return
+            self._notify_listing_failed(err)
         self._apply_rows(rows, focus_loc)
         self.refresh()
 
@@ -259,29 +289,41 @@ class FilePanel(WindowContent):
             size=0, mtime=0.0, is_dir=False,
         )
 
-    def _scan_now(self, provider) -> list[FileEntry]:
-        """Synchronous scan with the never-crash guard (local/zip/7z; also the
-        fallback when no app is mounted)."""
+    def _notify_listing_failed(self, exc: Exception) -> None:
         try:
-            return provider.scan(
-                self.cwd_loc, show_hidden=self.show_hidden, include_parent=True
-            )
-        except Exception as exc:
-            # A provider scan must never crash the TUI (network drop, protocol
-            # error, …). Degrade to an empty listing — Backspace/ascend still
-            # works (it uses cwd_loc, not the entries) so the user can back out.
-            try:
-                self.app.notify(f"Listing failed: {exc}", severity="warning")
-            except Exception:
-                pass  # unmounted (no active app) or notify unavailable
-            return []
+            self.app.notify(f"Listing failed: {exc}", severity="warning")
+        except Exception:
+            pass  # unmounted (no active app) or notify unavailable
+
+    def _maybe_revert(self, exc: Exception) -> bool:
+        """If the just-entered location can't be listed, revert to where we came
+        from and land the cursor on the entry we failed to open. Returns True
+        when it reverted (caller should stop). Keeps navigation atomic so the
+        user is never stranded in an empty, ".."-less panel (e.g. trying to
+        enter a stopped Docker container)."""
+        target = self._return_to
+        failed = self.cwd_loc
+        if target is None or target == failed:
+            return False
+        self._return_to = None
+        try:
+            self.app.notify(f"Cannot open {failed.name!r}: {exc}", severity="warning")
+        except Exception:
+            pass
+        self.cwd_loc = target
+        if self._return_sort is not None:
+            self._sort_key_id, self._sort_key, self.sort_descending = self._return_sort
+            self._return_sort = None
+        self.refresh_listing(focus_loc=failed)
+        return True
 
     def _apply_rows(
         self, rows: list[FileEntry], focus_loc: VfsPath | None = None
     ) -> None:
         """Sort rows into the listing, place the cursor, prune selection."""
         self.entries = MaterializedRowSource(
-            sort_entries(rows, self.sort_order, descending=self.sort_descending)
+            sort_entries(rows, self.sort_order,
+                         descending=self.sort_descending, key=self._sort_key)
         )
         if self.cursor >= len(self.entries):
             self.cursor = max(0, len(self.entries) - 1)
@@ -295,6 +337,8 @@ class FilePanel(WindowContent):
         self._ensure_cursor_visible()
         self.window_title = self._cwd_display()
         self._loading = False
+        self._return_to = None  # this listing succeeded; no fallback pending
+        self._return_sort = None
 
     def set_sort_order(
         self, order: SortOrder, *, descending: bool | None = None
@@ -346,13 +390,25 @@ class FilePanel(WindowContent):
 
     def ascend(self) -> None:
         """Backspace == cd .., positioning the cursor on the row we left."""
+        # Prefer the provider's own ".." entry: it knows where "up" goes from a
+        # virtual source root (e.g. a Docker container → the container index),
+        # which the generic archive fallback below gets wrong.
+        if self.entries and self.entries[0].is_parent:
+            self._change_cwd_loc(self.entries[0].loc)
+            return
         parent = self.cwd_loc.parent
         if parent is None:
-            # At the source root. Inside an archive, step back out to the
-            # local folder that holds it; at a filesystem root, do nothing.
+            # At a source root. file scheme → nothing above. An archive's root is
+            # a real local file → step out to the folder holding it. A network /
+            # virtual source (docker "", ssh://…, ftp user@host) has no local
+            # parent → land in the local home so there's always a way back out.
             if self.cwd_loc.scheme == "file":
                 return
-            parent = VfsPath.local(Path(self.cwd_loc.root).parent)
+            root_path = Path(self.cwd_loc.root)
+            if self.cwd_loc.root and root_path.exists():
+                parent = VfsPath.local(root_path.parent)
+            else:
+                parent = VfsPath.local(Path.home())
         self._change_cwd_loc(parent)
 
     def _change_cwd(self, new_cwd: Path) -> None:
@@ -362,9 +418,28 @@ class FilePanel(WindowContent):
     def _change_cwd_loc(self, new_loc: VfsPath) -> None:
         old = self.cwd_loc
         self.cwd_loc = new_loc
+        # If listing new_loc fails, fall back here (atomic navigation) and
+        # restore the sort exactly — a bounced entry must not disturb the list.
+        if new_loc != old:
+            self._return_to = old
+            self._return_sort = (self._sort_key_id, self._sort_key, self.sort_descending)
+        else:
+            self._return_to = None
+            self._return_sort = None
         self.cursor = 0
         self.row_offset = 0
         self.selection.clear()
+        # Provider-layout sort doesn't carry across dirs, but is remembered
+        # per-location: restore it (re-resolving the key against this dir's
+        # columns) when we return, else start unsorted.
+        remembered = self._sort_memory.get(new_loc)
+        if remembered is not None:
+            sort_id, self.sort_descending = remembered
+            self._sort_key = self._resolve_sort_key(sort_id)
+            self._sort_key_id = sort_id if self._sort_key is not None else None
+        else:
+            self._sort_key_id = None
+            self._sort_key = None
         # Cursor placement after a cwd change: if the prior location is visible
         # in the new listing — i.e. we ascended (the parent dir is now showing
         # the child we left) — land the cursor on it. Covers Backspace and Enter
@@ -373,10 +448,17 @@ class FilePanel(WindowContent):
         return_loc = None
         if old != new_loc:
             return_loc = old
-            if old.scheme != "file" and old.is_source_root:
-                # Exited an archive: land on the archive file itself, whose local
-                # path is the source root (old.loc never appears as an entry in
-                # the parent's local listing).
+            if (
+                old.scheme != "file"
+                and old.is_source_root
+                and new_loc.scheme == "file"
+            ):
+                # Exited an archive back into a LOCAL folder: land on the archive
+                # file itself, whose local path is the source root (old never
+                # appears as an entry in the parent's local listing). When the
+                # parent is itself a virtual index (e.g. exiting a Docker
+                # container to the container list), old IS the entry to focus, so
+                # this remap must not apply.
                 return_loc = VfsPath.local(Path(old.root))
         self.refresh_listing(focus_loc=return_loc)
         self._post_path_changed(old, new_loc)
@@ -715,6 +797,12 @@ class FilePanel(WindowContent):
         base (no type colour) — older/partial themes keep working unchanged.
         """
         base = self._base_style()
+        glyph_role = entry.extra.get("glyph_role")
+        if glyph_role:
+            from dunders.fm.file_colors import glyph_role_color
+            colour = glyph_role_color(glyph_role)
+            if colour:
+                return base + RichStyle(color=colour)
         from dunders.fm.file_colors import classify, role_for
 
         category = classify(entry)
@@ -805,6 +893,14 @@ class FilePanel(WindowContent):
             ]
             text = COL_SEP.join(cells)[:width].ljust(width)
             return Strip([Segment(text, self._base_style() + RichStyle(bold=True))])
+        # Provider-contributed columns (e.g. Docker "S" state + action buttons)
+        # replace Size/Date; the header must match and stay clickable to sort.
+        layout = self._provider_layout(width)
+        if layout is not None:
+            return self._render_header_provider(width, layout)
+        # A provider with actions but no columns: "Name" + an "Actions" label.
+        if self._shows_action_column(width):
+            return self._render_header_actions(width)
         if mode is PanelViewMode.DETAILED:
             return self._render_header_detailed(width)
         if mode is PanelViewMode.DESCRIPTION:
@@ -812,6 +908,56 @@ class FilePanel(WindowContent):
         if mode is PanelViewMode.SHORT:
             return self._render_header_short(width)
         return self._render_header_full(width)
+
+    def _shows_action_column(self, width: int) -> bool:
+        """Whether any visible row renders an action cluster (so the header
+        should label it "Actions" instead of Size/Date). True on a provider's
+        action index (e.g. Docker containers); False inside a container or in a
+        plain filesystem panel."""
+        if is_multicolumn(self.view_mode):
+            return False
+        return any(self._action_spans(i, width) for i in range(len(self.entries)))
+
+    def _render_header_actions(self, width: int) -> Strip:
+        """Header for an action index: "Name" plus a right-aligned "Actions"
+        label over the button area (mirrors `_render_entry_row`'s cluster)."""
+        from dunders.fm.panel_view import name_col_width
+        base = self._base_style() + RichStyle(bold=True)
+        ncol = name_col_width(self.view_mode, width)
+        name = "Name".center(ncol)
+        rest = max(0, width - len(name))
+        text = (name + "Actions ".rjust(rest))[:width].ljust(width)
+        return Strip([Segment(text, base)])
+
+    def _render_header_provider(self, width: int, layout) -> Strip:
+        """Header for the provider-columns layout: "Name" + each column label,
+        the active sort underlined with a ↑/↓ arrow, + an "Actions" label.
+
+        With no explicit provider sort yet (``_sort_key_id is None``) the listing
+        is name-ascending, so "Name" reads as the active column by default."""
+        _cols, name_w, ranges, buttons_x0 = layout
+        base = self._base_style() + RichStyle(bold=True)
+        active = self._sort_key_id or "name"
+
+        def arrow(sort_id: str) -> str:
+            if active != sort_id:
+                return ""
+            descending = self.sort_descending if self._sort_key_id is not None else False
+            return "↓" if descending else "↑"
+
+        def styled(sort_id: str) -> RichStyle:
+            return base + RichStyle(underline=True) if active == sort_id else base
+
+        segs = [Segment(
+            ("Name" + arrow("name")).center(name_w)[:name_w], styled("name"))]
+        for _x0, _x1, col in ranges:
+            segs.append(Segment(COL_SEP, base))
+            label = (col.label + arrow(col.key)).center(col.width)[:col.width]
+            segs.append(Segment(label, styled(col.key)))
+        rest = max(0, width - buttons_x0)
+        if rest:
+            segs.append(Segment("Actions ".rjust(rest)[:rest], base))
+        return Strip(segs)
 
     def _render_header_short(self, width: int) -> Strip:
         from dunders.fm.panel_view import name_col_width
@@ -910,8 +1056,156 @@ class FilePanel(WindowContent):
             return SortOrder.MTIME
         return None
 
+    # -- provider-contributed columns (e.g. Docker "S" state) --------------
+
+    def _provider_columns(self):
+        """Columns the current location's provider contributes, or []."""
+        if is_multicolumn(self.view_mode):
+            return []
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+        except Exception:
+            return []
+        cols = getattr(provider, "columns", None)
+        if not callable(cols):
+            return []
+        try:
+            return list(cols(self.cwd_loc))
+        except Exception:
+            return []
+
+    def _provider_layout(self, width: int):
+        """Geometry for the "Name | provider columns | action buttons" layout.
+
+        Returns ``(cols, name_w, col_ranges, buttons_x0)`` or ``None`` when the
+        provider contributes no columns. ``col_ranges`` is a list of
+        ``(x_start, x_end, column)`` (x_end exclusive) for header hit-testing.
+        The button area (fixed at the widest possible cluster) is reserved on
+        the right so the columns stay put across rows.
+        """
+        cols = self._provider_columns()
+        if not cols:
+            return None
+        n_actions = 0
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+            acts = getattr(provider, "actions", None)
+            if callable(acts):
+                n_actions = len(acts())
+        except Exception:
+            n_actions = 0
+        buttons_w = n_actions * self._ACTION_CELL
+        sep = len(COL_SEP)
+        block_w = sum(sep + c.width for c in cols)
+        name_w = max(1, width - block_w - buttons_w)
+        x = name_w
+        ranges = []
+        for c in cols:
+            x += sep
+            ranges.append((x, x + c.width, c))
+            x += c.width
+        return cols, name_w, ranges, x
+
+    @staticmethod
+    def _provider_header_col_at(x: int, layout):
+        for x0, x1, col in layout[2]:
+            if x0 <= x < x1:
+                return col
+        return None
+
+    def _sort_active(self, sort_id: str, key) -> None:
+        """Sort the provider-layout listing by ``key`` (id drives the header
+        highlight). Re-clicking the active column flips direction."""
+        focused = (
+            self.entries[self.cursor].loc
+            if 0 <= self.cursor < len(self.entries) else None
+        )
+        if self._sort_key_id == sort_id:
+            self.sort_descending = not self.sort_descending
+        else:
+            self._sort_key_id = sort_id
+            self._sort_key = key
+            self.sort_descending = False
+        self._sort_memory[self.cwd_loc] = (sort_id, self.sort_descending)
+        self.refresh_listing(focus_loc=focused)
+
+    def _resolve_sort_key(self, sort_id: str):
+        """Reconstruct a sort key from a remembered id, against the CURRENT
+        location's columns (a provider column may not exist elsewhere)."""
+        if sort_id == "name":
+            return lambda e: e.name.lower()
+        for col in self._provider_columns():
+            if col.key == sort_id:
+                return col.sort_key
+        return None
+
+    # Each action icon occupies this many cells in the row cluster (glyph + pad).
+    _ACTION_CELL = 2
+
+    def _action_spans(self, idx: int, width: int):
+        """Clickable action icons for row ``idx`` as a right-aligned cluster.
+
+        Returns a list of ``(x_start, x_end, action)`` (x_end exclusive), or []
+        when the row shows no cluster. The cluster appears on every row that has
+        applicable provider actions (e.g. each Docker container in the index),
+        taking the place of the Size/Date columns — those are meaningless for a
+        container. It appears only:
+          * in single-column views (not multi-column),
+          * for a real entry (not the '..' parent),
+          * when the panel's provider exposes actions() and at least one applies.
+        """
+        if is_multicolumn(self.view_mode):
+            return []
+        if not (0 <= idx < len(self.entries)):
+            return []
+        entry = self.entries[idx]
+        if entry.is_parent:
+            return []
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+        except Exception:
+            return []
+        actions = getattr(provider, "actions", None)
+        if not callable(actions):
+            return []
+        applicable = [a for a in actions() if a.applies_to(entry)]
+        if not applicable:
+            return []
+        cell = self._ACTION_CELL
+        cluster_w = cell * len(applicable)
+        x0 = max(0, width - cluster_w)
+        spans = []
+        for i, a in enumerate(applicable):
+            start = x0 + i * cell
+            spans.append((start, start + cell, a))
+        return spans
+
+    def _maybe_run_action_click(self, x: int, idx: int) -> bool:
+        """If x falls on an action icon for row idx, run it. Returns True if handled."""
+        app = getattr(self, "app", None)
+        if app is None:
+            return False
+        width = self._panel_size[0] if self._panel_size else self.size.width
+        for start, end, action in self._action_spans(idx, width):
+            if start <= x < end:
+                app._run_provider_action(action, targets=[self.entries[idx].loc])
+                return True
+        return False
+
     def on_click(self, event: events.Click) -> None:
         if event.y == 0:
+            hdr_width = self._panel_size[0] if self._panel_size else self.size.width
+            layout = self._provider_layout(hdr_width)
+            if layout is not None:
+                _cols, name_w, _ranges, _bx = layout
+                col = self._provider_header_col_at(event.x, layout)
+                if col is not None:
+                    self._sort_active(col.key, col.sort_key)
+                elif event.x < name_w:
+                    self._sort_active("name", lambda e: e.name.lower())
+                self.refresh()
+                event.stop()
+                return
             order = self._header_column_at(event.x)
             if order is None:
                 return
@@ -939,6 +1233,10 @@ class FilePanel(WindowContent):
         else:
             idx = event.y - 1 + self.row_offset
         if not (0 <= idx < len(self.entries)):
+            return
+
+        if not is_multicolumn(self.view_mode) and self._maybe_run_action_click(event.x, idx):
+            event.stop()
             return
 
         if idx != self.cursor:
@@ -978,6 +1276,29 @@ class FilePanel(WindowContent):
             focused=self._is_active_panel,
             entry=entry,
         )
+        layout = self._provider_layout(width)
+        if layout is not None:
+            return self._render_provider_row(idx, width, entry, style, layout)
+        spans = self._action_spans(idx, width)
+        if spans:
+            x0 = spans[0][0]
+            # Show the name only, then the action cluster where the Size/Date
+            # columns would be (those are meaningless for a container). The
+            # name field is `text[:name_col]`; everything right of it up to the
+            # cluster is blanked so no stray "0"/epoch date peeks through.
+            head_end = min(name_col, x0)
+            segs = [Segment(text[:head_end], style)]
+            if x0 > head_end:
+                segs.append(Segment(" " * (x0 - head_end), style))
+            for start, end, action in spans:
+                glyph = (action.icon or "·")[:1]
+                cell = (glyph + " ")[: end - start].ljust(end - start)
+                segs.append(Segment(cell, style + RichStyle(bold=True)))
+            # pad any trailing gap so the row fills width
+            used = x0 + sum(e - s for s, e, _a in spans)
+            if used < width:
+                segs.append(Segment(" " * (width - used), style))
+            return Strip(segs)
         if self._qs_active and self._qs_query and not entry.is_parent:
             hi = self._qs_highlight_segments(
                 text=text,
@@ -988,6 +1309,28 @@ class FilePanel(WindowContent):
             if hi is not None:
                 return Strip(hi)
         return Strip([Segment(text, style)])
+
+    def _render_provider_row(self, idx, width, entry, style, layout) -> Strip:
+        """Render "Name | provider columns | action buttons" (e.g. Docker)."""
+        from dunders.fm.panel_view import _fit_name, _name_prefix
+        _cols, name_w, ranges, buttons_x0 = layout
+        name_field = (_name_prefix(entry) + _fit_name(entry.name, name_w))
+        segs = [Segment(name_field.ljust(name_w)[:name_w], style)]
+        for _x0, _x1, col in ranges:
+            segs.append(Segment(COL_SEP, style))
+            segs.append(Segment(col.value(entry).center(col.width)[:col.width], style))
+        cur = buttons_x0
+        for start, end, action in self._action_spans(idx, width):
+            if start > cur:
+                segs.append(Segment(" " * (start - cur), style))
+                cur = start
+            glyph = (action.icon or "·")[:1]
+            cell = (glyph + " ")[: end - start].ljust(end - start)
+            segs.append(Segment(cell, style + RichStyle(bold=True)))
+            cur = end
+        if cur < width:
+            segs.append(Segment(" " * (width - cur), style))
+        return Strip(segs)
 
     def _multicol_index_at(self, x: int, y: int, width: int) -> int:
         """Entry index for a click at (x, y) in a multi-column layout.
@@ -1258,7 +1601,7 @@ class FilePanel(WindowContent):
             fn = getattr(app, f"action_{action}", None) if app is not None else None
             return fn if callable(fn) else None
 
-        return [
+        cmds = [
             WindowCommand(id="panel.new",    label="New",    handler=_bind("new")),
             WindowCommand(id="panel.project_view", label="Project View", handler=_bind("project_view"), hotkey="f1"),
             WindowCommand(id="panel.user_menu", label="User menu", handler=_bind("user_menu"), hotkey="f2"),
@@ -1273,3 +1616,17 @@ class FilePanel(WindowContent):
             WindowCommand(id="panel.find_file", label="Find file…", handler=_bind("find_file"), hotkey="alt+f7"),
             WindowCommand(id="panel.toggle_hidden", label="Show hidden files", handler=_bind("toggle_hidden"), hotkey="alt+h"),
         ]
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+        except KeyError:
+            provider = None
+        actions = getattr(provider, "actions", None) if provider else None
+        if callable(actions) and app is not None:
+            for action in actions():
+                cmds.append(WindowCommand(
+                    id=f"provider.{action.id}",
+                    label=action.label,
+                    hotkey=action.hotkey,
+                    handler=(lambda a=action: app._run_provider_action(a)),
+                ))
+        return cmds

@@ -921,3 +921,317 @@ def test_scroll_up_handler_moves_cursor_and_stops_event(tmp_path: Path):
     p._on_mouse_scroll_up(ev)
     assert p.cursor == last - 3
     assert ev.stopped and ev.prevented
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: inline clickable provider action icons (coordinate hit-testing)
+# ---------------------------------------------------------------------------
+
+
+async def test_action_cluster_spans_on_cursor_row(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)),
+                                   name="web", size=0, mtime=0.0, is_dir=True,
+                                   extra={"docker.state": "running"})]
+        panel.cursor = 0
+        panel.view_mode = PanelViewMode.FULL
+        spans = panel._action_spans(0, 80)
+        assert spans, "container row should show an action cluster"
+        ids = {a.id for (_s, _e, a) in spans}
+        assert "docker.stop" in ids
+        # cluster is always visible on a container row — not gated on the cursor
+        panel.cursor = -1
+        assert panel._action_spans(0, 80), "cluster shows regardless of cursor"
+        # the '..' parent row never shows a cluster
+        panel.entries.insert(0, FileEntry(
+            loc=VfsPath(scheme="docker", root="", parts=()),
+            name="..", size=0, mtime=0.0, is_dir=True))
+        assert panel._action_spans(0, 80) == []
+
+
+async def test_click_on_action_icon_runs_action(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    ran = {}
+    monkeypatch.setattr(DundersApp, "_run_provider_action",
+                        lambda self, action, targets=None: ran.update(id=action.id, targets=targets))
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)),
+                                   name="web", size=0, mtime=0.0, is_dir=True,
+                                   extra={"docker.state": "running"})]
+        panel.cursor = 0
+        panel.view_mode = PanelViewMode.FULL
+        # Pin a deterministic width via the established test-size hook so the
+        # span geometry and the click helper agree (panel.size is 0×0 here).
+        panel._panel_size = (80, 25)
+        width = panel._panel_size[0]
+        spans = panel._action_spans(0, width)
+        first_start, _e, first_action = spans[0]
+        handled = panel._maybe_run_action_click(first_start, 0)
+        assert handled is True
+        assert ran.get("id") == first_action.id
+        assert ran.get("targets") == [panel.entries[0].loc]
+
+
+async def test_action_cluster_on_every_container_row_reflects_state(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
+                      size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "running"}),
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=("db",)), name="db",
+                      size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "exited"}),
+        ]
+        panel.cursor = 0
+        panel.view_mode = PanelViewMode.FULL
+        # Both rows show a cluster (cursor-independent); each reflects its state.
+        running_ids = {a.id for *_x, a in panel._action_spans(0, 80)}
+        stopped_ids = {a.id for *_x, a in panel._action_spans(1, 80)}
+        assert "docker.stop" in running_ids and "docker.start" not in running_ids
+        assert "docker.start" in stopped_ids and "docker.stop" not in stopped_ids
+
+
+async def test_docker_index_header_replaces_size_date_with_actions(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        # Container index → header shows "Actions", not Size/Date.
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)),
+                                   name="web", size=0, mtime=0.0, is_dir=True,
+                                   extra={"docker.state": "running"})]
+        head = "".join(seg.text for seg in panel._render_header(80))
+        assert "Actions" in head
+        assert "Size" not in head and "Date" not in head
+        # Inside a container (real files) → normal Size/Date header.
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("web",))
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web","etc")),
+                                   name="etc", size=4096, mtime=1.0, is_dir=True)]
+        head2 = "".join(seg.text for seg in panel._render_header(80))
+        assert "Size" in head2 and "Date" in head2 and "Actions" not in head2
+
+
+async def test_docker_status_column_layout_header_and_sort(monkeypatch, tmp_path):
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.view_mode = PanelViewMode.FULL
+        panel._panel_size = (80, 25)
+
+        # The provider contributes a single "S" column at the index.
+        layout = panel._provider_layout(80)
+        assert layout is not None
+        cols = layout[0]
+        assert [c.label for c in cols] == ["S"]
+
+        # Header shows Name + S + Actions, no Size/Date.
+        head = "".join(s.text for s in panel._render_header(80))
+        assert "Name" in head and "S" in head and "Actions" in head
+        assert "Size" not in head and "Date" not in head
+
+        # Clicking the S header maps to the column; sorting orders running first.
+        s_col = cols[0]
+        s_x = layout[2][0][0]
+        assert panel._provider_header_col_at(s_x, layout) is s_col
+
+        db = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("db",)), name="db",
+                       size=0, mtime=0.0, is_dir=True,
+                       extra={"docker.state": "exited", "glyph": "■"})
+        web = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
+                        size=0, mtime=0.0, is_dir=True,
+                        extra={"docker.state": "running", "glyph": "▶"})
+
+        # _apply_rows honours the active sort key. By S: running first (containers
+        # are all dirs, so this only works via the key path that bypasses the
+        # dirs-alphabetical rule).
+        panel._sort_key_id, panel._sort_key = s_col.key, s_col.sort_key
+        panel.sort_descending = False
+        panel._apply_rows([db, web])
+        assert [e.name for e in panel.entries] == ["web", "db"]
+
+        # By name, honouring direction (also bypasses the dirs rule).
+        panel._sort_key_id, panel._sort_key = "name", lambda e: e.name.lower()
+        panel.sort_descending = False
+        panel._apply_rows([db, web])
+        assert [e.name for e in panel.entries] == ["db", "web"]
+        panel.sort_descending = True
+        panel._apply_rows([db, web])
+        assert [e.name for e in panel.entries] == ["web", "db"]
+
+        # _sort_active sets id/key and flips direction on re-click (refresh stubbed).
+        monkeypatch.setattr(panel, "refresh_listing", lambda *, focus_loc=None: None)
+        panel._sort_key_id = None
+        panel._sort_active("name", lambda e: e.name.lower())
+        assert panel._sort_key_id == "name" and panel.sort_descending is False
+        panel._sort_active("name", lambda e: e.name.lower())
+        assert panel.sort_descending is True
+
+        # The S column cells render the state glyphs.
+        panel._sort_key_id, panel._sort_key = None, None
+        panel._apply_rows([web, db])
+        rows_text = "".join(
+            s.text
+            for i in range(len(panel.entries))
+            for s in panel._render_entry_row(i, 80)
+        )
+        assert "▶" in rows_text and "■" in rows_text
+
+
+async def test_failed_entry_reverts_to_previous_location(monkeypatch, tmp_path):
+    # Entering a stopped container fails to list → revert to the index with the
+    # cursor on the container we tried to open (never stranded in an empty panel).
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        index = VfsPath(scheme="docker", root="", parts=())
+        stopped = VfsPath(scheme="docker", root="", parts=("db",))
+        panel.cwd_loc = stopped
+        panel._return_to = index
+        landed = []
+        monkeypatch.setattr(panel, "refresh_listing",
+                            lambda *, focus_loc=None: landed.append(focus_loc))
+        assert panel._maybe_revert(OSError("not running")) is True
+        assert panel.cwd_loc == index
+        assert panel._return_to is None
+        assert landed == [stopped]  # cursor returns to the container row
+
+
+async def test_revert_restores_sort_state(monkeypatch, tmp_path):
+    # A bounced entry must leave the index's sort exactly as it was.
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        monkeypatch.setattr(panel, "refresh_listing", lambda *, focus_loc=None: None)
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel._sort_key_id = "docker.state"
+        panel._sort_key = lambda e: 0
+        panel.sort_descending = True
+        # Enter a container → sort is reset for the (would-be) new listing…
+        panel._change_cwd_loc(VfsPath(scheme="docker", root="", parts=("db",)))
+        assert panel._sort_key_id is None
+        # …but the bounce restores it.
+        assert panel._maybe_revert(OSError("not running")) is True
+        assert panel._sort_key_id == "docker.state"
+        assert panel.sort_descending is True
+
+
+async def test_sort_remembered_across_container_roundtrip(monkeypatch, tmp_path):
+    # The index keeps its "S" sort after diving into a container and back out.
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        monkeypatch.setattr(panel, "refresh_listing", lambda *, focus_loc=None: None)
+        index = VfsPath(scheme="docker", root="", parts=())
+        container = VfsPath(scheme="docker", root="", parts=("web",))
+        panel.cwd_loc = index
+        s_col = panel._provider_columns()[0]
+
+        panel._sort_active(s_col.key, s_col.sort_key)        # sort index by S
+        assert panel._sort_key_id == "docker.state"
+        panel._change_cwd_loc(container)                     # dive in → reset
+        assert panel._sort_key_id is None
+        panel._change_cwd_loc(index)                         # back → restored
+        assert panel._sort_key_id == "docker.state"
+        assert panel._sort_key is not None
+
+
+async def test_ascend_uses_provider_parent_entry(monkeypatch, tmp_path):
+    # From inside a Docker container, Backspace must return to the container
+    # index (the provider's ".." entry), not escape to the local filesystem.
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        index = VfsPath(scheme="docker", root="", parts=())
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("web",))
+        panel.entries = [FileEntry(loc=index, name="..", size=0, mtime=0.0, is_dir=True)]
+        recorded = []
+        monkeypatch.setattr(panel, "_change_cwd_loc", lambda loc: recorded.append(loc))
+        panel.ascend()
+        assert recorded == [index]
+
+
+async def test_ascend_from_virtual_dunder_root_goes_home(monkeypatch, tmp_path):
+    # Backspace from a network/virtual source root (docker index, ssh:// …) with
+    # no ".." entry lands in the local home — always a way back to the FS dunder.
+    # An archive (root = a real local file) still steps out to its folder.
+    from pathlib import Path
+
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        recorded = []
+        monkeypatch.setattr(panel, "_change_cwd_loc", lambda loc: recorded.append(loc))
+
+        panel.entries = []  # source root: no ".." entry
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.ascend()
+        assert recorded[-1] == VfsPath.local(Path.home())
+
+        panel.cwd_loc = VfsPath(scheme="docker", root="ssh://u@h:2222", parts=())
+        panel.ascend()
+        assert recorded[-1] == VfsPath.local(Path.home())
+
+        # Archive backed by a real local file → step out to its folder.
+        zip_path = tmp_path / "a.zip"
+        zip_path.write_bytes(b"")
+        panel.cwd_loc = VfsPath(scheme="zip", root=str(zip_path), parts=())
+        panel.ascend()
+        assert recorded[-1] == VfsPath.local(tmp_path)

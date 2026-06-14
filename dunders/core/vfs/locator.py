@@ -96,6 +96,21 @@ class VfsPath:
             return f"{self.scheme}://{self.root}!/{'/'.join(self.parts)}"
         return f"{self.scheme}://{self.root}"
 
+    def display(self) -> str:
+        """Human-facing location string for the panel header / copy button.
+
+        Clean URL form — no archive ``!`` separator: ``file`` → the local path,
+        ``sftp://user@host:22/dir/file``, ``ftp://host/pub``, ``docker:web/etc``
+        (local) or ``docker://ssh://host/web`` (remote), ``zip:///a/b.zip/inner``.
+        Unlike :meth:`as_uri` this is NOT round-trippable (don't feed it to
+        :meth:`parse`); it's for display/clipboard only."""
+        if self.scheme == "file":
+            return str(self.to_local())
+        if self.root:
+            base = f"{self.scheme}://{self.root}"
+            return f"{base}/{'/'.join(self.parts)}" if self.parts else base
+        return f"{self.scheme}:{'/'.join(self.parts)}"
+
     @classmethod
     def parse(cls, uri: str) -> VfsPath:
         scheme, sep, rest = uri.partition("://")

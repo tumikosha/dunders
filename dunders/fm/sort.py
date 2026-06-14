@@ -8,6 +8,7 @@ Invariant maintained by sort_entries:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import PurePath
 
@@ -68,6 +69,7 @@ def sort_entries(
     order: SortOrder,
     *,
     descending: bool | None = None,
+    key: Callable[[FileEntry], object] | None = None,
 ) -> list[FileEntry]:
     """Return a new list with parent first, directories alphabetical,
     files in the chosen order. Input list is not mutated.
@@ -79,6 +81,16 @@ def sort_entries(
     if descending is None:
         descending = _DEFAULT_DESCENDING[order]
     parent = [e for e in entries if e.is_parent]
+    if key is not None:
+        # Custom key (e.g. a provider column like Docker state): sort every
+        # non-parent entry by it, bypassing the dirs-before-files grouping —
+        # otherwise an all-directory listing (containers) could never reorder.
+        rest = sorted(
+            (e for e in entries if not e.is_parent),
+            key=key,
+            reverse=descending,
+        )
+        return [*parent, *rest]
     dirs = sorted(
         (e for e in entries if e.is_dir and not e.is_parent),
         key=_name_key,

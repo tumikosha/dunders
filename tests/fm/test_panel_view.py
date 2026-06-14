@@ -1,9 +1,10 @@
 from pathlib import Path
 import stat
 
+from dunders.core.vfs import VfsPath
 from dunders.fm.file_entry import FileEntry
 from dunders.fm import panel_view as pv
-from dunders.fm.panel_view import PanelViewMode
+from dunders.fm.panel_view import PanelViewMode, _name_prefix
 
 
 def _entry(name, *, is_dir=False, is_symlink=False, is_executable=False, mode=0):
@@ -138,3 +139,20 @@ def test_empty_row_text_keeps_separators_at_same_columns():
         sep_cols_empty = [i for i, c in enumerate(empty) if c == pv.COL_SEP]
         sep_cols_full = [i for i, c in enumerate(full) if c == pv.COL_SEP]
         assert sep_cols_empty == sep_cols_full
+
+
+def _docker_entry(**kw):
+    base = dict(loc=VfsPath(scheme="docker", root="web"), name="web",
+                size=0, mtime=0.0, is_dir=True)
+    base.update(kw)
+    return FileEntry(**base)
+
+
+def test_name_prefix_ignores_provider_glyph():
+    # The state glyph lives in a dedicated provider column (Docker "S"), NOT in
+    # the name prefix — so the prefix is the plain ls -F marker.
+    assert _name_prefix(_docker_entry(extra={"glyph": "▶"})) == "/"  # is_dir → "/"
+
+
+def test_default_prefix_when_no_glyph():
+    assert _name_prefix(_docker_entry(extra={})) == "/"  # is_dir → "/"

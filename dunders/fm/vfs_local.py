@@ -14,6 +14,7 @@ It is the proof that the provider protocol fits the real code; the first
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import BinaryIO
 
 from dunders.core.vfs import VfsPath, VfsRegistry
@@ -31,6 +32,27 @@ class LocalProvider:
 
     scheme = "file"
     capabilities = frozenset({"read", "write", "stream", "random_access"})
+    # Make "Local files" an entry in the "_" dunder menu — a one-keystroke way
+    # back to the local filesystem from any other dunder. Empty spec = home.
+    display_name = "Local files"
+    accepts_empty_open = True
+    open_placeholder = "path (empty = home directory)"
+
+    def resolve_target(
+        self, spec: str, *, base: VfsPath, password: str | None = None
+    ) -> VfsPath | None:
+        spec = spec.strip()
+        p = Path(spec).expanduser() if spec else Path.home()
+        if not p.is_absolute():
+            anchor = base.to_local() if base.scheme == "file" else Path.home()
+            p = anchor / p
+        try:
+            p = p.resolve()
+        except OSError:
+            pass
+        if not p.is_dir():
+            raise OSError(f"Not a directory: {p}")
+        return VfsPath.local(p)
 
     def scan(
         self,
@@ -129,6 +151,11 @@ def default_registry() -> VfsRegistry:
         reg.register(SftpProvider())
     except ImportError:
         pass
+    # Docker is browsed via its CLI; only offer the scheme when the binary is
+    # present and the daemon answers, like the 7z provider.
+    from dunders.fm.providers.docker_provider import DockerProvider, docker_available
+    if docker_available():
+        reg.register(DockerProvider())
     # 7z is browsed via the external CLI; only offer the scheme when a binary
     # is present, so the panel never tries to enter a .7z it cannot open.
     if find_7z() is not None:

@@ -143,6 +143,12 @@ class TestNeedsPassword:
     def test_anonymous_no_prompt(self):
         assert FtpProvider().needs_password("ftp.example.org") is False
 
+    def test_no_prompt_when_already_connected_this_session(self):
+        p = FtpProvider()
+        assert p.needs_password("tumi@host:4021/") is True  # first time
+        p._creds[_canonical_root("host", 4021, "tumi")] = ("host", 4021, "tumi", "pw")
+        assert p.needs_password("tumi@host:4021/") is False  # reconnect reuses
+
 
 # ---- integration (requires pyftpdlib) ------------------------------------
 

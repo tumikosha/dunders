@@ -92,3 +92,25 @@ def test_sort_does_not_mutate_input():
     snapshot = list(raw)
     sort_entries(raw, SortOrder.NAME)
     assert raw == snapshot
+
+
+def test_key_override_sorts_all_entries_ignoring_dir_split():
+    # All-dirs listing (like Docker containers): the custom key orders them,
+    # the parent stays pinned, and the dirs-before-files rule is bypassed.
+    raw = [
+        _parent(),
+        _entry("web", is_dir=True),
+        _entry("db", is_dir=True),
+        _entry("cache", is_dir=True),
+    ]
+    rank = {"web": 0, "cache": 1, "db": 2}
+    result = sort_entries(raw, SortOrder.NAME, key=lambda e: rank.get(e.name, 9))
+    assert result[0].is_parent
+    assert [e.name for e in result[1:]] == ["web", "cache", "db"]
+
+
+def test_key_override_respects_descending():
+    raw = [_entry("a", is_dir=True), _entry("b", is_dir=True)]
+    rank = {"a": 0, "b": 1}
+    res = sort_entries(raw, SortOrder.NAME, key=lambda e: rank[e.name], descending=True)
+    assert [e.name for e in res] == ["b", "a"]

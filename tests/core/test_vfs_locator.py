@@ -100,3 +100,38 @@ class TestValueSemantics:
     def test_str_is_uri(self):
         loc = VfsPath.local(Path("/home/user"))
         assert str(loc) == loc.as_uri()
+
+
+class TestDisplay:
+    """display() — human-facing location string for the header / copy button
+    (clean URLs, no archive '!' separator; NOT round-trippable)."""
+
+    def test_file_is_local_path(self, tmp_path):
+        assert VfsPath.local(tmp_path).display() == str(tmp_path)
+
+    def test_sftp_with_path(self):
+        loc = VfsPath(scheme="sftp", root="bob@host:22", parts=("dir", "file"))
+        assert loc.display() == "sftp://bob@host:22/dir/file"
+
+    def test_sftp_root_only(self):
+        loc = VfsPath(scheme="sftp", root="bob@host:22", parts=())
+        assert loc.display() == "sftp://bob@host:22"
+
+    def test_no_bang_separator(self):
+        loc = VfsPath(scheme="sftp", root="bob@host:22", parts=("a", "b"))
+        assert "!" not in loc.display()
+
+    def test_docker_local_container(self):
+        loc = VfsPath(scheme="docker", root="", parts=("web", "etc"))
+        assert loc.display() == "docker:web/etc"
+
+    def test_docker_local_index(self):
+        assert VfsPath(scheme="docker", root="", parts=()).display() == "docker:"
+
+    def test_docker_remote(self):
+        loc = VfsPath(scheme="docker", root="ssh://u@h:22", parts=("web",))
+        assert loc.display() == "docker://ssh://u@h:22/web"
+
+    def test_zip_archive(self):
+        loc = VfsPath(scheme="zip", root="/a/b.zip", parts=("inner",))
+        assert loc.display() == "zip:///a/b.zip/inner"

@@ -16,7 +16,7 @@ from pathlib import PurePath
 
 from dunders.fm.file_entry import FileEntry
 
-__all__ = ["classify", "role_for", "CATEGORIES", "ROLE_PREFIX"]
+__all__ = ["classify", "role_for", "glyph_role_color", "CATEGORIES", "ROLE_PREFIX"]
 
 ROLE_PREFIX = "panel.file."
 
@@ -88,3 +88,18 @@ def classify(entry: FileEntry) -> str | None:
 def role_for(category: str) -> str:
     """Theme role name for a category, e.g. ``"image"`` -> ``"panel.file.image"``."""
     return ROLE_PREFIX + category
+
+
+# Status glyphs (e.g. docker container state) use fixed semantic colours
+# rather than theme roles — consistent with the panel's fixed "no match"
+# alarm colour, and so the feature needs no per-theme role additions.
+_GLYPH_ROLE_COLOR = {
+    "success": "green",
+    "warning": "yellow",
+    "muted": "bright_black",
+}
+
+
+def glyph_role_color(role: str) -> str | None:
+    """Fixed Rich colour name for a status glyph role, or None if unknown."""
+    return _GLYPH_ROLE_COLOR.get(role)

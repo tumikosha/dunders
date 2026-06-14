@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
 from dunders.core.vfs.locator import VfsPath
@@ -30,9 +31,65 @@ if TYPE_CHECKING:
     from dunders.fm.file_entry import FileEntry
 
 
-__all__ = ["VfsProvider", "ProgressCallback", "TargetResolver"]
+__all__ = ["VfsProvider", "ProgressCallback", "TargetResolver", "ProviderAction",
+           "ProviderActions", "ProviderColumn", "ProviderColumns"]
 
 ProgressCallback = Callable[[int, int], None]
+
+
+@dataclass(frozen=True)
+class ProviderAction:
+    """A verb a provider exposes on its entries (e.g. start a container).
+
+    ``run`` does the work for the given locators and returns an ``OpResult``;
+    it may be slow (callers run it on a worker thread). ``applies_to`` decides
+    whether the action is offered for a given ``FileEntry`` (e.g. Start only
+    when a container is stopped). ``icon`` is a glyph shown in menus and as a
+    clickable button.
+    """
+
+    id: str
+    label: str
+    run: Callable[[list[VfsPath]], "OpResult"]
+    icon: str = ""
+    hotkey: str | None = None
+    applies_to: Callable[["FileEntry"], bool] = lambda e: True
+
+
+@runtime_checkable
+class ProviderActions(Protocol):
+    """Optional capability: a provider that declares verbs on its entries.
+    Checked structurally (``getattr``/``isinstance``), like ``TargetResolver``."""
+
+    scheme: str
+
+    def actions(self) -> "list[ProviderAction]": ...
+
+
+@dataclass(frozen=True)
+class ProviderColumn:
+    """An extra panel column a provider contributes for its listings (e.g. a
+    Docker "S" state column). Replaces the default Size/Date columns when a
+    provider declares any. ``value`` renders the cell text (``width`` cells
+    wide, centred); ``sort_key`` is used when the user sorts by this column
+    (click on its header). ``label`` is the header text."""
+
+    key: str
+    label: str
+    width: int
+    value: Callable[["FileEntry"], str]
+    sort_key: Callable[["FileEntry"], object]
+
+
+@runtime_checkable
+class ProviderColumns(Protocol):
+    """Optional capability: a provider that contributes panel columns for a
+    given location (so it can show columns only where they make sense, e.g.
+    Docker's container index but not inside a container). Checked structurally."""
+
+    scheme: str
+
+    def columns(self, loc: VfsPath) -> "list[ProviderColumn]": ...
 
 
 @runtime_checkable

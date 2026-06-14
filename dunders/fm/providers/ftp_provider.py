@@ -134,6 +134,7 @@ class FtpProvider:
     scheme = "ftp"
     display_name = "FTP"
     capabilities = frozenset({"read", "write", "stream", "slow"})
+    open_placeholder = "[user[:pass]@]host[:port][/path]"
 
     def __init__(self) -> None:
         self._creds: dict[str, tuple[str, int, str, str]] = {}
@@ -181,9 +182,17 @@ class FtpProvider:
 
     def needs_password(self, spec: str) -> bool:
         """True when the spec names a user but no inline password — the app
-        should prompt for one before opening (anonymous needs no prompt)."""
-        _host, _port, user, passwd, _path = _parse_spec(spec)
-        return user is not None and passwd is None
+        should prompt for one before opening (anonymous needs no prompt).
+        A host already authenticated this session is reused without re-asking."""
+        host, port, user, passwd, _path = _parse_spec(spec)
+        if user is None or passwd is not None:
+            return False
+        if _canonical_root(host, port, user) in self._creds:
+            return False
+        from dunders.fm import netrc_store
+        if netrc_store.lookup(host) is not None:
+            return False  # remembered in ~/.netrc — reuse without asking
+        return True
 
     def resolve_target(
         self, spec: str, *, base: VfsPath, password: str | None = None
@@ -195,8 +204,14 @@ class FtpProvider:
             # An out-of-range port surfaces as a misleading "unknown host" from
             # the socket layer — flag it precisely instead.
             raise OSError(f"Invalid port {port} (must be 1-65535)")
-        if password is not None:
+        prompted = password is not None
+        if prompted:
             passwd = password  # prompted password overrides / fills in
+        if passwd is None:  # nothing supplied → try a remembered ~/.netrc entry
+            from dunders.fm import netrc_store
+            auth = netrc_store.lookup(host)
+            if auth and (user is None or user == auth[0]):
+                user, passwd = (user or auth[0]), auth[1]
         login_user = user or "anonymous"
         login_pass = passwd or ""
         root = _canonical_root(host, port, user)
@@ -209,6 +224,9 @@ class FtpProvider:
         except Exception as exc:
             self._creds.pop(root, None)
             raise OSError(_connect_error(exc, host, port, login_user)) from exc
+        if prompted and login_pass:  # remember a freshly-typed password
+            from dunders.fm import netrc_store
+            netrc_store.save(host, login_user, login_pass)
         parts = tuple(p for p in path.split("/") if p)
         return VfsPath(scheme="ftp", root=root, parts=parts)
 
