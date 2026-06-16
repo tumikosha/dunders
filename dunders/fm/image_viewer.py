@@ -148,6 +148,9 @@ class ImageViewerWidget(ScrollView):
         self._color = True
         self._img_size: tuple[int, int] = (0, 0)
         self._grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
+        self._rgb = None            # cached PIL RGB image, file already closed
+        self._last_fit: tuple[int, int] | None = None
+        self._error: str | None = None
 
     @property
     def color(self) -> bool:
@@ -167,6 +170,7 @@ class ImageViewerWidget(ScrollView):
         if color == self._color:
             return
         self._color = color
+        self._last_fit = None  # force grid rebuild with the new color mode
         self._regenerate()
 
     def toggle_color(self) -> None:
@@ -177,24 +181,33 @@ class ImageViewerWidget(ScrollView):
             return
         cols = max(1, self.size.width or 80)
         rows = max(1, self.size.height or 24)
-        try:
-            with _PILImage.open(self._path) as im:
-                im.seek(0)  # first frame for animated GIFs
-                rgb = im.convert("RGB")
+        # Decode from disk only once; keep the RGB image in memory so resizes
+        # are a cheap in-memory resample, not repeated disk I/O + decode.
+        if self._rgb is None and self._error is None:
+            try:
+                with _PILImage.open(self._path) as im:
+                    im.seek(0)  # no-op for single-frame formats; frame 0 for GIF
+                    rgb = im.convert("RGB")
+                    rgb.load()  # detach pixel data from the (closing) file
+                self._rgb = rgb
                 self._img_size = rgb.size
-                out_w, out_h = _fit(rgb.width, rgb.height, cols, rows)
-                resized = rgb.resize((out_w, out_h))
-                # `get_flattened_data` replaces the deprecated `getdata`
-                # in Pillow 14; fall back for older releases.
-                getter = getattr(
-                    resized, "get_flattened_data", resized.getdata
-                )
-                pixels = list(getter())
-        except Exception:
-            self._grid = []
-            self.virtual_size = Size(0, 1)
-            self.refresh()
+            except Exception:
+                self._rgb = None
+                self._error = "Could not decode image"
+                self._grid = []
+                self.virtual_size = Size(cols, 1)
+                if self.is_mounted:
+                    self.refresh()
+                return
+        if self._rgb is None:
             return
+        out_w, out_h = _fit(self._rgb.width, self._rgb.height, cols, rows)
+        if self._last_fit == (out_w, out_h) and self._grid:
+            return  # size unchanged → nothing to recompute
+        self._last_fit = (out_w, out_h)
+        resized = self._rgb.resize((out_w, out_h))
+        getdata = getattr(resized, "get_flattened_data", None) or resized.getdata
+        pixels = list(getdata())
         self._grid = image_to_ascii(pixels, out_w, out_h, color=self._color)
         self.virtual_size = Size(out_w, len(self._grid))
         if self.is_mounted:
@@ -215,8 +228,13 @@ class ImageViewerWidget(ScrollView):
         return pal.rich_style("editor.text")
 
     def render_line(self, y: int) -> Strip:
+        if self._error is not None:
+            if y == 0:
+                base = self._base_style()
+                return Strip(Text(self._error, style=base).render(self.app.console))
+            return Strip.blank(self.size.width, self.rich_style)
         idx = y + int(self.scroll_offset.y)
-        if idx >= len(self._grid):
+        if idx < 0 or idx >= len(self._grid):
             return Strip.blank(self.size.width, self.rich_style)
         base = self._base_style()
         text = Text(style=self.rich_style)

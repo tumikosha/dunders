@@ -101,7 +101,11 @@ class TestImageViewerContent:
         async with app.run_test() as pilot:
             content = app.query_one(ImageViewerContent)
             assert content.widget.color is True
+            assert content.widget.img_size == (4, 4)
+            assert content.widget._grid  # grid populated => image decoded
+            assert content._button.label.plain == "[ Color ]"
             content._toggle_color()
             await pilot.pause()
             assert content.widget.color is False
             assert content._button.label.plain == "[ Mono ]"
+            assert content.widget._grid[0][0][1] is None  # mono => rgb is None
