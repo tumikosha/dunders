@@ -45,6 +45,9 @@ dependencies = [
 # Opt-in SFTP support (the sftp: dunder). paramiko is LGPL — kept out of the
 # default install so the base package stays permissive-only.
 sftp = ["paramiko>=3.0"]
+# Opt-in image-to-ASCII viewer (F3 on an image). Pillow is HPND-licensed
+# (permissive), kept out of the default install to stay dependency-light.
+image = ["pillow>=10"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
