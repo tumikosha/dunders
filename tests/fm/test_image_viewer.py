@@ -1,4 +1,4 @@
-from dunders.fm.image_viewer import sniff_image, _fit
+from dunders.fm.image_viewer import sniff_image, _fit, image_to_ascii
 
 
 class TestSniffImage:
@@ -41,3 +41,34 @@ class TestFit:
 
     def test_minimum_one(self):
         assert _fit(1, 1, 1, 1) == (1, 1)
+
+
+class TestImageToAscii:
+    def test_grid_dimensions(self):
+        pixels = [(0, 0, 0)] * (3 * 2)  # 3 wide, 2 tall
+        grid = image_to_ascii(pixels, 3, 2, color=False)
+        assert len(grid) == 2
+        assert all(len(row) == 3 for row in grid)
+
+    def test_black_is_space_mono(self):
+        grid = image_to_ascii([(0, 0, 0)], 1, 1, color=False)
+        char, style_rgb = grid[0][0]
+        assert char == " "
+        assert style_rgb is None
+
+    def test_white_is_last_ramp_char_mono(self):
+        grid = image_to_ascii([(255, 255, 255)], 1, 1, color=False)
+        char, style_rgb = grid[0][0]
+        assert char == "@"
+        assert style_rgb is None
+
+    def test_color_preserves_rgb(self):
+        grid = image_to_ascii([(255, 255, 255)], 1, 1, color=True)
+        char, style_rgb = grid[0][0]
+        assert char == "@"
+        assert style_rgb == (255, 255, 255)
+
+    def test_luminance_uses_green_weight(self):
+        grid = image_to_ascii([(0, 255, 0)], 1, 1, color=False)
+        char, _ = grid[0][0]
+        assert char not in (" ", "@")

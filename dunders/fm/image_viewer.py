@@ -47,3 +47,32 @@ def _fit(
         out_h = max(1, max_rows)
         out_w = max(1, int(out_h * img_w / img_h / cell_aspect))
     return out_w, out_h
+
+
+def _ramp_char(lum: float) -> str:
+    idx = int(lum / 255 * (len(_RAMP) - 1))
+    idx = max(0, min(idx, len(_RAMP) - 1))
+    return _RAMP[idx]
+
+
+def image_to_ascii(
+    pixels: list[tuple[int, int, int]],
+    width: int,
+    height: int,
+    *,
+    color: bool,
+) -> list[list[tuple[str, tuple[int, int, int] | None]]]:
+    """Turn a row-major flat list of RGB pixels into a grid of
+    (char, rgb_or_None) cells. In mono mode the rgb element is None; in
+    color mode it carries the pixel's RGB for a truecolor foreground."""
+    grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
+    for y in range(height):
+        row: list[tuple[str, tuple[int, int, int] | None]] = []
+        base = y * width
+        for x in range(width):
+            r, g, b = pixels[base + x]
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+            char = _ramp_char(lum)
+            row.append((char, (r, g, b) if color else None))
+        grid.append(row)
+    return grid
