@@ -71,9 +71,10 @@ class TestImageToAscii:
         assert style_rgb == (255, 255, 255)
 
     def test_luminance_uses_green_weight(self):
+        # green weight 0.587 -> lum ~149.6 -> round(149.6/255*9)=5 -> _RAMP[5]='+'
         grid = image_to_ascii([(0, 255, 0)], 1, 1, color=False)
         char, _ = grid[0][0]
-        assert char not in (" ", "@")
+        assert char == "+"
 
 
 class TestImageViewerContent:

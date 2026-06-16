@@ -84,7 +84,8 @@ def _fit(
 
 
 def _ramp_char(lum: float) -> str:
-    idx = int(lum / 255 * (len(_RAMP) - 1))
+    """Map a luminance value (0.0-255.0) onto the brightness ramp."""
+    idx = round(lum / 255 * (len(_RAMP) - 1))
     idx = max(0, min(idx, len(_RAMP) - 1))
     return _RAMP[idx]
 
@@ -98,7 +99,15 @@ def image_to_ascii(
 ) -> list[list[tuple[str, tuple[int, int, int] | None]]]:
     """Turn a row-major flat list of RGB pixels into a grid of
     (char, rgb_or_None) cells. In mono mode the rgb element is None; in
-    color mode it carries the pixel's RGB for a truecolor foreground."""
+    color mode it carries the pixel's RGB for a truecolor foreground.
+    `pixels` must contain at least `width * height` entries (row-major); a
+    short list is padded with black."""
+    # Defensive: a corrupt/partial decode could hand us fewer pixels than
+    # width*height. Pad the shortfall with black rather than raising
+    # IndexError mid-render (callers should still supply width*height).
+    needed = width * height
+    if len(pixels) < needed:
+        pixels = list(pixels) + [(0, 0, 0)] * (needed - len(pixels))
     grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
     for y in range(height):
         row: list[tuple[str, tuple[int, int, int] | None]] = []
