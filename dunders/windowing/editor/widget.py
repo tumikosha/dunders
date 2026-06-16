@@ -23,6 +23,7 @@ from dunders.windowing.core.highlight import Span, SyntaxHighlighter
 from dunders.windowing.core.macro import MacroAction, MacroRecorder
 from dunders.windowing.core.search import SearchOptions, Match, find_matches
 from dunders.windowing.palette import Palette, Style
+from dunders.windowing.scrollbar import ThinScrollBarRender
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,13 @@ class EditorWidget(ScrollView):
     EditorWidget {
         height: 3fr;
         background: $surface;
+        /* 1-cell gutters + a bright thumb so ThinScrollBarRender's ▌/▏ (and
+           ▄/▁) bars read exactly like the tree's own scrollbar. */
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-color: $foreground;
+        scrollbar-color-hover: $foreground;
+        scrollbar-color-active: $foreground;
     }
     """
 
@@ -201,6 +209,9 @@ class EditorWidget(ScrollView):
         self._detect_language()
         self._recompute_syntax()
         self.apply_theme()
+        # Thin █/░ (vertical) and ▄/▁ (horizontal) scrollbars, matching the tree.
+        self.vertical_scrollbar.renderer = ThinScrollBarRender
+        self.horizontal_scrollbar.renderer = ThinScrollBarRender
         self._refresh_render()
 
     def on_unmount(self) -> None:

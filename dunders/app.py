@@ -92,6 +92,7 @@ from dunders.windowing import (
     show_command_palette,
     show_modal,
 )
+from dunders.windowing.tree import JsonYamlTreeContent
 from dunders.windowing.content import WindowContent
 from dunders.windowing.core import clipboard
 from dunders.windowing.editor.language_picker import show_language_picker
@@ -983,6 +984,11 @@ class DundersApp(App):
                 label=label,
                 handler=(lambda s=scheme: self._open_dunder(s)),
             ))
+        cmds.append(WindowCommand(
+            id="dunder.open.tree",
+            label="Tree (JSON/YAML)",
+            handler=self._open_tree_dunder,
+        ))
         cmds.extend(self._bookmark_commands())
         self.command_registry.register_many(cmds)
 
@@ -1196,6 +1202,7 @@ class DundersApp(App):
                     MenuItem(label=label, command_id=f"dunder.open.{scheme}")
                     for scheme, label in self._openable_dunders()
                 ],
+                MenuItem(label="Tree (JSON/YAML)", command_id="dunder.open.tree"),
                 MenuSeparator(),
                 MenuItem(label="Add current location…", command_id="bookmark.add.menu"),
                 *[
@@ -2051,6 +2058,33 @@ class DundersApp(App):
         width = max(60, len(placeholder) + 8) if placeholder else 60
         show_modal(self.desktop, dialog, title=label, size=(width, 7))
         self.call_after_refresh(dialog.focus_input)
+
+    def _open_tree_dunder(self) -> None:
+        """"_"/palette: open the .json/.yaml file under the cursor as an
+        editable tree (the JSON/YAML tree dunder)."""
+        if self._has_active_modal() or self.desktop is None:
+            return
+        panel = self._active_panel()
+        if panel is None or not (0 <= panel.cursor < len(panel.entries)):
+            return
+        entry = panel.entries[panel.cursor]
+        if entry.is_dir or not self._is_local_entry(entry):
+            self.notify("Tree: select a local .json/.yaml/.yml file", severity="warning")
+            return
+        path = entry.path
+        if path.suffix.lower() not in (".json", ".yaml", ".yml"):
+            self.notify("Tree opens .json/.yaml/.yml files", severity="warning")
+            return
+        self._remember_active_panel_id()
+        self._editor_seq += 1
+        try:
+            content = JsonYamlTreeContent(str(path))
+        except Exception as exc:  # noqa: BLE001 — surface parse/IO errors as a toast
+            self.notify(f"Tree: cannot open {path.name}: {exc}", severity="error")
+            return
+        self._mount_maximized_content(
+            content, title=f"Tree: {path.name}", win_id=f"tree-{self._editor_seq}"
+        )
 
     @staticmethod
     def _provider_hint(provider: object, attr: str) -> str:

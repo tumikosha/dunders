@@ -37,6 +37,8 @@ from .palette import (
 from .themes import list_themes, load_theme, modern_dark, resolve_theme_path, theme_registry
 from .window import Window
 from .editor import EditorWidget, EditorContent, MacroAssignDialog
+from .tree import TreeContent, TreeViewWidget, JsonYamlTreeContent
+from .core.tree_model import TreeNode
 from .core import (
     TextBuffer,
     FoldEngine,
@@ -101,6 +103,10 @@ __all__ = [
     # editor widgets
     "EditorWidget",
     "EditorContent",
+    "TreeContent",
+    "TreeViewWidget",
+    "JsonYamlTreeContent",
+    "TreeNode",
     "MacroAssignDialog",
     # core
     "TextBuffer",

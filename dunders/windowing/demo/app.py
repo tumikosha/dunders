@@ -42,8 +42,10 @@ from dunders.windowing.demo.contents import (
     ListContent,
     LogContent,
     TextAreaContent,
+    build_demo_tree,
 )
 from dunders.windowing.editor import EditorContent
+from dunders.windowing.tree import TreeContent
 from dunders.windowing.helpers import ModalWindow
 
 
@@ -375,8 +377,21 @@ class Calculator:
         )
         d.add_window(w5)
 
-        # Help modal shown at start.
-        self.call_after_refresh(self._show_help)
+        w_tree = make_window(
+            TreeContent(build_demo_tree(), title="Tree"),
+            title=TitleSpec(text="Tree", align="left"),
+            position=(4, 2),
+            size=(46, 18),
+            border_focused=BorderStyle.SINGLE,
+            border_unfocused=BorderStyle.NONE,
+            decorations=Decorations(close_box=True, zoom_box=True),
+        )
+        d.add_window(w_tree)
+
+        # The startup Help popup is intentionally NOT auto-shown: it grabbed
+        # keyboard focus and could not be dismissed with Esc while the MenuBar
+        # held focus. Press F1 for help instead. Click the Tree window to focus
+        # it (TreeContent.on_window_focus then routes keys to the tree).
 
     # --- actions ----------------------------------------------------------
 

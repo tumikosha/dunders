@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, Input, Label, ListView, ListItem, Log, TextArea
 
 from dunders.windowing.content import WindowContent, WindowCommand
+from dunders.windowing.core.tree_model import TreeNode
 
 
 class LabelContent(WindowContent):
@@ -116,3 +116,38 @@ class FormContent(WindowContent):
 
     def _submit(self) -> None:
         self.is_dirty = False
+
+
+def build_demo_tree() -> TreeNode:
+    """In-memory sample: folders, editable snippet leaves, one lazy branch."""
+    root = TreeNode(label="<root>")
+
+    notes = root.add_child(TreeNode(label="notes"))
+    notes.expanded = True
+    notes.add_child(TreeNode(label="todo", body="- wire up adapters\n- write docs"))
+    notes.add_child(TreeNode(label="idea", body="snippet nodes editable inline"))
+    # A multi-line label (editable like any text): Enter on a label line edits
+    # it; ↑/↓ walk label and body lines; ←/→ reveal body then sub-branches.
+    notes.add_child(TreeNode(label="release plan\nv2 — ship the tree dunder"))
+
+    snippets = root.add_child(TreeNode(label="snippets"))
+    snippets.expanded = True
+    snippets.add_child(
+        TreeNode(label="hello.py", body="def hello():\n    print('hi')")
+    )
+    # Deep nesting that bottoms out in a body-less leaf (a pure label node).
+    pkg = snippets.add_child(TreeNode(label="package"))
+    pkg.expanded = True
+    models = pkg.add_child(TreeNode(label="models"))
+    models.expanded = True
+    models.add_child(TreeNode(label="user.py", body="class User:\n    pass"))
+    models.add_child(TreeNode(label="__init__.py"))  # deepest: no body, no children
+
+    def _load(node: TreeNode) -> list[TreeNode]:
+        return [
+            TreeNode(label=f"item-{i}", body=f"lazy body {i}")
+            for i in range(1, 4)
+        ]
+
+    root.add_child(TreeNode(label="lazy-folder", loader=_load))
+    return root
