@@ -1679,3 +1679,24 @@ class TestImageRouting:
         from dunders.app import DundersApp
 
         assert DundersApp._looks_image(tmp_path / "nope.png") is False
+
+    @pytest.mark.asyncio
+    async def test_f3_image_routes_to_image_viewer(self, tmp_path):
+        pytest.importorskip("PIL")
+        from PIL import Image
+
+        from dunders.app import DundersApp
+        from dunders.fm.image_viewer import ImageViewerContent
+
+        png = tmp_path / "p.png"
+        Image.new("RGB", (4, 4), (0, 128, 255)).save(png)
+
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._open_editor_window(png, read_only=True)
+            await pilot.pause()
+            assert any(
+                isinstance(w.content, ImageViewerContent)
+                for w in app.desktop.windows
+            )

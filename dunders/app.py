@@ -99,7 +99,7 @@ from dunders.windowing.editor.language_picker import show_language_picker
 from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
-from dunders.fm.image_viewer import ImageViewerContent
+from dunders.fm.image_viewer import ImageViewerContent, PILLOW_AVAILABLE, sniff_image
 from dunders.windowing.editor import EditorContent
 
 
@@ -2745,8 +2745,6 @@ class DundersApp(App):
     @staticmethod
     def _looks_image(path: Path) -> bool:
         """Sniff the first 16 bytes for a known image magic signature."""
-        from dunders.fm.image_viewer import sniff_image
-
         try:
             with open(path, "rb") as fh:
                 head = fh.read(16)
@@ -3046,15 +3044,10 @@ class DundersApp(App):
         # can coexist (including ones currently minimized in the IconTray).
         self._editor_seq += 1
         seq = self._editor_seq
-        # F3 on an image → ASCII-art viewer (Pillow opt-in extra). If Pillow
-        # is missing or the file isn't really an image, fall through to the
-        # hex/text branch below.
+        # F3 on an image → ASCII-art viewer (Pillow opt-in extra). When the
+        # extra isn't installed, notify and fall through to the hex/text
+        # branch below instead of opening the viewer.
         if read_only and self._looks_image(path):
-            from dunders.fm.image_viewer import (
-                PILLOW_AVAILABLE,
-                ImageViewerContent,
-            )
-
             if PILLOW_AVAILABLE:
                 content = ImageViewerContent(path)
                 self._mount_maximized_content(
@@ -3065,7 +3058,7 @@ class DundersApp(App):
                 return
             self.notify(
                 "Install dunders[image] to view images as ASCII",
-                severity="information",
+                severity="warning",
             )
         # F3 on a large or binary file → hex viewer with chunked mmap reads.
         # Skip the read_text() pre-load entirely so multi-GB files don't hang
