@@ -1,3 +1,5 @@
+import pytest
+
 from dunders.fm.image_viewer import sniff_image, _fit, image_to_ascii
 
 
@@ -72,3 +74,33 @@ class TestImageToAscii:
         grid = image_to_ascii([(0, 255, 0)], 1, 1, color=False)
         char, _ = grid[0][0]
         assert char not in (" ", "@")
+
+
+class TestImageViewerContent:
+    def _make_png(self, tmp_path):
+        Image = pytest.importorskip("PIL.Image")
+        p = tmp_path / "tiny.png"
+        img = Image.new("RGB", (4, 4), (255, 0, 0))
+        img.save(p)
+        return p
+
+    async def test_content_opens_and_toggles(self, tmp_path):
+        pytest.importorskip("PIL")
+        from textual.app import App
+
+        from dunders.fm.image_viewer import ImageViewerContent
+
+        png = self._make_png(tmp_path)
+
+        class _Host(App):
+            def compose(self):
+                yield ImageViewerContent(png)
+
+        app = _Host()
+        async with app.run_test() as pilot:
+            content = app.query_one(ImageViewerContent)
+            assert content.widget.color is True
+            content._toggle_color()
+            await pilot.pause()
+            assert content.widget.color is False
+            assert content._button.label.plain == "[ Mono ]"
