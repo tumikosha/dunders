@@ -1658,3 +1658,24 @@ async def test_provider_action_keeps_cursor_on_acted_container(monkeypatch, tmp_
 
         app._after_provider_action(panel, _Res(), loc)
         assert captured["f"] == loc
+
+
+class TestImageRouting:
+    def test_looks_image_png(self, tmp_path):
+        from dunders.app import DundersApp
+
+        p = tmp_path / "a.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+        assert DundersApp._looks_image(p) is True
+
+    def test_looks_image_text(self, tmp_path):
+        from dunders.app import DundersApp
+
+        p = tmp_path / "a.txt"
+        p.write_text("hello world\n")
+        assert DundersApp._looks_image(p) is False
+
+    def test_looks_image_missing_file(self, tmp_path):
+        from dunders.app import DundersApp
+
+        assert DundersApp._looks_image(tmp_path / "nope.png") is False

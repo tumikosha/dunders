@@ -99,6 +99,7 @@ from dunders.windowing.editor.language_picker import show_language_picker
 from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
+from dunders.fm.image_viewer import ImageViewerContent
 from dunders.windowing.editor import EditorContent
 
 
@@ -1029,7 +1030,7 @@ class DundersApp(App):
         # fill the WHOLE screen (otherwise the console reserves the bottom
         # half in _tile_panels and the panels only get the top half).
         for w in list(self.desktop.windows):
-            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ConsoleContent)):
+            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, ConsoleContent)):
                 self.desktop.minimize_window(w)
         # Reveal both panels un-maximized.
         for panel_id in ("panel-left", "panel-right"):
@@ -2741,6 +2742,18 @@ class DundersApp(App):
             return False
         return b"\x00" in sample
 
+    @staticmethod
+    def _looks_image(path: Path) -> bool:
+        """Sniff the first 16 bytes for a known image magic signature."""
+        from dunders.fm.image_viewer import sniff_image
+
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(16)
+        except OSError:
+            return False
+        return sniff_image(head)
+
     def _should_use_hex_viewer(self, path: Path) -> bool:
         try:
             size = path.stat().st_size
@@ -3033,6 +3046,27 @@ class DundersApp(App):
         # can coexist (including ones currently minimized in the IconTray).
         self._editor_seq += 1
         seq = self._editor_seq
+        # F3 on an image → ASCII-art viewer (Pillow opt-in extra). If Pillow
+        # is missing or the file isn't really an image, fall through to the
+        # hex/text branch below.
+        if read_only and self._looks_image(path):
+            from dunders.fm.image_viewer import (
+                PILLOW_AVAILABLE,
+                ImageViewerContent,
+            )
+
+            if PILLOW_AVAILABLE:
+                content = ImageViewerContent(path)
+                self._mount_maximized_content(
+                    content,
+                    title=f"Image: {path.name}",
+                    win_id=f"imgviewer-{seq}",
+                )
+                return
+            self.notify(
+                "Install dunders[image] to view images as ASCII",
+                severity="information",
+            )
         # F3 on a large or binary file → hex viewer with chunked mmap reads.
         # Skip the read_text() pre-load entirely so multi-GB files don't hang
         # the UI thread.
