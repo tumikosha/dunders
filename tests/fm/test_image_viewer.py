@@ -109,3 +109,33 @@ class TestImageViewerContent:
             assert content.widget.color is False
             assert content._button.label.plain == "[ Mono ]"
             assert content.widget._grid[0][0][1] is None  # mono => rgb is None
+
+
+class TestDegradation:
+    async def test_image_falls_back_to_hex_without_pillow(self, tmp_path, monkeypatch):
+        """With Pillow unavailable, F3 on an image must NOT open the ASCII
+        viewer — it falls through to the hex viewer."""
+        pytest.importorskip("PIL")
+        from PIL import Image
+
+        import dunders.app as appmod
+        from dunders.app import DundersApp
+        from dunders.fm.hex_viewer import HexViewerContent
+        from dunders.fm.image_viewer import ImageViewerContent
+
+        png = tmp_path / "x.png"
+        Image.new("RGB", (4, 4), (10, 20, 30)).save(png)
+
+        # _looks_image still detects it by magic bytes; the routing guard is
+        # PILLOW_AVAILABLE, which the app module reads from its own namespace.
+        monkeypatch.setattr(appmod, "PILLOW_AVAILABLE", False)
+        assert DundersApp._looks_image(png) is True
+
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._open_editor_window(png, read_only=True)
+            await pilot.pause()
+            windows = list(app.desktop.windows)
+            assert not any(isinstance(w.content, ImageViewerContent) for w in windows)
+            assert any(isinstance(w.content, HexViewerContent) for w in windows)
