@@ -96,16 +96,32 @@ class HexViewerWidget(ScrollView):
             self.query = query
             self.pos = pos
 
-    def __init__(self, file_path: str | Path) -> None:
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+    ) -> None:
+        """Two source modes:
+
+        * ``file_path`` — lazy mmap/seek over a real on-disk file (default).
+        * ``data`` — an in-memory byte buffer already read elsewhere (e.g. a
+          file pulled over a VFS provider like SFTP, where there is no local
+          path to mmap). Reads are simple slices of the buffer.
+        """
         super().__init__()
-        self._path = Path(file_path)
+        self._path = Path(file_path) if file_path is not None else None
         self._mode: str = "hex"
         self._mm: mmap.mmap | None = None
         self._fh = None
+        self._data: bytes | None = bytes(data) if data is not None else None
         self._file_size: int = 0
         self._last_search: bytes = b""
         self._search_pos: int = 0
-        self._open_file()
+        if self._data is not None:
+            self._file_size = len(self._data)
+        else:
+            self._open_file()
         self._update_virtual_size()
 
     # --- file lifecycle -------------------------------------------------
@@ -183,6 +199,8 @@ class HexViewerWidget(ScrollView):
             return b""
         offset = max(0, min(offset, self._file_size))
         end = max(offset, min(offset + length, self._file_size))
+        if self._data is not None:
+            return self._data[offset:end]
         if self._mm is not None:
             return self._mm[offset:end]
         if self._fh is not None:
@@ -344,6 +362,8 @@ class HexViewerWidget(ScrollView):
         return True
 
     def _find_bytes(self, needle: bytes, start: int) -> int:
+        if self._data is not None:
+            return self._data.find(needle, start)
         if self._mm is not None:
             with suppress(ValueError):
                 return self._mm.find(needle, start)
@@ -374,11 +394,27 @@ class HexViewerContent(WindowContent):
     }
     """
 
-    def __init__(self, file_path: str | Path) -> None:
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+        display_name: str | None = None,
+    ) -> None:
         super().__init__()
-        self._path = Path(file_path)
-        self.window_title = f"Hex: {self._path.name}"
-        self._widget = HexViewerWidget(file_path)
+        name = display_name or (Path(file_path).name if file_path else "data")
+        self._path = Path(file_path) if file_path is not None else Path(name)
+        self.window_title = f"Hex: {name}"
+        if data is not None:
+            self._widget = HexViewerWidget(data=data)
+        else:
+            self._widget = HexViewerWidget(file_path)
+
+    @classmethod
+    def from_bytes(cls, name: str, data: bytes) -> "HexViewerContent":
+        """Build a hex viewer over an in-memory buffer (e.g. a file read
+        through a VFS provider where there is no local path to mmap)."""
+        return cls(data=data, display_name=name)
 
     def compose(self) -> ComposeResult:
         yield self._widget

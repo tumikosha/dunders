@@ -99,6 +99,7 @@ from dunders.windowing.editor.language_picker import show_language_picker
 from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
+from dunders.fm.image_viewer import ImageViewerContent, PILLOW_AVAILABLE, sniff_image
 from dunders.windowing.editor import EditorContent
 
 
@@ -1029,7 +1030,7 @@ class DundersApp(App):
         # fill the WHOLE screen (otherwise the console reserves the bottom
         # half in _tile_panels and the panels only get the top half).
         for w in list(self.desktop.windows):
-            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ConsoleContent)):
+            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, ConsoleContent)):
                 self.desktop.minimize_window(w)
         # Reveal both panels un-maximized.
         for panel_id in ("panel-left", "panel-right"):
@@ -1730,7 +1731,14 @@ class DundersApp(App):
             win.styles.height = H
 
     def _refresh_panels(self) -> None:
-        """Load directory contents into both panels (left and right)."""
+        """Load directory contents into both panels (left and right).
+
+        Each panel keeps the cursor on whatever entry it was on: a plain
+        re-scan (e.g. after closing a viewer/editor) must not jump the cursor
+        to the top. This matters most for slow providers (SFTP) whose async
+        re-scan resets the cursor to 0 before the listing returns, so we pass
+        the focused locator through as ``focus_loc`` to land back on it.
+        """
         from dunders.fm.file_panel import FilePanel  # local: avoid circular at import-time
         for panel_id in ("panel-left", "panel-right"):
             try:
@@ -1739,7 +1747,12 @@ class DundersApp(App):
                 continue
             content = win.content
             if isinstance(content, FilePanel):
-                content.refresh_listing()
+                focus_loc = (
+                    content.entries[content.cursor].loc
+                    if 0 <= content.cursor < len(content.entries)
+                    else None
+                )
+                content.refresh_listing(focus_loc=focus_loc)
                 content.refresh()
 
     def _set_panel_sort(self, panel_id: str, order: SortOrder) -> None:
@@ -2741,6 +2754,16 @@ class DundersApp(App):
             return False
         return b"\x00" in sample
 
+    @staticmethod
+    def _looks_image(path: Path) -> bool:
+        """Sniff the first 16 bytes for a known image magic signature."""
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(16)
+        except OSError:
+            return False
+        return sniff_image(head)
+
     def _should_use_hex_viewer(self, path: Path) -> bool:
         try:
             size = path.stat().st_size
@@ -2954,43 +2977,75 @@ class DundersApp(App):
             self._pre_menu_window = win
             self._pre_menu_focus = None
 
-    def _read_member_text(self, entry) -> str | None:
-        """Read an archive member through its VFS provider, returning decoded
-        text — or None (with a notification) if too large, unreadable, or binary."""
+    def _read_member_bytes(self, entry) -> bytes | None:
+        """Read a VFS member (archive/SFTP/FTP/…) through its provider, returning
+        the raw bytes — or None (with a notification) if too large or unreadable.
+
+        Caps reads at the hex-viewer threshold so a huge remote file can't be
+        slurped into memory; a local file would lazily mmap, but a VFS member has
+        no local path to map, so the whole buffer is read at once."""
         if entry.size > self._HEX_VIEW_SIZE_THRESHOLD:
             self.notify(
-                f"{entry.name}: too large to open inside an archive yet",
+                f"{entry.name}: too large to open remotely yet",
                 severity="warning",
             )
             return None
         provider = self._vfs_registry.resolve(entry.loc)
         try:
             with provider.open_read(entry.loc) as fh:
-                data = fh.read()
+                return fh.read()
         except OSError as exc:
             self.notify(f"Cannot read {entry.name}: {exc}", severity="warning")
             return None
+
+    def _read_member_text(self, entry) -> str | None:
+        """Read a VFS member as decoded text — or None (with a notification) if
+        too large, unreadable, or binary. Used by the in-place editor (F4),
+        which can't meaningfully edit binary content."""
+        data = self._read_member_bytes(entry)
+        if data is None:
+            return None
         if b"\x00" in data[:8192]:
             self.notify(
-                f"{entry.name}: binary file (not editable in archives yet)",
+                f"{entry.name}: binary file (not editable yet)",
                 severity="warning",
             )
             return None
         return data.decode("utf-8", errors="replace")
 
     def _open_member_view(self, entry) -> None:
-        """F3/Enter on a file inside an archive: read-only text viewer."""
+        """F3/Enter on a VFS file (archive/SFTP/…): read-only viewer. Text opens
+        in the plain viewer; binary content falls back to the hex viewer fed from
+        the bytes we just read (no local path to mmap)."""
         if self.desktop is None:
             return
-        text = self._read_member_text(entry)
-        if text is None:
+        data = self._read_member_bytes(entry)
+        if data is None:
             return
         self._remember_active_panel_id()
         self._editor_seq += 1
-        content = ViewerContent(initial_text=text, file_path=entry.name)
-        self._mount_maximized_content(
-            content, title=f"View: {entry.name}", win_id=f"viewer-{self._editor_seq}"
-        )
+        # Image bytes → ASCII-art viewer (Pillow opt-in). Without the extra,
+        # fall through to the hex view below like any other binary.
+        if PILLOW_AVAILABLE and sniff_image(data[:16]):
+            content = ImageViewerContent.from_bytes(entry.name, data)
+            self._mount_maximized_content(
+                content,
+                title=f"Image: {entry.name}",
+                win_id=f"imgviewer-{self._editor_seq}",
+            )
+            return
+        if b"\x00" in data[:8192]:
+            content = HexViewerContent.from_bytes(entry.name, data)
+            title = f"Hex: {entry.name}"
+            win_id = f"hexviewer-{self._editor_seq}"
+        else:
+            content = ViewerContent(
+                initial_text=data.decode("utf-8", errors="replace"),
+                file_path=entry.name,
+            )
+            title = f"View: {entry.name}"
+            win_id = f"viewer-{self._editor_seq}"
+        self._mount_maximized_content(content, title=title, win_id=win_id)
 
     def _open_member_edit(self, entry) -> None:
         """F4 on a file inside a writable archive: editable editor whose save
@@ -3033,6 +3088,22 @@ class DundersApp(App):
         # can coexist (including ones currently minimized in the IconTray).
         self._editor_seq += 1
         seq = self._editor_seq
+        # F3 on an image → ASCII-art viewer (Pillow opt-in extra). When the
+        # extra isn't installed, notify and fall through to the hex/text
+        # branch below instead of opening the viewer.
+        if read_only and self._looks_image(path):
+            if PILLOW_AVAILABLE:
+                content = ImageViewerContent(path)
+                self._mount_maximized_content(
+                    content,
+                    title=f"Image: {path.name}",
+                    win_id=f"imgviewer-{seq}",
+                )
+                return
+            self.notify(
+                "Install dunders[image] to view images as ASCII",
+                severity="warning",
+            )
         # F3 on a large or binary file → hex viewer with chunked mmap reads.
         # Skip the read_text() pre-load entirely so multi-GB files don't hang
         # the UI thread.
@@ -3222,7 +3293,8 @@ class DundersApp(App):
         2. When Textual focus is on the CommandLine input, move focus to
            the active panel so the user can immediately use F-keys /
            cursor without clicking.
-        3. Close the topmost editor/hex-viewer window if one is open.
+        3. Close the topmost editor/viewer window (text, hex, or image) if
+           one is open.
         4. Silent no-op otherwise.
         """
         if self.desktop is None or self._has_active_modal():
@@ -3236,7 +3308,10 @@ class DundersApp(App):
                 self._focus_panel("panel-left")
             return
         for win in reversed(list(self.desktop.windows)):
-            if isinstance(win.content, (EditorContent, HexViewerContent)):
+            if isinstance(
+                win.content,
+                (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent),
+            ):
                 self.desktop.remove_window(win)
                 # on_window_closed isn't fired by remove_window; do the
                 # post-close housekeeping inline.
@@ -4125,7 +4200,12 @@ class DundersApp(App):
         if self._is_panel_mode():
             handover = self._ensure_handover()
             if handover is not None:
-                handover.command_screen(self._panel_cwd_for_test())
+                cwd = self._panel_cwd_for_test()
+                handover.command_screen(cwd)
+                # A reattached command that finished (or a subshell `cd`) may have
+                # moved the shell; follow it and refresh listings (mc parity).
+                self._follow_handover_cwd(cwd)
+                self._refresh_panels()
             return
         # Lazily create the console-default window if it doesn't exist yet.
         self.console_registry.get_or_create(None)

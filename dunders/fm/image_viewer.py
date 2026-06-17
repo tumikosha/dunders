@@ -1,0 +1,435 @@
+"""ImageViewerContent — view image files as ASCII art (F3).
+
+Pillow is imported lazily and guarded by PILLOW_AVAILABLE so the base
+install stays dependency-light; the decode/resize step is the only place
+that touches Pillow. The pixel->grid transform (`image_to_ascii`), the
+aspect-fit helper (`_fit`), and the magic-byte sniffer (`sniff_image`) are
+pure and import nothing heavy, so they unit-test in isolation.
+"""
+
+from __future__ import annotations
+
+import io
+from contextlib import suppress
+from pathlib import Path
+
+from rich.color import Color as RichColor
+from rich.style import Style as RichStyle
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.geometry import Size
+from textual.scroll_view import ScrollView
+from textual.strip import Strip
+from textual.widgets import Static
+
+from dunders.windowing.content import WindowContent, WindowCommand
+from dunders.windowing.palette import Palette
+
+try:  # Pillow is an opt-in extra (`pip install dunders[image]`).
+    from PIL import Image as _PILImage
+
+    PILLOW_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
+    _PILImage = None
+    PILLOW_AVAILABLE = False
+
+__all__ = [
+    "PILLOW_AVAILABLE",
+    "sniff_image",
+    "image_to_ascii",
+    "ImageViewerContent",
+    "ImageViewerWidget",
+]
+
+# Brightness ramp from darkest (space) to brightest ('@').
+_RAMP = " .:-=+*#%@"
+
+
+def sniff_image(head: bytes) -> bool:
+    """True if `head` (first ~16 bytes of a file) starts with a known
+    image magic signature. Extension is irrelevant."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if head.startswith(b"\xff\xd8\xff"):
+        return True
+    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+        return True
+    if head.startswith(b"BM"):
+        return True
+    if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True
+    return False
+
+
+def _fit(
+    img_w: int,
+    img_h: int,
+    max_cols: int,
+    max_rows: int,
+    cell_aspect: float = 0.5,
+) -> tuple[int, int]:
+    """Fit an `img_w`x`img_h` image into a `max_cols`x`max_rows` character
+    grid, correcting for the terminal cell aspect ratio (a cell is ~twice
+    as tall as wide, so `cell_aspect` 0.5 squashes the row count)."""
+    img_w = max(1, img_w)
+    img_h = max(1, img_h)
+    out_w = max(1, max_cols)
+    out_h = max(1, int(out_w * img_h / img_w * cell_aspect))
+    if out_h > max_rows:
+        out_h = max(1, max_rows)
+        out_w = max(1, int(out_h * img_w / img_h / cell_aspect))
+    return out_w, out_h
+
+
+def _ramp_char(lum: float) -> str:
+    """Map a luminance value (0.0-255.0) onto the brightness ramp."""
+    idx = round(lum / 255 * (len(_RAMP) - 1))
+    idx = max(0, min(idx, len(_RAMP) - 1))
+    return _RAMP[idx]
+
+
+def image_to_ascii(
+    pixels: list[tuple[int, int, int]],
+    width: int,
+    height: int,
+    *,
+    color: bool,
+) -> list[list[tuple[str, tuple[int, int, int] | None]]]:
+    """Turn a row-major flat list of RGB pixels into a grid of
+    (char, rgb_or_None) cells. In mono mode the rgb element is None; in
+    color mode it carries the pixel's RGB for a truecolor foreground.
+    `pixels` must contain at least `width * height` entries (row-major); a
+    short list is padded with black."""
+    # Defensive: a corrupt/partial decode could hand us fewer pixels than
+    # width*height. Pad the shortfall with black rather than raising
+    # IndexError mid-render (callers should still supply width*height).
+    needed = width * height
+    if len(pixels) < needed:
+        pixels = list(pixels) + [(0, 0, 0)] * (needed - len(pixels))
+    grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
+    for y in range(height):
+        row: list[tuple[str, tuple[int, int, int] | None]] = []
+        base = y * width
+        for x in range(width):
+            r, g, b = pixels[base + x]
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+            char = _ramp_char(lum)
+            row.append((char, (r, g, b) if color else None))
+        grid.append(row)
+    return grid
+
+
+class ImageViewerWidget(ScrollView):
+    """Renders a decoded image as an ASCII-art grid."""
+
+    DEFAULT_CSS = """
+    ImageViewerWidget {
+        background: $surface;
+        color: $text;
+    }
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("up",       "scroll_lines(-1)", show=False),
+        Binding("down",     "scroll_lines(1)",  show=False),
+        Binding("pageup",   "scroll_page(-1)",  show=False),
+        Binding("pagedown", "scroll_page(1)",   show=False),
+        Binding("home",     "scroll_home",      show=False),
+        Binding("end",      "scroll_end",       show=False),
+    ]
+
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+    ) -> None:
+        """Decode source is either a local ``file_path`` or an in-memory
+        ``data`` buffer (e.g. an image pulled over a VFS provider like SFTP,
+        where there is no local path for Pillow to open)."""
+        super().__init__()
+        self._path = Path(file_path) if file_path is not None else None
+        self._data: bytes | None = bytes(data) if data is not None else None
+        self._color = True
+        self._img_size: tuple[int, int] = (0, 0)
+        self._grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
+        self._rgb = None            # cached PIL RGB image, file already closed
+        self._last_fit: tuple[int, int] | None = None
+        self._error: str | None = None
+
+    @property
+    def color(self) -> bool:
+        return self._color
+
+    @property
+    def img_size(self) -> tuple[int, int]:
+        return self._img_size
+
+    def on_mount(self) -> None:
+        self._regenerate()
+
+    def on_resize(self) -> None:
+        self._regenerate()
+
+    def set_color(self, color: bool) -> None:
+        if color == self._color:
+            return
+        self._color = color
+        self._last_fit = None  # force grid rebuild with the new color mode
+        self._regenerate()
+
+    def toggle_color(self) -> None:
+        self.set_color(not self._color)
+
+    def _regenerate(self) -> None:
+        if not PILLOW_AVAILABLE:
+            return
+        cols = max(1, self.size.width or 80)
+        rows = max(1, self.size.height or 24)
+        # Decode from disk only once; keep the RGB image in memory so resizes
+        # are a cheap in-memory resample, not repeated disk I/O + decode.
+        if self._rgb is None and self._error is None:
+            try:
+                source = io.BytesIO(self._data) if self._data is not None else self._path
+                with _PILImage.open(source) as im:
+                    im.seek(0)  # no-op for single-frame formats; frame 0 for GIF
+                    rgb = im.convert("RGB")
+                    rgb.load()  # detach pixel data from the (closing) file
+                self._rgb = rgb
+                self._img_size = rgb.size
+            except Exception:
+                self._rgb = None
+                self._error = "Could not decode image"
+                self._grid = []
+                self.virtual_size = Size(cols, 1)
+                if self.is_mounted:
+                    self.refresh()
+                return
+        if self._rgb is None:
+            return
+        out_w, out_h = _fit(self._rgb.width, self._rgb.height, cols, rows)
+        if self._last_fit == (out_w, out_h) and self._grid:
+            return  # size unchanged → nothing to recompute
+        self._last_fit = (out_w, out_h)
+        resized = self._rgb.resize((out_w, out_h))
+        getdata = getattr(resized, "get_flattened_data", None) or resized.getdata
+        pixels = list(getdata())
+        self._grid = image_to_ascii(pixels, out_w, out_h, color=self._color)
+        self.virtual_size = Size(out_w, len(self._grid))
+        if self.is_mounted:
+            self.refresh()
+
+    def _get_palette(self) -> Palette | None:
+        with suppress(Exception):
+            for ancestor in self.ancestors_with_self:
+                pal = getattr(ancestor, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        return None
+
+    def _base_style(self) -> RichStyle:
+        pal = self._get_palette()
+        if pal is None:
+            return RichStyle()
+        return pal.rich_style("editor.text")
+
+    def render_line(self, y: int) -> Strip:
+        if self._error is not None:
+            if y == 0:
+                base = self._base_style()
+                return Strip(Text(self._error, style=base).render(self.app.console))
+            return Strip.blank(self.size.width, self.rich_style)
+        idx = y + int(self.scroll_offset.y)
+        if idx < 0 or idx >= len(self._grid):
+            return Strip.blank(self.size.width, self.rich_style)
+        base = self._base_style()
+        text = Text(style=self.rich_style)
+        for char, rgb in self._grid[idx]:
+            if rgb is None:
+                text.append(char, style=base)
+            else:
+                text.append(
+                    char, style=RichStyle(color=RichColor.from_rgb(*rgb))
+                )
+        return Strip(text.render(self.app.console))
+
+    def action_scroll_lines(self, delta: int) -> None:
+        self.scroll_to(
+            self.scroll_offset.x, self.scroll_offset.y + delta, animate=False
+        )
+
+    def action_scroll_page(self, sign: int) -> None:
+        page = max(1, self.size.height - 2)
+        self.scroll_to(
+            self.scroll_offset.x,
+            self.scroll_offset.y + sign * page,
+            animate=False,
+        )
+
+    def action_scroll_home(self) -> None:
+        self.scroll_to(0, 0, animate=False)
+
+    def action_scroll_end(self) -> None:
+        self.scroll_to(
+            0, max(0, len(self._grid) - max(1, self.size.height)), animate=False
+        )
+
+
+class _ToolbarButton(Static):
+    """Flat, palette-driven toolbar button.
+
+    Stock Textual ``Button`` paints its own background through component
+    styles; on hover that collapses foreground/background for some themes and
+    the label vanishes. This widget instead resolves the active windowing
+    ``Palette`` and paints the label with the ``menu.item`` / ``menu.item.active``
+    roles, so it always tracks the selected skin and stays readable when
+    hovered or focused.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    _ToolbarButton {
+        width: auto;
+        height: 1;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("enter", "press", show=False),
+        Binding("space", "press", show=False),
+    ]
+
+    def __init__(self, label: str, *, on_press) -> None:
+        super().__init__()
+        self._label = label
+        self._on_press = on_press
+        self._hover = False
+
+    @property
+    def label(self) -> Text:
+        """Current label as a Text (``.plain`` available for callers/tests)."""
+        return Text(self._label)
+
+    def set_label(self, label: str) -> None:
+        self._label = label
+        self.refresh()
+
+    def _get_palette(self) -> Palette | None:
+        with suppress(Exception):
+            for ancestor in self.ancestors_with_self:
+                pal = getattr(ancestor, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        return None
+
+    def render(self) -> Text:
+        active = self._hover or self.has_focus
+        pal = self._get_palette()
+        if pal is not None:
+            style = pal.rich_style("menu.item.active" if active else "menu.item")
+        else:  # no palette (e.g. bare-host tests) → reverse video as a fallback
+            style = RichStyle(reverse=True) if active else RichStyle()
+        # Pad inside the label so the highlight reads as a button pill.
+        return Text(f" {self._label} ", style=style)
+
+    def on_enter(self, event) -> None:
+        self._hover = True
+        self.refresh()
+
+    def on_leave(self, event) -> None:
+        self._hover = False
+        self.refresh()
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self._on_press()
+
+    def action_press(self) -> None:
+        self._on_press()
+
+    def on_focus(self) -> None:
+        self.refresh()
+
+    def on_blur(self) -> None:
+        self.refresh()
+
+
+class ImageViewerContent(WindowContent):
+    """WindowContent wrapping :class:`ImageViewerWidget` with a color toggle."""
+
+    DEFAULT_CSS = """
+    ImageViewerContent { background: transparent; }
+    ImageViewerContent .img-toolbar {
+        height: 1;
+        background: $panel;
+    }
+    ImageViewerContent ImageViewerWidget {
+        height: 1fr;
+        width: 1fr;
+    }
+    """
+
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+        display_name: str | None = None,
+    ) -> None:
+        super().__init__()
+        name = display_name or (Path(file_path).name if file_path else "image")
+        self._path = Path(file_path) if file_path is not None else Path(name)
+        self.window_title = f"Image: {name}"
+        if data is not None:
+            self._widget = ImageViewerWidget(data=data)
+        else:
+            self._widget = ImageViewerWidget(file_path)
+        self._button = _ToolbarButton("[ Color ]", on_press=self._toggle_color)
+        self._button.id = "img-color-toggle"
+
+    @classmethod
+    def from_bytes(cls, name: str, data: bytes) -> "ImageViewerContent":
+        """Build an ASCII image viewer over an in-memory buffer (e.g. an image
+        read through a VFS provider where there is no local path to open)."""
+        return cls(data=data, display_name=name)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="img-toolbar"):
+            yield self._button
+        yield self._widget
+
+    def on_mount(self) -> None:
+        self._widget.focus()
+        self._update_subtitle()
+
+    @property
+    def widget(self) -> ImageViewerWidget:
+        return self._widget
+
+    def _update_subtitle(self) -> None:
+        w, h = self._widget.img_size
+        mode = "COLOR" if self._widget.color else "MONO"
+        self.window_subtitle = f"{w}x{h}  ·  {mode}"
+
+    def _toggle_color(self) -> None:
+        self._widget.toggle_color()
+        self._button.set_label(
+            "[ Color ]" if self._widget.color else "[ Mono ]"
+        )
+        self._update_subtitle()
+
+    def get_commands(self) -> list[WindowCommand]:
+        return [
+            WindowCommand(
+                id="image.toggle_color",
+                label="Toggle Color/Mono",
+                handler=self._toggle_color,
+                hotkey="c",
+            ),
+        ]

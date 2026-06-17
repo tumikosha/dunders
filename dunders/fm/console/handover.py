@@ -163,6 +163,15 @@ class RelayHandover:
         self._fifo_fd: int = -1
         self._fifo_buf: bytes = b""
         self.last_cwd: Path | None = None
+        # True while a foreground command (e.g. claude) is still running in the
+        # persistent subshell but the user toggled out to the panels with
+        # Ctrl+O. A later command_screen() reattaches to it (mc-style).
+        self._suspended_cmd: bool = False
+
+    @property
+    def has_suspended_command(self) -> bool:
+        """A foreground command is alive but detached (toggled out via Ctrl+O)."""
+        return self._suspended_cmd
 
     def _open_fifo(self) -> None:
         """Create the completion FIFO and open it O_RDWR|O_NONBLOCK.
@@ -278,10 +287,14 @@ class RelayHandover:
         line = f"cd {shlex.quote(str(cwd))} 2>/dev/null\n"
         self._proc.write(line.encode("utf-8", errors="replace"))
 
-    def _pump(self, in_fds: list[int], master_fd: int, out) -> int:
+    def _pump(self, in_fds: list[int], master_fd: int, out) -> int | None:
         """Bridge bytes verbatim until the completion marker arrives on the
         FIFO. ``in_fds`` -> master (raw keys), master -> ``out`` (program
-        output, forwarded byte-for-byte: no scanning, no holdback). Returns rc.
+        output, forwarded byte-for-byte: no scanning, no holdback).
+
+        Returns the command's exit code on completion, or ``None`` if the user
+        pressed Ctrl+O (``_TOGGLE``) to detach — leaving the command running in
+        the subshell so a later command_screen() can reattach to it (mc-style).
         """
         in_fds = list(in_fds)
         while True:
@@ -293,12 +306,19 @@ class RelayHandover:
             for fd in list(in_fds):
                 if fd in readable:
                     data = os.read(fd, 65536)
-                    if data:
-                        os.write(master_fd, data)
-                    else:
+                    if not data:
                         # EOF on this input fd: stop watching it so select does
                         # not spin reporting it readable forever.
                         in_fds = [f for f in in_fds if f != fd]
+                        continue
+                    # Ctrl+O detaches: forward any bytes before it, then bail so
+                    # the program keeps running in the background subshell.
+                    i = data.find(_TOGGLE)
+                    if i != -1:
+                        if i:
+                            os.write(master_fd, data[:i])
+                        return None
+                    os.write(master_fd, data)
             if master_fd in readable:
                 try:
                     chunk = os.read(master_fd, 65536)
@@ -341,6 +361,7 @@ class RelayHandover:
     def run_foreground(self, cmd: str, cwd: Path) -> int:
         self._ensure_shell(cwd)
         self.last_cwd = None
+        self._suspended_cmd = False
         import termios
         import tty
 
@@ -355,6 +376,13 @@ class RelayHandover:
                 rc = self._pump([stdin_fd], self._proc.fd, sys.stdout.buffer)
             finally:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
+        if rc is None:
+            # Ctrl+O: the command is still running in the subshell. Return to the
+            # panels; a later command_screen() reattaches to it. Don't read cwd
+            # yet — the command hasn't finished, so last_cwd stays None (no
+            # spurious panel-follow).
+            self._suspended_cmd = True
+            return 0
         # The persistent subshell now sits at whatever directory the command
         # left it in (a `cd` inside cmd persists). Read it back so the caller
         # can follow it with the panel (mc parity).
@@ -408,6 +436,77 @@ class RelayHandover:
         except Exception:
             pass
 
+    def _discard_master(self) -> None:
+        """Drop whatever is queued on the master without forwarding it. Used on
+        reattach to throw away the stale partial frames a full-screen child
+        buffered while we were detached (they'd paint as garbage over the
+        terminal Textual just left behind)."""
+        if self._proc is None:
+            return
+        fd = self._proc.fd
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 0)
+            except InterruptedError:
+                continue
+            if fd not in r:
+                return
+            try:
+                if not os.read(fd, 65536):
+                    return
+            except OSError:
+                return
+
+    def _prime_reattach(self, out) -> None:
+        """Make a detached full-screen child (e.g. claude) repaint a clean frame
+        on reattach.
+
+        Textual's suspend() drops us onto the NORMAL screen (it emits the alt-
+        screen-exit ``?1049l``), but the child entered the ALTERNATE screen at
+        startup and never left it — so its cursor-addressed repaint would land
+        on the wrong buffer and corrupt the display. We re-enter the alt screen
+        to match the child, throw away the stale frames it buffered while we
+        were away, then force a full redraw via SIGWINCH to the pty's foreground
+        group (the kernel delivers it to the child, not just the shell).
+
+        The matching ``?1049l`` is sent by the caller after the relay ends, so
+        the suspend block exits on the normal screen — symmetric with a normal
+        command run, letting Textual's resume re-enter cleanly.
+        """
+        if self._proc is None:
+            return
+        import time
+
+        self._discard_master()
+        try:
+            # Enter the alt screen the child lives on (Textual's suspend dropped
+            # us to the normal screen). xterm clears the alt buffer on entry.
+            out.write(b"\x1b[?1049h")
+            out.flush()
+        except Exception:
+            pass
+        # Force a full repaint. A diff-rendering TUI (Ink/claude) only re-renders
+        # on a REAL size change — a same-size SIGWINCH is ignored. So shrink the
+        # pty by one row and restore it, with a short gap so the two SIGWINCHs
+        # aren't coalesced into a single no-op. Each genuine resize makes the
+        # child rewrite its whole frame, so it reappears.
+        cols, rows = _term_size()
+        try:
+            self._proc.setwinsize(max(1, rows - 1), cols)
+            time.sleep(0.06)
+            self._proc.setwinsize(rows, cols)
+        except Exception:
+            pass
+
+    def _end_reattach(self, out) -> None:
+        """Leave the alt screen we entered for the reattach so the suspend block
+        ends on the normal screen (symmetric with a plain command run)."""
+        try:
+            out.write(b"\x1b[?1049l")
+            out.flush()
+        except Exception:
+            pass
+
     def command_screen(self, cwd: Path) -> None:
         """Ctrl+O: drop into the live subshell interactively until the user
         presses Ctrl+O again (mc-style toggle). Completion markers are stripped
@@ -423,11 +522,29 @@ class RelayHandover:
             try:
                 assert self._proc is not None
                 self._propagate_winsize()
-                # Sync to the panel dir, which also nudges a fresh prompt.
-                self._sync_cwd(cwd)
-                self._interactive_relay(
-                    stdin_fd, self._proc.fd, sys.stdout.buffer
-                )
+                if self._suspended_cmd:
+                    # Reattach to the still-running foreground command. Do NOT
+                    # cd/sync — those bytes would land inside the running child
+                    # as keystrokes. First drop the stale frames it buffered
+                    # while detached and force a clean repaint, then pump until
+                    # it finishes (FIFO marker -> rc) or the user toggles out
+                    # again (Ctrl+O -> None).
+                    self._prime_reattach(sys.stdout.buffer)
+                    rc = self._pump(
+                        [stdin_fd], self._proc.fd, sys.stdout.buffer
+                    )
+                    self._end_reattach(sys.stdout.buffer)
+                    if rc is not None:
+                        self._suspended_cmd = False
+                        self.last_cwd = self._capture_cwd()
+                else:
+                    # Fresh interactive screen: sync to the panel dir, which also
+                    # nudges a fresh prompt.
+                    self.last_cwd = None
+                    self._sync_cwd(cwd)
+                    self._interactive_relay(
+                        stdin_fd, self._proc.fd, sys.stdout.buffer
+                    )
             finally:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
 

@@ -667,6 +667,41 @@ async def test_app_closing_editor_returns_focus_to_panel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_app_refresh_panels_keeps_cursor_on_focused_entry(tmp_path):
+    """A plain re-scan (e.g. closing a viewer) must keep the cursor on the
+    same entry, not jump to the top. Slow providers (SFTP) re-scan async and
+    reset the cursor to 0, so _refresh_panels must forward the focused locator
+    as focus_loc to land back on it."""
+    for n in ("a.txt", "b.txt", "c.txt", "d.txt"):
+        (tmp_path / n).write_text(n)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        from dunders.windowing import Desktop, Window
+        desktop = app.query_one(Desktop)
+        left = desktop.query_one("#panel-left", Window).content
+        idx = next(i for i, e in enumerate(left.entries) if e.name == "c.txt")
+        left.cursor = idx
+        target_loc = left.entries[idx].loc
+
+        captured = {}
+        original = left.refresh_listing
+
+        def _spy(*args, focus_loc=None, **kwargs):
+            captured["focus_loc"] = focus_loc
+            return original(*args, focus_loc=focus_loc, **kwargs)
+
+        left.refresh_listing = _spy
+        app._refresh_panels()
+        await pilot.pause()
+
+        assert captured["focus_loc"] == target_loc
+        # And the sync path actually keeps the cursor on c.txt.
+        assert left.entries[left.cursor].name == "c.txt"
+
+
+@pytest.mark.asyncio
 async def test_app_editor_loads_file_contents(tmp_path):
     """When F4 opens a file, the editor buffer should contain the file text."""
     f = tmp_path / "x.txt"
@@ -1658,3 +1693,45 @@ async def test_provider_action_keeps_cursor_on_acted_container(monkeypatch, tmp_
 
         app._after_provider_action(panel, _Res(), loc)
         assert captured["f"] == loc
+
+
+class TestImageRouting:
+    def test_looks_image_png(self, tmp_path):
+        from dunders.app import DundersApp
+
+        p = tmp_path / "a.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+        assert DundersApp._looks_image(p) is True
+
+    def test_looks_image_text(self, tmp_path):
+        from dunders.app import DundersApp
+
+        p = tmp_path / "a.txt"
+        p.write_text("hello world\n")
+        assert DundersApp._looks_image(p) is False
+
+    def test_looks_image_missing_file(self, tmp_path):
+        from dunders.app import DundersApp
+
+        assert DundersApp._looks_image(tmp_path / "nope.png") is False
+
+    @pytest.mark.asyncio
+    async def test_f3_image_routes_to_image_viewer(self, tmp_path):
+        pytest.importorskip("PIL")
+        from PIL import Image
+
+        from dunders.app import DundersApp
+        from dunders.fm.image_viewer import ImageViewerContent
+
+        png = tmp_path / "p.png"
+        Image.new("RGB", (4, 4), (0, 128, 255)).save(png)
+
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._open_editor_window(png, read_only=True)
+            await pilot.pause()
+            assert any(
+                isinstance(w.content, ImageViewerContent)
+                for w in app.desktop.windows
+            )
