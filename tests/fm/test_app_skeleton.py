@@ -667,6 +667,41 @@ async def test_app_closing_editor_returns_focus_to_panel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_app_refresh_panels_keeps_cursor_on_focused_entry(tmp_path):
+    """A plain re-scan (e.g. closing a viewer) must keep the cursor on the
+    same entry, not jump to the top. Slow providers (SFTP) re-scan async and
+    reset the cursor to 0, so _refresh_panels must forward the focused locator
+    as focus_loc to land back on it."""
+    for n in ("a.txt", "b.txt", "c.txt", "d.txt"):
+        (tmp_path / n).write_text(n)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        from dunders.windowing import Desktop, Window
+        desktop = app.query_one(Desktop)
+        left = desktop.query_one("#panel-left", Window).content
+        idx = next(i for i, e in enumerate(left.entries) if e.name == "c.txt")
+        left.cursor = idx
+        target_loc = left.entries[idx].loc
+
+        captured = {}
+        original = left.refresh_listing
+
+        def _spy(*args, focus_loc=None, **kwargs):
+            captured["focus_loc"] = focus_loc
+            return original(*args, focus_loc=focus_loc, **kwargs)
+
+        left.refresh_listing = _spy
+        app._refresh_panels()
+        await pilot.pause()
+
+        assert captured["focus_loc"] == target_loc
+        # And the sync path actually keeps the cursor on c.txt.
+        assert left.entries[left.cursor].name == "c.txt"
+
+
+@pytest.mark.asyncio
 async def test_app_editor_loads_file_contents(tmp_path):
     """When F4 opens a file, the editor buffer should contain the file text."""
     f = tmp_path / "x.txt"

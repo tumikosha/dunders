@@ -9,6 +9,7 @@ pure and import nothing heavy, so they unit-test in isolation.
 
 from __future__ import annotations
 
+import io
 from contextlib import suppress
 from pathlib import Path
 
@@ -18,11 +19,10 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.content import Content
 from textual.geometry import Size
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import Button
+from textual.widgets import Static
 
 from dunders.windowing.content import WindowContent, WindowCommand
 from dunders.windowing.palette import Palette
@@ -142,9 +142,18 @@ class ImageViewerWidget(ScrollView):
         Binding("end",      "scroll_end",       show=False),
     ]
 
-    def __init__(self, file_path: str | Path) -> None:
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+    ) -> None:
+        """Decode source is either a local ``file_path`` or an in-memory
+        ``data`` buffer (e.g. an image pulled over a VFS provider like SFTP,
+        where there is no local path for Pillow to open)."""
         super().__init__()
-        self._path = Path(file_path)
+        self._path = Path(file_path) if file_path is not None else None
+        self._data: bytes | None = bytes(data) if data is not None else None
         self._color = True
         self._img_size: tuple[int, int] = (0, 0)
         self._grid: list[list[tuple[str, tuple[int, int, int] | None]]] = []
@@ -185,7 +194,8 @@ class ImageViewerWidget(ScrollView):
         # are a cheap in-memory resample, not repeated disk I/O + decode.
         if self._rgb is None and self._error is None:
             try:
-                with _PILImage.open(self._path) as im:
+                source = io.BytesIO(self._data) if self._data is not None else self._path
+                with _PILImage.open(source) as im:
                     im.seek(0)  # no-op for single-frame formats; frame 0 for GIF
                     rgb = im.convert("RGB")
                     rgb.load()  # detach pixel data from the (closing) file
@@ -269,6 +279,87 @@ class ImageViewerWidget(ScrollView):
         )
 
 
+class _ToolbarButton(Static):
+    """Flat, palette-driven toolbar button.
+
+    Stock Textual ``Button`` paints its own background through component
+    styles; on hover that collapses foreground/background for some themes and
+    the label vanishes. This widget instead resolves the active windowing
+    ``Palette`` and paints the label with the ``menu.item`` / ``menu.item.active``
+    roles, so it always tracks the selected skin and stays readable when
+    hovered or focused.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    _ToolbarButton {
+        width: auto;
+        height: 1;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("enter", "press", show=False),
+        Binding("space", "press", show=False),
+    ]
+
+    def __init__(self, label: str, *, on_press) -> None:
+        super().__init__()
+        self._label = label
+        self._on_press = on_press
+        self._hover = False
+
+    @property
+    def label(self) -> Text:
+        """Current label as a Text (``.plain`` available for callers/tests)."""
+        return Text(self._label)
+
+    def set_label(self, label: str) -> None:
+        self._label = label
+        self.refresh()
+
+    def _get_palette(self) -> Palette | None:
+        with suppress(Exception):
+            for ancestor in self.ancestors_with_self:
+                pal = getattr(ancestor, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        return None
+
+    def render(self) -> Text:
+        active = self._hover or self.has_focus
+        pal = self._get_palette()
+        if pal is not None:
+            style = pal.rich_style("menu.item.active" if active else "menu.item")
+        else:  # no palette (e.g. bare-host tests) → reverse video as a fallback
+            style = RichStyle(reverse=True) if active else RichStyle()
+        # Pad inside the label so the highlight reads as a button pill.
+        return Text(f" {self._label} ", style=style)
+
+    def on_enter(self, event) -> None:
+        self._hover = True
+        self.refresh()
+
+    def on_leave(self, event) -> None:
+        self._hover = False
+        self.refresh()
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self._on_press()
+
+    def action_press(self) -> None:
+        self._on_press()
+
+    def on_focus(self) -> None:
+        self.refresh()
+
+    def on_blur(self) -> None:
+        self.refresh()
+
+
 class ImageViewerContent(WindowContent):
     """WindowContent wrapping :class:`ImageViewerWidget` with a color toggle."""
 
@@ -278,25 +369,35 @@ class ImageViewerContent(WindowContent):
         height: 1;
         background: $panel;
     }
-    ImageViewerContent .img-toolbar Button {
-        min-width: 10;
-        height: 1;
-        border: none;
-    }
     ImageViewerContent ImageViewerWidget {
         height: 1fr;
         width: 1fr;
     }
     """
 
-    def __init__(self, file_path: str | Path) -> None:
+    def __init__(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        data: bytes | None = None,
+        display_name: str | None = None,
+    ) -> None:
         super().__init__()
-        self._path = Path(file_path)
-        self.window_title = f"Image: {self._path.name}"
-        self._widget = ImageViewerWidget(file_path)
-        # Wrap labels in Content so the literal brackets aren't parsed as
-        # Textual content markup (which would render them as empty tags).
-        self._button = Button(Content("[ Color ]"), id="img-color-toggle")
+        name = display_name or (Path(file_path).name if file_path else "image")
+        self._path = Path(file_path) if file_path is not None else Path(name)
+        self.window_title = f"Image: {name}"
+        if data is not None:
+            self._widget = ImageViewerWidget(data=data)
+        else:
+            self._widget = ImageViewerWidget(file_path)
+        self._button = _ToolbarButton("[ Color ]", on_press=self._toggle_color)
+        self._button.id = "img-color-toggle"
+
+    @classmethod
+    def from_bytes(cls, name: str, data: bytes) -> "ImageViewerContent":
+        """Build an ASCII image viewer over an in-memory buffer (e.g. an image
+        read through a VFS provider where there is no local path to open)."""
+        return cls(data=data, display_name=name)
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="img-toolbar"):
@@ -318,14 +419,10 @@ class ImageViewerContent(WindowContent):
 
     def _toggle_color(self) -> None:
         self._widget.toggle_color()
-        self._button.label = Content(
+        self._button.set_label(
             "[ Color ]" if self._widget.color else "[ Mono ]"
         )
         self._update_subtitle()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button is self._button:
-            self._toggle_color()
 
     def get_commands(self) -> list[WindowCommand]:
         return [
