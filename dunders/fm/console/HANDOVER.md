@@ -79,6 +79,47 @@ that dunders does not currently implement.
 **Recommendation for now:** to run claude (or any full-screen TUI), switch the
 run-mode chip to `suspend` (equivalent to launching with `wew`).
 
+## Ctrl+O detach / reattach (mc-style background of a running command)
+
+In a panel mode (`fm`/`we-mc`) `relay`, Ctrl+O while a foreground command is
+running **detaches** from it (back to the panels) and a later Ctrl+O
+**reattaches** — Midnight-Commander parity. Implementation lives in
+`RelayHandover`:
+
+- `_pump` intercepts the Ctrl+O byte (`_TOGGLE = 0x0F`) and returns `None`
+  (detached, command still alive) instead of an exit code. `run_foreground`
+  then sets `_suspended_cmd` and returns to the panels without capturing cwd.
+- `command_screen` sees `_suspended_cmd` and **reattaches** by pumping the same
+  persistent subshell again (it must NOT `cd`/`_sync_cwd` — those bytes would
+  land *inside* the running child as keystrokes).
+- Ctrl+O is **reserved** for the toggle, so a child that uses Ctrl+O itself
+  (e.g. nano = save) won't receive it — exactly as under `mc`.
+
+### Gotcha: reattaching to a full-screen TUI needs a *real* resize
+
+> **Why the obvious fixes fail.** Textual's `App.suspend()` emits the
+> alt-screen-exit `\x1b[?1049l` on entry, so inside the suspend block we are on
+> the **normal** screen — but the child entered the **alternate** screen at
+> startup and never left it. On reattach you must therefore re-enter the alt
+> screen (`\x1b[?1049h`) so the child's cursor-addressed repaint lands on the
+> right buffer (`_prime_reattach`), and `\x1b[?1049l` on the way out
+> (`_end_reattach`) so the suspend block ends symmetric with a normal run.
+>
+> **The key insight:** a diff-rendering TUI (Ink — what `claude` uses)
+> re-renders **only on a genuine terminal-size change**. A same-size `SIGWINCH`
+> is ignored, so just signalling the child leaves the screen blank (we cleared
+> the alt buffer but the child never repainted). The fix is to *actually* change
+> the pty size and restore it — `setwinsize(rows-1, cols)`, a short
+> `time.sleep` so the two `SIGWINCH`s aren't coalesced into one no-op, then
+> `setwinsize(rows, cols)`. Each real resize makes Ink rewrite its whole frame
+> (Ink always writes the full frame, never a delta), so the child reappears.
+> Signalling via `tcgetpgrp`/`killpg` is NOT reliable (wrong group on macOS, and
+> still a no-op when the size is unchanged).
+
+A robust, app-independent reattach (tmux-style) would require dunders to run its
+own terminal emulator over the child's PTY continuously while detached and
+repaint from that saved buffer — a much larger feature, not done.
+
 ## Possible future fixes (not done)
 
 1. Implement mc-style tty handover for the persistent subshell so `relay` can

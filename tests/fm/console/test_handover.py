@@ -425,6 +425,191 @@ def test_interactive_relay_consumes_fifo_markers_without_exiting():
         os.close(stdin_r)
 
 
+def test_relay_pump_detaches_on_toggle_and_forwards_prefix():
+    # Ctrl+O (0x0f) during a foreground command detaches: bytes before it reach
+    # the child, then _pump returns None (running, not completed).
+    import tty
+
+    h = RelayHandover(_FakeApp())
+    fr, fw = os.pipe()
+    h._fifo_fd = fr
+    h._fifo_buf = b""
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    stdin_r, stdin_w = os.pipe()
+    try:
+        os.write(stdin_w, b"ab\x0fcd")  # "ab" -> child, Ctrl+O -> detach
+        rc = h._pump([stdin_r], master, io.BytesIO())
+        assert rc is None  # detached, NOT a completion
+        import select as _sel
+
+        r, _, _ = _sel.select([slave], [], [], 1.0)
+        assert slave in r
+        assert os.read(slave, 64) == b"ab"
+    finally:
+        os.close(fr)
+        os.close(fw)
+        os.close(master)
+        os.close(slave)
+        os.close(stdin_r)
+        os.close(stdin_w)
+
+
+def _stub_tty(monkeypatch):
+    import termios
+    import tty
+
+    monkeypatch.setattr(termios, "tcgetattr", lambda fd: None)
+    monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: None)
+    monkeypatch.setattr(tty, "setraw", lambda fd: None)
+
+    class _FakeStdin:
+        def fileno(self):
+            return 0
+
+    monkeypatch.setattr(sys, "stdin", _FakeStdin())
+
+
+class _Proc:
+    fd = 0
+
+
+def test_run_foreground_detach_marks_suspended(monkeypatch, tmp_path):
+    # When _pump returns None (Ctrl+O), run_foreground leaves the command
+    # running: it flags _suspended_cmd, returns 0, and does NOT capture cwd.
+    h = RelayHandover(_FakeApp())
+    monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
+    monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    monkeypatch.setattr(h, "_send_command", lambda cmd, cwd: None)
+    monkeypatch.setattr(h, "_pump", lambda *a, **k: None)
+    captured = []
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: captured.append(True))
+    _stub_tty(monkeypatch)
+
+    rc = h.run_foreground("claude", tmp_path)
+    assert rc == 0
+    assert h.has_suspended_command is True
+    assert h.last_cwd is None
+    assert captured == []  # cwd must NOT be read while the command runs
+
+
+def test_command_screen_reattaches_and_finalizes_on_completion(monkeypatch, tmp_path):
+    # With a suspended command, Ctrl+O reattaches via _pump (no cd/sync into the
+    # running child). When it completes (_pump -> rc), the flag clears and cwd is
+    # captured.
+    h = RelayHandover(_FakeApp())
+    h._suspended_cmd = True
+    monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
+    monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    synced, relayed = [], []
+    monkeypatch.setattr(h, "_sync_cwd", lambda cwd: synced.append(cwd))
+    monkeypatch.setattr(h, "_interactive_relay", lambda *a, **k: relayed.append(True))
+    primed, ended = [], []
+    monkeypatch.setattr(h, "_prime_reattach", lambda out: primed.append(True))
+    monkeypatch.setattr(h, "_end_reattach", lambda out: ended.append(True))
+    monkeypatch.setattr(h, "_pump", lambda *a, **k: 0)
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: tmp_path)
+    _stub_tty(monkeypatch)
+
+    h.command_screen(tmp_path)
+    assert synced == []  # reattach must not inject `cd` into the running child
+    assert relayed == []  # not the fresh-interactive path
+    assert primed == [True]  # stale frames cleared + child told to repaint
+    assert ended == [True]  # alt screen left so Textual resume is symmetric
+    assert h.has_suspended_command is False
+    assert h.last_cwd == tmp_path
+
+
+def test_command_screen_reattach_toggled_out_again_stays_suspended(
+    monkeypatch, tmp_path
+):
+    # Ctrl+O during the reattach (_pump -> None) keeps the command suspended.
+    h = RelayHandover(_FakeApp())
+    h._suspended_cmd = True
+    monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
+    monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    monkeypatch.setattr(h, "_prime_reattach", lambda out: None)
+    monkeypatch.setattr(h, "_end_reattach", lambda out: None)
+    monkeypatch.setattr(h, "_pump", lambda *a, **k: None)
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: tmp_path)
+    _stub_tty(monkeypatch)
+
+    h.command_screen(tmp_path)
+    assert h.has_suspended_command is True
+    assert h.last_cwd is None
+
+
+def test_discard_master_drops_pending_output():
+    # Stale frames queued on the master while detached must be drained (not
+    # forwarded) so they don't paint as garbage on reattach.
+    h = RelayHandover(_FakeApp())
+    master, slave = os.openpty()
+
+    class _P:
+        fd = master
+
+    h._proc = _P()
+    try:
+        os.write(slave, b"stale-frame-bytes")
+        import select as _sel
+
+        # Give the pty a moment to make the bytes readable, then discard.
+        _sel.select([master], [], [], 1.0)
+        h._discard_master()
+        # Nothing left to read.
+        r, _, _ = _sel.select([master], [], [], 0.2)
+        assert master not in r
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_prime_reattach_enters_alt_and_forces_real_resize(monkeypatch):
+    # _prime_reattach drains stale output, re-enters the child's alt screen, and
+    # forces a full repaint by genuinely changing the pty size and restoring it
+    # (a same-size SIGWINCH is a no-op for diff-rendering TUIs like claude).
+    h = RelayHandover(_FakeApp())
+    discarded = []
+    monkeypatch.setattr(h, "_discard_master", lambda: discarded.append(True))
+
+    class _CapProc:
+        fd = -1
+
+        def __init__(self):
+            self.sizes = []
+
+        def setwinsize(self, rows, cols):
+            self.sizes.append((rows, cols))
+
+    h._proc = _CapProc()
+    out = io.BytesIO()
+    h._prime_reattach(out)
+
+    assert discarded == [True]
+    assert b"\x1b[?1049h" in out.getvalue()  # re-enter the child's alt screen
+    # Two resizes with different row counts -> two distinct SIGWINCHs -> repaint.
+    assert len(h._proc.sizes) >= 2
+    assert h._proc.sizes[0] != h._proc.sizes[-1]
+    assert h._proc.sizes[-1][0] >= h._proc.sizes[0][0]  # restored to full height
+
+
+def test_command_screen_fresh_interactive_when_not_suspended(monkeypatch, tmp_path):
+    # No suspended command: the normal interactive screen syncs cwd and relays.
+    h = RelayHandover(_FakeApp())
+    monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
+    monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    synced, relayed, pumped = [], [], []
+    monkeypatch.setattr(h, "_sync_cwd", lambda cwd: synced.append(cwd))
+    monkeypatch.setattr(h, "_interactive_relay", lambda *a, **k: relayed.append(True))
+    monkeypatch.setattr(h, "_pump", lambda *a, **k: pumped.append(True))
+    _stub_tty(monkeypatch)
+
+    h.command_screen(tmp_path)
+    assert synced == [tmp_path]
+    assert relayed == [True]
+    assert pumped == []  # the reattach pump is not used here
+
+
 def test_read_rc_from_fifo_parses_latest_complete_line():
     h = RelayHandover(_FakeApp())
     r, w = os.pipe()

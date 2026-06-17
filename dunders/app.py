@@ -4200,7 +4200,12 @@ class DundersApp(App):
         if self._is_panel_mode():
             handover = self._ensure_handover()
             if handover is not None:
-                handover.command_screen(self._panel_cwd_for_test())
+                cwd = self._panel_cwd_for_test()
+                handover.command_screen(cwd)
+                # A reattached command that finished (or a subshell `cd`) may have
+                # moved the shell; follow it and refresh listings (mc parity).
+                self._follow_handover_cwd(cwd)
+                self._refresh_panels()
             return
         # Lazily create the console-default window if it doesn't exist yet.
         self.console_registry.get_or_create(None)
