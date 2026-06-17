@@ -98,9 +98,26 @@ NC-style panels and file ops, built on top of `windowing`.
   payload (see `CopyMoveRequest`/`DeleteRequest`/`MkdirRequest` etc. defined
   in `app.py`); the app handler `isinstance`-dispatches on that context
   rather than a stringly-typed `_op` field.
-- `viewer.py` / `hex_viewer.py` — F3 viewers; `app._should_use_hex_viewer`
-  switches to mmap-backed `HexViewerContent` for files >4 MiB or files that
-  sniff as binary, so multi-GB files don't slurp into memory.
+- `viewer.py` / `hex_viewer.py` / `image_viewer.py` / `csv_viewer.py` — F3
+  viewers. `app._open_editor_window` routes by content: images (magic bytes,
+  `dunders[image]`/Pillow) → `ImageViewerContent`; `.csv`/`.tsv` → `CsvViewerContent`
+  (checked *before* the hex guard so big/UTF-16 CSVs still tabulate);
+  `_should_use_hex_viewer` (files >4 MiB or that sniff as binary) → mmap-backed
+  `HexViewerContent` so multi-GB files don't slurp into memory; everything else
+  → the plain `ViewerContent`.
+  - `CsvViewerContent` is lazy: UTF-8/ASCII CSVs (`_make_csv_viewer` → `from_path`)
+    use an mmap `_LineSource` with an *incremental* newline index (instant open at
+    any size up to `_CSV_MMAP_SIZE_THRESHOLD` = 2 GiB; only visible rows parsed,
+    column widths sampled from the first rows). UTF-16/Excel CSVs decode wholly in
+    memory under `_CSV_VIEW_SIZE_THRESHOLD` (32 MiB). Features: Table⇄Raw (Ctrl+T),
+    delimiter cycle (`d`), **Ctrl+F substring filter** (frozen header + a fixed
+    line-number gutter, original row numbers preserved), horizontal scroll.
+  - VFS members (`_open_member_view`): small ones build from in-memory bytes via
+    `from_bytes`; a large CSV member (no local path to mmap) streams to a temp file
+    in a worker (`_open_large_csv_member`, capped at `_CSV_REMOTE_SIZE_THRESHOLD`),
+    then opens via `from_path(owns_file=True)`. Temps live in `<tmp>/dunders/`,
+    are unlinked immediately after mmap on POSIX (crash-proof) with an on_unmount
+    fallback, and orphans are swept at startup (`_sweep_scratch`).
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 
 ### 3. `dunders.app` — top-level shell

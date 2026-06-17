@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,7 @@ from textual.strip import Strip
 from dunders.core.plugins import EventBus, PluginApi, load_plugins
 from dunders.core.vfs import VfsPath
 from dunders.fm.actions import (
+    CopyStatus,
     OpResult,
     chmod_paths,
     mkdir_at,
@@ -97,7 +99,7 @@ from dunders.windowing.tree import JsonYamlTreeContent
 from dunders.windowing.content import WindowContent
 from dunders.windowing.core import clipboard
 from dunders.windowing.editor.language_picker import show_language_picker
-from dunders.fm.csv_viewer import CsvViewerContent
+from dunders.fm.csv_viewer import CsvViewerContent, decode_text, looks_utf16
 from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
@@ -228,6 +230,13 @@ class HexSearchRequest:
     """Routes the InputDialog used by F3 hex viewer back to its widget."""
 
     widget: HexViewerWidget
+
+
+@dataclass(frozen=True)
+class CsvFilterRequest:
+    """Routes the Ctrl+F substring-filter InputDialog back to the CSV viewer."""
+
+    content: CsvViewerContent
 
 
 @dataclass(frozen=True)
@@ -487,6 +496,8 @@ class DundersApp(App):
 
     def on_mount(self) -> None:
         assert self.desktop is not None and self.menu_bar is not None
+        # Clean any viewer-member temps orphaned by a previous crash.
+        self._sweep_scratch()
         self.manager = WindowManager(self.desktop)
         # Re-tile panels / refill cascade editors whenever the desktop is
         # resized. Hooked on the Desktop (not App.on_resize) because there
@@ -809,6 +820,13 @@ class DundersApp(App):
             ctx.widget.search(event.value)
             ctx.widget.focus()
             return
+        if isinstance(ctx, CsvFilterRequest):
+            self._close_modal(event.dialog)
+            ctx.content.apply_filter(event.value)  # empty string clears it
+            # Removing the modal (whose Input had focus) schedules a deferred
+            # focus reset to a panel; defer ours so it lands last on the viewer.
+            self.call_after_refresh(self._refocus_content_window, ctx.content)
+            return
         if isinstance(ctx, OpenFileRequest):
             self._close_modal(event.dialog)
             raw = event.value.strip()
@@ -839,10 +857,29 @@ class DundersApp(App):
         # immediately after show_modal is the established pattern in mkdir.
         dialog.focus_input()
 
+    def on_csv_viewer_content_filter_requested(
+        self, event: CsvViewerContent.FilterRequested
+    ) -> None:
+        if self.desktop is None:
+            return
+        self._remember_active_panel_id()
+        dialog = InputDialog(
+            "Filter rows (substring, empty to clear):",
+            initial=event.content.filter_query,
+            context=CsvFilterRequest(content=event.content),
+        )
+        show_modal(self.desktop, dialog, title="Filter", size=(54, 5))
+        dialog.focus_input()
+
     def on_input_dialog_cancelled(self, event: InputDialog.Cancelled) -> None:
-        if isinstance(event.dialog.context, UserMenuPromptRequest):
+        ctx = event.dialog.context
+        if isinstance(ctx, UserMenuPromptRequest):
             self._user_menu_pending = None
         self._close_modal(event.dialog)
+        if isinstance(ctx, CsvFilterRequest):
+            # Don't strand focus on a panel — return it to the viewer (deferred
+            # so it wins over the modal-close focus reset).
+            self.call_after_refresh(self._refocus_content_window, ctx.content)
 
     def _report_op_result(self, op_name: str, result: OpResult) -> None:
         """Surface OpResult.errors to the default console window."""
@@ -2000,6 +2037,25 @@ class DundersApp(App):
             # the start of its run, so stale values are always overwritten.
             self._focus_panel(target)
 
+    def _refocus_content_window(self, content) -> None:
+        """Raise + focus the window hosting ``content`` (a maximized viewer).
+
+        ``_close_modal`` routes focus back to a file panel, which is wrong when
+        the modal was launched from a maximized viewer (e.g. the CSV filter):
+        call this afterwards to put focus back on the viewer instead."""
+        win = getattr(content, "parent", None)
+        while win is not None and not isinstance(win, Window):
+            win = getattr(win, "parent", None)
+        if win is None or self.desktop is None:
+            return
+        self.desktop.focus_window(win)
+        widget = getattr(content, "widget", content)
+        self.set_focus(widget)
+        # Keep the post-menu restore on this window, not the panel _close_modal
+        # raised — mirrors _focus_panel.
+        self._pre_menu_window = win
+        self._pre_menu_focus = None
+
     def _has_active_modal(self) -> bool:
         """True if any ModalWindow is currently mounted on the Desktop.
 
@@ -2774,6 +2830,19 @@ class DundersApp(App):
     # below it Textual renders text views without noticeable lag; above it
     # both load time and memory pressure get bad fast.
     _HEX_VIEW_SIZE_THRESHOLD = 4 * 1024 * 1024
+    # UTF-8/ASCII CSVs open via a lazy mmap source that indexes incrementally
+    # (instant open at any size, only visible rows parsed). The cap only bounds
+    # the newline-offset array's memory (~8 bytes per line); a multi-GB CSV
+    # still opens as a table rather than falling into the hex viewer.
+    _CSV_MMAP_SIZE_THRESHOLD = 2 * 1024 * 1024 * 1024
+    # UTF-16 (Excel) CSVs can't use the byte-level mmap newline scan, so they
+    # decode wholly into memory under a smaller cap; beyond it, fall back to hex.
+    _CSV_VIEW_SIZE_THRESHOLD = 32 * 1024 * 1024
+    # A CSV member of an archive / FTP / SFTP has no local path to mmap, so a
+    # large one is streamed to a temp file first (then opened lazily). The
+    # stream is disk-bound (not held in memory), so the cap matches the local
+    # mmap cap rather than being a tighter "remote" limit.
+    _CSV_REMOTE_SIZE_THRESHOLD = _CSV_MMAP_SIZE_THRESHOLD
 
     @staticmethod
     def _looks_binary(path: Path) -> bool:
@@ -2809,6 +2878,45 @@ class DundersApp(App):
         if size > self._HEX_VIEW_SIZE_THRESHOLD:
             return True
         return self._looks_binary(path)
+
+    def _make_csv_viewer(self, path: Path) -> "CsvViewerContent | None":
+        """Cheapest CSV viewer for ``path``, or None if it's too big to tabulate.
+
+        UTF-8/ASCII → lazy mmap source (instant open at any size up to the mmap
+        cap). UTF-16 (Excel) → decoded into memory under a smaller cap. Huge
+        files return None so the caller falls back to the hex viewer."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        if size == 0:
+            return CsvViewerContent("", display_name=path.name)
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(4096)
+        except OSError:
+            return None
+        if not looks_utf16(head):
+            if size > self._CSV_MMAP_SIZE_THRESHOLD:
+                return None
+            try:
+                return CsvViewerContent.from_path(path)
+            except (OSError, ValueError):
+                return None
+        if size <= self._CSV_VIEW_SIZE_THRESHOLD:
+            return CsvViewerContent(
+                initial_text=self._read_text_smart(path), display_name=path.name
+            )
+        return None
+
+    @staticmethod
+    def _read_text_smart(path: Path) -> str:
+        """Read a text file honouring BOM / UTF-16 (Excel CSVs) — see
+        :func:`dunders.fm.csv_viewer.decode_text`."""
+        try:
+            return decode_text(path.read_bytes())
+        except OSError:
+            return ""
 
     def _make_editor_window(
         self,
@@ -3056,6 +3164,12 @@ class DundersApp(App):
         the bytes we just read (no local path to mmap)."""
         if self.desktop is None:
             return
+        # A large CSV member can't be read whole into memory (the 4 MiB member
+        # cap below), and has no local path to mmap — stream it to a temp file
+        # and open that lazily instead of refusing.
+        if self._looks_csv(entry.name) and entry.size > self._HEX_VIEW_SIZE_THRESHOLD:
+            self._open_large_csv_member(entry)
+            return
         data = self._read_member_bytes(entry)
         if data is None:
             return
@@ -3071,14 +3185,16 @@ class DundersApp(App):
                 win_id=f"imgviewer-{self._editor_seq}",
             )
             return
-        if b"\x00" in data[:8192]:
-            content = HexViewerContent.from_bytes(entry.name, data)
-            title = f"Hex: {entry.name}"
-            win_id = f"hexviewer-{self._editor_seq}"
-        elif self._looks_csv(entry.name):
+        if self._looks_csv(entry.name):
+            # Before the NUL check: a UTF-16/Excel CSV member is NUL-heavy but
+            # still tabulates (decode_text handles the encoding).
             content = CsvViewerContent.from_bytes(entry.name, data)
             title = f"CSV: {entry.name}"
             win_id = f"csvviewer-{self._editor_seq}"
+        elif b"\x00" in data[:8192]:
+            content = HexViewerContent.from_bytes(entry.name, data)
+            title = f"Hex: {entry.name}"
+            win_id = f"hexviewer-{self._editor_seq}"
         else:
             content = ViewerContent(
                 initial_text=data.decode("utf-8", errors="replace"),
@@ -3087,6 +3203,101 @@ class DundersApp(App):
             title = f"View: {entry.name}"
             win_id = f"viewer-{self._editor_seq}"
         self._mount_maximized_content(content, title=title, win_id=win_id)
+
+    @staticmethod
+    def _scratch_dir() -> Path:
+        """Dedicated temp dir for downloaded viewer members (kept out of the
+        bare system temp so leftovers are identifiable / sweepable)."""
+        d = Path(tempfile.gettempdir()) / "dunders"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _sweep_scratch(self) -> None:
+        """Remove orphaned member temps from earlier runs (e.g. a crash that
+        skipped on_unmount). Safe across instances: a file another live process
+        still has open either was already unlinked (POSIX) or won't delete
+        (Windows) and is skipped."""
+        try:
+            scratch = Path(tempfile.gettempdir()) / "dunders"
+            if not scratch.is_dir():
+                return
+            for leftover in scratch.glob("member-*"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def _open_large_csv_member(self, entry) -> None:
+        """Stream a big CSV member (archive/FTP/SFTP) to a temp file in a worker,
+        then open it with the lazy mmap viewer; the temp is deleted on close."""
+        if self.desktop is None:
+            return
+        if entry.size > self._CSV_REMOTE_SIZE_THRESHOLD:
+            self.notify(
+                f"{entry.name}: too large to open as a table",
+                severity="warning",
+            )
+            return
+        provider = self._vfs_registry.resolve(entry.loc)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._scratch_dir(), prefix="member-", suffix=f"-{entry.name}"
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        progress = ProgressDialog(title=f"Loading {entry.name}", total=max(entry.size, 1))
+        show_modal(self.desktop, progress, title="Loading", size=(64, 9))
+        self.call_after_refresh(progress.focus)
+        on_status = self._status_marshaller(progress)
+
+        def _worker() -> None:
+            done = 0
+            cancelled = False
+            error: Exception | None = None
+            try:
+                with provider.open_read(entry.loc) as reader, open(tmp, "wb") as writer:
+                    while True:
+                        if progress.cancel_event.is_set():
+                            cancelled = True
+                            break
+                        chunk = reader.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        writer.write(chunk)
+                        done += len(chunk)
+                        on_status(
+                            CopyStatus(done, max(entry.size, 1), entry.name, is_bytes=True)
+                        )
+            except OSError as exc:
+                error = exc
+            self.call_from_thread(
+                self._finish_csv_member, progress, tmp, entry, cancelled, error
+            )
+
+        self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
+
+    def _finish_csv_member(self, progress, tmp: Path, entry, cancelled, error) -> None:
+        self._close_modal(progress)
+        if cancelled or error is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            if error is not None:
+                self.notify(f"Cannot read {entry.name}: {error}", severity="warning")
+            return
+        self._remember_active_panel_id()
+        self._editor_seq += 1
+        content = CsvViewerContent.from_path(
+            tmp, owns_file=True, display_name=entry.name
+        )
+        self._mount_maximized_content(
+            content, title=f"CSV: {entry.name}", win_id=f"csvviewer-{self._editor_seq}"
+        )
+        # _close_modal sent focus to a panel; put it back on the viewer (deferred
+        # so it wins over the modal-close focus reset).
+        self.call_after_refresh(self._refocus_content_window, content)
 
     def _open_member_edit(self, entry) -> None:
         """F4 on a file inside a writable archive: editable editor whose save
@@ -3145,6 +3356,18 @@ class DundersApp(App):
                 "Install dunders[image] to view images as ASCII",
                 severity="warning",
             )
+        # F3 on delimited text → aligned table viewer. Checked BEFORE the
+        # hex/binary guard so a multi-MB CSV or a UTF-16/Excel export (NUL bytes
+        # that sniff as "binary") still tabulates instead of opening as hex.
+        # Capped by _csv_is_viewable so a giant CSV can't hang the parse.
+        if read_only and self._looks_csv(path):
+            content = self._make_csv_viewer(path)
+            if content is not None:
+                self._mount_maximized_content(
+                    content, title=f"CSV: {path.name}", win_id=f"csvviewer-{seq}"
+                )
+                return
+            # Too large to tabulate → fall through to the hex viewer below.
         # F3 on a large or binary file → hex viewer with chunked mmap reads.
         # Skip the read_text() pre-load entirely so multi-GB files don't hang
         # the UI thread.
@@ -3160,11 +3383,7 @@ class DundersApp(App):
                 text = path.read_text()
             except OSError:
                 text = ""
-            if read_only and self._looks_csv(path):
-                content = CsvViewerContent(initial_text=text, display_name=path.name)
-                title = f"CSV: {path.name}"
-                win_id = f"csvviewer-{seq}"
-            elif read_only:
+            if read_only:
                 content = ViewerContent(initial_text=text, file_path=str(path))
                 title = f"View: {path.name}"
                 win_id = f"viewer-{seq}"
