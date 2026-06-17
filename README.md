@@ -25,26 +25,26 @@ waiting to be filled.
 ## Quick install (any OS — one line)
 
 Installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, then installs
-`dunders` (plus the `__` / `__w` launchers) into an isolated environment — no
-system Python needed.
+`dunders` (plus the `__` / `__w` launchers and the `sftp:` plugin) into an
+isolated environment — no system Python needed.
 
 **Linux / macOS / WSL** (bash/zsh):
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force git+https://github.com/tumikosha/dunders.git
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force git+https://github.com/tumikosha/dunders.git
+irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"
 ```
 
-Then run `dunders`. (Already have `uv`? Just `uv tool install git+https://github.com/tumikosha/dunders.git`.)
+Then run `dunders` or just "__". (Already have `uv`? Just `uv tool install "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"`.)
 
 ## Features
 
-- **Dual-pane file manager** with sort, multi-select, quick-search, and
+- **Dual-pane file manager** powered by AI with sort, multi-select, quick-search, and
   the classic NC F-key bar (F3 view, F4 edit, F5 copy, F6 move, F7 mkdir,
   F8 delete, F9 menu, F10 quit).
 - **Embedded text editor** with split view, search & replace, fold-by-indent,
@@ -77,6 +77,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS / Linux
 uv tool install dunders
 
 # 3. Run
+__ 
 dunders
 ```
 
@@ -106,6 +107,7 @@ Requires Python 3.12+ in any path above.
 ## Usage
 
 ```bash
+__
 dunders                  # two-panel file manager (default)
 dunders path/to/dir      # file manager seeded at a directory
 dunders path/to/file     # open a file in the editor
