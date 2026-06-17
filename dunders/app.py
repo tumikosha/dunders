@@ -104,6 +104,7 @@ from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
 from dunders.fm.image_viewer import ImageViewerContent, PILLOW_AVAILABLE, sniff_image
+from dunders.fm.markdown_viewer import MarkdownViewerContent, looks_markdown
 from dunders.windowing.editor import EditorContent
 
 
@@ -1098,7 +1099,7 @@ class DundersApp(App):
         # fill the WHOLE screen (otherwise the console reserves the bottom
         # half in _tile_panels and the panels only get the top half).
         for w in list(self.desktop.windows):
-            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, ConsoleContent)):
+            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, MarkdownViewerContent, ConsoleContent)):
                 self.desktop.minimize_window(w)
         # Reveal both panels un-maximized.
         for panel_id in ("panel-left", "panel-right"):
@@ -3191,6 +3192,10 @@ class DundersApp(App):
             content = CsvViewerContent.from_bytes(entry.name, data)
             title = f"CSV: {entry.name}"
             win_id = f"csvviewer-{self._editor_seq}"
+        elif looks_markdown(entry.name) and b"\x00" not in data[:8192]:
+            content = MarkdownViewerContent.from_bytes(entry.name, data)
+            title = f"MD: {entry.name}"
+            win_id = f"mdviewer-{self._editor_seq}"
         elif b"\x00" in data[:8192]:
             content = HexViewerContent.from_bytes(entry.name, data)
             title = f"Hex: {entry.name}"
@@ -3383,7 +3388,14 @@ class DundersApp(App):
                 text = path.read_text()
             except OSError:
                 text = ""
-            if read_only:
+            if read_only and looks_markdown(path):
+                # F3 on Markdown → rendered document (toggle to raw with `t`).
+                # Reached only past the hex guard above, so a huge/binary .md
+                # still opens as hex rather than choking the renderer.
+                content = MarkdownViewerContent(file_path=path, text=text)
+                title = f"MD: {path.name}"
+                win_id = f"mdviewer-{seq}"
+            elif read_only:
                 content = ViewerContent(initial_text=text, file_path=str(path))
                 title = f"View: {path.name}"
                 win_id = f"viewer-{seq}"
@@ -3574,7 +3586,7 @@ class DundersApp(App):
         for win in reversed(list(self.desktop.windows)):
             if isinstance(
                 win.content,
-                (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent),
+                (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, MarkdownViewerContent),
             ):
                 self.desktop.remove_window(win)
                 # on_window_closed isn't fired by remove_window; do the

@@ -318,7 +318,10 @@ class _ToolbarButton(Static):
 
     def set_label(self, label: str) -> None:
         self._label = label
-        self.refresh()
+        # layout=True so the `width: auto` region reflows: a longer label
+        # (e.g. "[ Raw ]" -> "[ Rendered ]") would otherwise stay clipped to
+        # the old width and only paint its first couple of cells.
+        self.refresh(layout=True)
 
     def _get_palette(self) -> Palette | None:
         with suppress(Exception):

@@ -98,13 +98,34 @@ NC-style panels and file ops, built on top of `windowing`.
   payload (see `CopyMoveRequest`/`DeleteRequest`/`MkdirRequest` etc. defined
   in `app.py`); the app handler `isinstance`-dispatches on that context
   rather than a stringly-typed `_op` field.
-- `viewer.py` / `hex_viewer.py` / `image_viewer.py` / `csv_viewer.py` — F3
-  viewers. `app._open_editor_window` routes by content: images (magic bytes,
+- `viewer.py` / `hex_viewer.py` / `image_viewer.py` / `csv_viewer.py` /
+  `markdown_viewer.py` — F3 viewers. `app._open_editor_window` routes by
+  content: images (magic bytes,
   `dunders[image]`/Pillow) → `ImageViewerContent`; `.csv`/`.tsv` → `CsvViewerContent`
   (checked *before* the hex guard so big/UTF-16 CSVs still tabulate);
   `_should_use_hex_viewer` (files >4 MiB or that sniff as binary) → mmap-backed
-  `HexViewerContent` so multi-GB files don't slurp into memory; everything else
+  `HexViewerContent` so multi-GB files don't slurp into memory; `.md`/`.markdown`
+  (small/text, *after* the hex guard) → `MarkdownViewerContent`; everything else
   → the plain `ViewerContent`.
+  - `MarkdownViewerContent` renders Markdown. Image-free docs use Textual's
+    `MarkdownViewer` (rendered document + optional TOC sidebar). Docs containing
+    *standalone* local image lines (`![alt](path)` on their own line, resolved
+    relative to the file's dir, magic-sniffed, Pillow present) switch to a
+    composed renderer: `split_markdown_blocks` splits the source into text/image
+    segments, text → `Markdown` widgets and each image → an `_InlineImage`
+    (`Static` redrawn on resize) showing **inline ASCII art** via the shared
+    `image_to_ascii`/`_fit` converter from `image_viewer.py` (capped at
+    `_INLINE_MAX_ROWS`). Remote/missing/non-image srcs stay as text (Textual's
+    🖼 placeholder). Toggles: Raw⇄Rendered (`t`) swaps to a scrollable read-only
+    source view; Contents (`c`) shows/hides the heading outline (only for the
+    plain `MarkdownViewer` — the composed image renderer has no aggregated TOC,
+    so that button is omitted and `viewer` is `None`, surface via `document`).
+    The shared `_ToolbarButton.set_label` reflows (`refresh(layout=True)`) so a
+    longer label like `[ Rendered ]` isn't clipped to the old width. Accepts a
+    local `file_path` or
+    in-memory `text`; `from_bytes`/`from_text` build VFS members (no base dir, so
+    images stay as text; gated on no NUL bytes in `_open_member_view`).
+    `looks_markdown` is the pure extension sniffer.
   - `CsvViewerContent` is lazy: UTF-8/ASCII CSVs (`_make_csv_viewer` → `from_path`)
     use an mmap `_LineSource` with an *incremental* newline index (instant open at
     any size up to `_CSV_MMAP_SIZE_THRESHOLD` = 2 GiB; only visible rows parsed,
