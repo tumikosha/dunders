@@ -140,6 +140,7 @@ class VfsProvider(Protocol):
         *,
         rename_to: str | None = None,
         on_progress: ProgressCallback | None = None,
+        on_status: "Callable | None" = None,
         cancel_event: threading.Event | None = None,
     ) -> OpResult | None: ...
 

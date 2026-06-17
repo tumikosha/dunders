@@ -298,6 +298,69 @@ class TestIntegration:
             )
         assert "auth failed" in str(ei.value).lower()
 
+    def _connected_registry(self, p, port):
+        """A registry wired to the already-connected provider ``p`` + local."""
+        from dunders.core.vfs import VfsRegistry
+        from dunders.fm.vfs_local import LocalProvider
+        reg = VfsRegistry()
+        reg.register(LocalProvider())
+        reg.register(p)
+        return reg
+
+    def test_download_streams_bytes_without_slurping(self, sftp_server, tmp_path):
+        """A large file downloads chunk-by-chunk (not one giant read), reporting
+        byte progress + the filename — this is the 1 GB "hang" fix in miniature."""
+        from dunders.fm.vfs_engine import transfer
+        from dunders.fm.actions import CopyStatus
+
+        _h, port, root = sftp_server
+        payload = b"Z" * (1024 * 1024 * 3 + 17)  # > 3 chunks of 1 MiB
+        (root / "big.bin").write_bytes(payload)
+
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        src = VfsPath(scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=("big.bin",))
+        dest_dir = tmp_path / "down"
+        dest_dir.mkdir()
+
+        seen: list[CopyStatus] = []
+        res = transfer(reg, [src], VfsPath.local(dest_dir),
+                       mode="copy", on_status=seen.append)
+        assert res.errors == []
+        assert (dest_dir / "big.bin").read_bytes() == payload
+        # Byte-driven, animated within the single file, names the file.
+        assert seen and seen[-1].is_bytes
+        assert seen[-1].done == len(payload)
+        assert seen[-1].total == len(payload)
+        assert any(s.label.endswith("big.bin") for s in seen)
+        assert len({s.done for s in seen}) > 2  # multiple chunks, not 0->100
+
+    def test_download_cancel_mid_file_removes_partial(self, sftp_server, tmp_path):
+        from dunders.fm.vfs_engine import transfer
+        from dunders.fm.actions import CopyStatus
+
+        _h, port, root = sftp_server
+        (root / "big.bin").write_bytes(b"Q" * (1024 * 1024 * 4))
+
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        src = VfsPath(scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=("big.bin",))
+        dest_dir = tmp_path / "down"
+        dest_dir.mkdir()
+
+        cancel = threading.Event()
+
+        def _on_status(status: CopyStatus) -> None:
+            if status.done >= 1024 * 1024:  # after ~1 chunk
+                cancel.set()
+
+        res = transfer(reg, [src], VfsPath.local(dest_dir),
+                       mode="copy", on_status=_on_status, cancel_event=cancel)
+        assert res.cancelled is True
+        assert not (dest_dir / "big.bin").exists()  # partial cleaned up
+
 
 @_needs_paramiko
 def test_registered_in_default_registry():

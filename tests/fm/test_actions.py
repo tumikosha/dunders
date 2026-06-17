@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from dunders.fm.actions import (
+    CopyStatus,
     OpError,
     OpResult,
     copy_paths,
@@ -190,6 +191,61 @@ def test_copy_progress_counts_files_inside_directory(tmp_path: Path):
     # 2 files + 1 dir = 3 entries.
     assert seen[0] == (0, 3)
     assert seen[-1] == (3, 3)
+
+
+def test_copy_status_reports_bytes_and_filename(tmp_path: Path):
+    """on_status moves the bar by bytes and names the current file."""
+    src = tmp_path / "big.bin"
+    payload = b"x" * (1024 * 1024 * 3 + 7)  # 3 chunks + a tail
+    src.write_bytes(payload)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    seen: list[CopyStatus] = []
+    result = copy_paths([src], dest, on_status=seen.append)
+    assert result.errors == []
+    assert (dest / "big.bin").read_bytes() == payload
+    # Byte mode, the final update lands at the full size, label is the source.
+    assert all(s.is_bytes for s in seen)
+    assert seen[0].done == 0
+    assert seen[-1].done == len(payload)
+    assert seen[-1].total == len(payload)
+    assert any(s.label.endswith("big.bin") for s in seen)
+    # The bar genuinely animates within the single file (multiple updates).
+    assert len({s.done for s in seen}) > 2
+
+
+def test_copy_status_suppresses_legacy_on_progress(tmp_path: Path):
+    """When on_status is wired up, the legacy counter stays quiet (no clash)."""
+    src = tmp_path / "a.txt"
+    src.write_text("hi")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    progress_calls: list[tuple[int, int]] = []
+    status_calls: list[CopyStatus] = []
+    copy_paths(
+        [src], dest,
+        on_progress=lambda i, n: progress_calls.append((i, n)),
+        on_status=status_calls.append,
+    )
+    assert progress_calls == []
+    assert status_calls
+
+
+def test_copy_cancel_mid_file_removes_partial(tmp_path: Path):
+    """Cancel during a big single file stops mid-stream and unlinks the partial."""
+    src = tmp_path / "big.bin"
+    src.write_bytes(b"y" * (1024 * 1024 * 5))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    cancel = threading.Event()
+
+    def _on_status(status: CopyStatus) -> None:
+        if status.done >= 1024 * 1024:  # let one chunk through, then cancel
+            cancel.set()
+
+    result = copy_paths([src], dest, on_status=_on_status, cancel_event=cancel)
+    assert result.cancelled is True
+    assert not (dest / "big.bin").exists()  # partial cleaned up
 
 
 def test_copy_cancellation_mid_tree(tmp_path: Path):

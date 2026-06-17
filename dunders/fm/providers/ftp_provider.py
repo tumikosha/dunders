@@ -387,7 +387,7 @@ class FtpProvider:
     # Intra-FTP fast paths: none (server-side copy isn't portable) — the engine
     # streams via open_read/open_write.
     def copy_within(self, sources, dest, *, rename_to=None, on_progress=None,
-                    cancel_event=None) -> OpResult | None:
+                    on_status=None, cancel_event=None) -> OpResult | None:
         return None
 
     def move_within(self, sources, dest, *, rename_to=None, on_progress=None,

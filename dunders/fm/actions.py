@@ -28,6 +28,7 @@ from dunders.core.vfs import VfsPath
 
 
 __all__ = [
+    "CopyStatus",
     "OpError",
     "OpResult",
     "chmod_paths",
@@ -85,7 +86,31 @@ class OpResult:
     cancelled: bool = False
 
 
+@dataclass(frozen=True)
+class CopyStatus:
+    """A rich copy/transfer progress update.
+
+    Unlike the bare ``on_progress(index, total)`` channel (used by
+    delete/pack/move), copy reports a :class:`CopyStatus` so the dialog can
+    show *which file* is being copied and move the bar by **bytes** — a single
+    multi-GB file then animates smoothly instead of jumping 0→100% in one step.
+
+    ``is_bytes`` distinguishes the local byte-granular path (True) from the
+    generic cross-provider path, which still counts whole files (False).
+    """
+
+    done: int          # bytes (is_bytes) or files copied so far
+    total: int         # total bytes (is_bytes) or total files
+    label: str = ""    # path/name of the file currently being copied
+    is_bytes: bool = False
+
+
 ProgressCallback = Callable[[int, int], None]
+StatusCallback = Callable[[CopyStatus], None]
+
+# Stream buffer for the chunked copy. Small enough that cancel/redraw stay
+# responsive on a huge single file, large enough not to syscall-thrash.
+_COPY_CHUNK = 1024 * 1024  # 1 MiB
 
 
 class _Cancelled(Exception):
@@ -163,23 +188,82 @@ def mkdir_at(parent: Path, name: str) -> OpResult:
 # --------------------------------------------------------------------------
 
 
+def _count_bytes(paths: list[Path]) -> int:
+    """Total bytes of all regular files under `paths` (symlinks not followed)."""
+    total = 0
+    for root in paths:
+        try:
+            if root.is_dir() and not root.is_symlink():
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for name in filenames:
+                        try:
+                            total += (Path(dirpath) / name).lstat().st_size
+                        except OSError:
+                            pass
+            else:
+                total += root.lstat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _copy_one_file(
+    src: Path,
+    dst: Path,
+    on_bytes: Callable[[int, str], None],
+    cancel_event: threading.Event | None,
+) -> None:
+    """Copy a single file (or symlink) in `_COPY_CHUNK` chunks.
+
+    Reports the file path + bytes written through `on_bytes(n, label)` and
+    checks `cancel_event` between chunks, so a cancel lands mid-file and the
+    partial destination is removed rather than left half-written.
+    """
+    label = str(src)
+    if src.is_symlink():
+        os.symlink(os.readlink(src), dst)
+        on_bytes(0, label)
+        return
+    # Announce the file before the first read so the dialog shows its name
+    # immediately, even for an empty file that never enters the loop below.
+    on_bytes(0, label)
+    try:
+        with open(src, "rb") as reader, open(dst, "wb") as writer:
+            while True:
+                if _check_cancelled(cancel_event):
+                    raise _Cancelled
+                chunk = reader.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                on_bytes(len(chunk), label)
+    except _Cancelled:
+        try:
+            os.unlink(dst)
+        except OSError:
+            pass
+        raise
+    shutil.copystat(src, dst, follow_symlinks=False)
+
+
 def _copy_recursive(
     src: Path,
     dst: Path,
-    bump: Callable[[], None],
+    on_bytes: Callable[[int, str], None],
+    entry_bump: Callable[[], None],
     cancel_event: threading.Event | None,
 ) -> None:
     if _check_cancelled(cancel_event):
         raise _Cancelled
     if src.is_dir() and not src.is_symlink():
         dst.mkdir(parents=True, exist_ok=False)
-        bump()
+        entry_bump()
         for child in src.iterdir():
-            _copy_recursive(child, dst / child.name, bump, cancel_event)
+            _copy_recursive(child, dst / child.name, on_bytes, entry_bump,
+                            cancel_event)
     else:
-        # File or symlink — copy2 preserves metadata.
-        shutil.copy2(src, dst, follow_symlinks=False)
-        bump()
+        _copy_one_file(src, dst, on_bytes, cancel_event)
+        entry_bump()
 
 
 def copy_paths(
@@ -188,25 +272,43 @@ def copy_paths(
     *,
     rename_to: str | None = None,
     on_progress: ProgressCallback | None = None,
+    on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
 ) -> OpResult:
-    """Copy each source path into `dest_dir`. Per-file progress.
+    """Copy each source path into `dest_dir`, in chunks, with byte progress.
 
     `rename_to` is honoured only when `paths` has exactly one entry — it
     overrides the destination basename so the user can copy-with-rename.
+
+    Two progress channels, never both driving the display:
+
+    * `on_status` (preferred) — a :class:`CopyStatus` per chunk, carrying the
+      current file path and a *byte* counter so the bar animates within a big
+      file. The UI wires this up.
+    * `on_progress(index, total)` — the legacy whole-entry (files + dirs)
+      counter, emitted only when `on_status` is absent (older callers/tests).
     """
     result = OpResult()
-    total = _count_entries(paths)
-    counter = [0]
     single_rename = rename_to if (rename_to and len(paths) == 1) else None
+    total_bytes = _count_bytes(paths)
+    file_total = _count_entries(paths)
+    done_bytes = [0]
+    entries = [0]
 
-    def _bump() -> None:
-        counter[0] += 1
-        if on_progress is not None:
-            on_progress(counter[0], total)
+    def _on_bytes(n: int, label: str) -> None:
+        done_bytes[0] += n
+        if on_status is not None:
+            on_status(CopyStatus(done_bytes[0], total_bytes, label, is_bytes=True))
 
-    if on_progress is not None:
-        on_progress(0, total)
+    def _entry_bump() -> None:
+        entries[0] += 1
+        if on_status is None and on_progress is not None:
+            on_progress(entries[0], file_total)
+
+    if on_status is not None:
+        on_status(CopyStatus(0, total_bytes, "", is_bytes=True))
+    elif on_progress is not None:
+        on_progress(0, file_total)
 
     for src in paths:
         if _check_cancelled(cancel_event):
@@ -217,7 +319,7 @@ def copy_paths(
         try:
             if src.parent == dest_dir and dest_name == src.name:
                 raise OSError("source and destination are the same directory")
-            _copy_recursive(src, target, _bump, cancel_event)
+            _copy_recursive(src, target, _on_bytes, _entry_bump, cancel_event)
         except _Cancelled:
             result.cancelled = True
             return result

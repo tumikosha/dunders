@@ -102,6 +102,7 @@ class LocalProvider:
         *,
         rename_to: str | None = None,
         on_progress: ProgressCallback | None = None,
+        on_status: actions.StatusCallback | None = None,
         cancel_event: threading.Event | None = None,
     ) -> actions.OpResult:
         return actions.copy_paths(
@@ -109,6 +110,7 @@ class LocalProvider:
             dest.to_local(),
             rename_to=rename_to,
             on_progress=on_progress,
+            on_status=on_status,
             cancel_event=cancel_event,
         )
 

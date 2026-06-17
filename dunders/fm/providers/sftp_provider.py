@@ -100,23 +100,84 @@ def _have_local_keys() -> bool:
         return False
 
 
-class _SftpWriter(io.BytesIO):
-    """Buffers bytes and uploads them on close."""
+class _SftpReader(io.RawIOBase):
+    """Streams a remote file in chunks under the connection lock.
+
+    The old ``open_read`` did a single ``fh.read()`` — a multi-GB download was
+    pulled entirely into RAM and blocked, with no progress and no way to
+    cancel, until the last byte arrived (the reported 1 GB "hang"). Reading on
+    demand lets the copy engine chunk it, move the bar by bytes, and stop on
+    cancel.
+    """
+
+    def __init__(self, fh, lock: threading.Lock) -> None:
+        super().__init__()
+        self._fh = fh
+        self._lock = lock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buf) -> int:
+        with self._lock:
+            data = self._fh.read(len(buf))
+        if not data:
+            return 0
+        n = len(data)
+        buf[:n] = data
+        return n
+
+    def close(self) -> None:
+        try:
+            if self._fh is not None:
+                with self._lock:
+                    self._fh.close()
+                self._fh = None
+        finally:
+            super().close()
+
+
+class _SftpWriter(io.RawIOBase):
+    """Streams bytes straight to the server as they arrive.
+
+    Replaces the old buffer-everything-then-``putfo`` writer that held the whole
+    upload in RAM until close — the upload twin of the read-side slurp.
+    """
 
     def __init__(self, sftp, lock: threading.Lock, remote: str) -> None:
         super().__init__()
         self._sftp = sftp
         self._lock = lock
         self._remote = remote
-        self._flushed = False
+        self._fh = None
+
+    def writable(self) -> bool:
+        return True
+
+    def _ensure_open(self) -> None:
+        if self._fh is None:
+            with self._lock:
+                self._fh = self._sftp.open(self._remote, "wb")
+                self._fh.set_pipelined(True)
+
+    def write(self, b) -> int:
+        self._ensure_open()
+        data = bytes(b)
+        with self._lock:
+            self._fh.write(data)
+        return len(data)
 
     def close(self) -> None:
-        if not self._flushed and not self.closed:
-            self._flushed = True
-            data = self.getvalue()
-            with self._lock:
-                self._sftp.putfo(io.BytesIO(data), self._remote)
-        super().close()
+        try:
+            if not self.closed:
+                # Create even an empty file: write() may never be called.
+                self._ensure_open()
+                if self._fh is not None:
+                    with self._lock:
+                        self._fh.close()
+                    self._fh = None
+        finally:
+            super().close()
 
 
 class SftpProvider:
@@ -264,9 +325,20 @@ class SftpProvider:
         sftp = self._sftp(loc.root)
         lock = self._lock_for(loc.root)
         with lock:
-            with sftp.open(self._remote(loc), "rb") as fh:
-                data = fh.read()
-        return io.BytesIO(data)
+            fh = sftp.open(self._remote(loc), "rb")
+            # Speed: without prefetch paramiko reads a file as a chain of
+            # *synchronous* 32 KiB requests (MAX_REQUEST_SIZE), one round trip
+            # each — throughput collapses to ~32 KiB / RTT regardless of
+            # bandwidth. prefetch() pipelines many concurrent requests (this is
+            # how sftp.get() is fast). Memory stays bounded: the local writer
+            # drains chunks as fast as the network delivers them.
+            try:
+                size = fh.stat().st_size
+            except OSError:
+                size = None
+            if size:
+                fh.prefetch(size)
+        return _SftpReader(fh, lock)
 
     def open_write(
         self, loc: VfsPath, *, size_hint: int | None = None, overwrite: bool = False
@@ -329,7 +401,7 @@ class SftpProvider:
 
     # No server-side copy; the engine streams via open_read/open_write.
     def copy_within(self, sources, dest, *, rename_to=None, on_progress=None,
-                    cancel_event=None) -> OpResult | None:
+                    on_status=None, cancel_event=None) -> OpResult | None:
         return None
 
     def move_within(self, sources, dest, *, rename_to=None, on_progress=None,

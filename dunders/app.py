@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -96,6 +97,7 @@ from dunders.windowing.tree import JsonYamlTreeContent
 from dunders.windowing.content import WindowContent
 from dunders.windowing.core import clipboard
 from dunders.windowing.editor.language_picker import show_language_picker
+from dunders.fm.csv_viewer import CsvViewerContent
 from dunders.fm.hex_viewer import HexViewerContent, HexViewerWidget
 from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
@@ -622,6 +624,29 @@ class DundersApp(App):
         except Exception:
             return None
 
+    def _status_marshaller(self, progress: ProgressDialog):
+        """Wrap a worker-thread copy callback so it can't starve the UI.
+
+        Byte-granular copy fires a status per 1 MiB chunk — thousands per
+        second on a fast disk. Marshalling every one to the UI thread pegs the
+        event loop so it never services the Cancel click. We throttle to
+        ~12 fps, but always let through the *first sight of a new file* (so the
+        name shows before its bytes start flowing) and the final 100 %.
+        """
+        last_t = [0.0]
+        last_label = [None]
+
+        def _on_status(status) -> None:
+            now = time.monotonic()
+            new_file = status.label != last_label[0]
+            done = status.done >= status.total
+            if new_file or done or (now - last_t[0]) >= 0.08:
+                last_t[0] = now
+                last_label[0] = status.label
+                self.call_from_thread(progress.set_copy_status, status)
+
+        return _on_status
+
     def _run_copy_into_archive(self, ctx: CopyMoveRequest) -> None:
         """Copy/move the selection into the browsed archive (ctx.dest_loc)."""
         self._run_copy_into_target(ctx, ctx.dest_loc)
@@ -638,8 +663,10 @@ class DundersApp(App):
             return
         op_label = "Copying" if ctx.op == "copy" else "Moving"
         progress = ProgressDialog(title=op_label, total=len(ctx.targets))
-        show_modal(self.desktop, progress, title=op_label, size=(60, 7))
+        show_modal(self.desktop, progress, title=op_label, size=(64, 9))
         self.call_after_refresh(progress.focus)
+
+        _on_status = self._status_marshaller(progress)
 
         def _worker() -> None:
             def _on_progress(i: int, n: int) -> None:
@@ -651,6 +678,7 @@ class DundersApp(App):
                 target,
                 mode=ctx.op,
                 on_progress=_on_progress,
+                on_status=_on_status,
                 cancel_event=progress.cancel_event,
             )
             self.call_from_thread(
@@ -680,8 +708,10 @@ class DundersApp(App):
             rename_to = user_dest.name if len(req.targets) == 1 else None
         op_label = "Copying" if req.op == "copy" else "Moving"
         progress = ProgressDialog(title=op_label, total=len(req.targets))
-        show_modal(self.desktop, progress, title=op_label, size=(60, 7))
+        show_modal(self.desktop, progress, title=op_label, size=(64, 9))
         self.call_after_refresh(progress.focus)
+
+        _on_status = self._status_marshaller(progress)
 
         def _worker() -> None:
             def _on_progress(i: int, n: int) -> None:
@@ -694,6 +724,7 @@ class DundersApp(App):
                 mode=req.op,
                 rename_to=rename_to,
                 on_progress=_on_progress,
+                on_status=_on_status,
                 cancel_event=progress.cancel_event,
             )
             self.call_from_thread(self._finish_op, req.op, progress, result)
@@ -704,7 +735,7 @@ class DundersApp(App):
         if self.desktop is None:
             return
         progress = ProgressDialog(title="Deleting", total=len(req.targets))
-        show_modal(self.desktop, progress, title="Delete", size=(60, 7))
+        show_modal(self.desktop, progress, title="Delete", size=(64, 9))
         self.call_after_refresh(progress.focus)
 
         targets = req.targets
@@ -732,7 +763,7 @@ class DundersApp(App):
         if self.desktop is None:
             return
         progress = ProgressDialog(title="Packing", total=len(targets))
-        show_modal(self.desktop, progress, title="Create archive", size=(60, 7))
+        show_modal(self.desktop, progress, title="Create archive", size=(64, 9))
         self.call_after_refresh(progress.focus)
 
         def _worker() -> None:
@@ -1030,7 +1061,7 @@ class DundersApp(App):
         # fill the WHOLE screen (otherwise the console reserves the bottom
         # half in _tile_panels and the panels only get the top half).
         for w in list(self.desktop.windows):
-            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, ConsoleContent)):
+            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, ConsoleContent)):
                 self.desktop.minimize_window(w)
         # Reveal both panels un-maximized.
         for panel_id in ("panel-left", "panel-right"):
@@ -2755,6 +2786,12 @@ class DundersApp(App):
         return b"\x00" in sample
 
     @staticmethod
+    def _looks_csv(name: object) -> bool:
+        """True for delimited-text extensions (.csv/.tsv). Cheap name-only check;
+        the size/binary guards still decide whether it's small enough to parse."""
+        return str(name).lower().endswith((".csv", ".tsv"))
+
+    @staticmethod
     def _looks_image(path: Path) -> bool:
         """Sniff the first 16 bytes for a known image magic signature."""
         try:
@@ -3038,6 +3075,10 @@ class DundersApp(App):
             content = HexViewerContent.from_bytes(entry.name, data)
             title = f"Hex: {entry.name}"
             win_id = f"hexviewer-{self._editor_seq}"
+        elif self._looks_csv(entry.name):
+            content = CsvViewerContent.from_bytes(entry.name, data)
+            title = f"CSV: {entry.name}"
+            win_id = f"csvviewer-{self._editor_seq}"
         else:
             content = ViewerContent(
                 initial_text=data.decode("utf-8", errors="replace"),
@@ -3119,7 +3160,11 @@ class DundersApp(App):
                 text = path.read_text()
             except OSError:
                 text = ""
-            if read_only:
+            if read_only and self._looks_csv(path):
+                content = CsvViewerContent(initial_text=text, display_name=path.name)
+                title = f"CSV: {path.name}"
+                win_id = f"csvviewer-{seq}"
+            elif read_only:
                 content = ViewerContent(initial_text=text, file_path=str(path))
                 title = f"View: {path.name}"
                 win_id = f"viewer-{seq}"
@@ -3310,7 +3355,7 @@ class DundersApp(App):
         for win in reversed(list(self.desktop.windows)):
             if isinstance(
                 win.content,
-                (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent),
+                (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent),
             ):
                 self.desktop.remove_window(win)
                 # on_window_closed isn't fired by remove_window; do the

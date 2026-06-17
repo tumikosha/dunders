@@ -329,6 +329,7 @@ class ZipProvider:
         *,
         rename_to: str | None = None,
         on_progress: ProgressCallback | None = None,
+        on_status=None,
         cancel_event: threading.Event | None = None,
     ) -> OpResult | None:
         return None  # no intra-zip fast path; extraction is cross-provider

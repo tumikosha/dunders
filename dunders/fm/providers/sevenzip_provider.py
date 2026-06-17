@@ -339,7 +339,7 @@ class SevenZipProvider:
         return result
 
     def copy_within(self, sources, dest, *, rename_to=None, on_progress=None,
-                    cancel_event=None) -> OpResult | None:
+                    on_status=None, cancel_event=None) -> OpResult | None:
         return None  # extraction is cross-provider
 
     def move_within(self, sources, dest, *, rename_to=None, on_progress=None,

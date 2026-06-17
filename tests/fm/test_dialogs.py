@@ -137,8 +137,8 @@ async def test_progress_dialog_initial_render():
         await pilot.pause()
         line0 = "".join(seg.text for seg in dlg.render_line(0))
         assert "Deleting..." in line0
-        line1 = "".join(seg.text for seg in dlg.render_line(1))
-        assert "0 / 10" in line1
+        bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+        assert "0 / 10" in bar
 
 
 @pytest.mark.asyncio
@@ -153,8 +153,32 @@ async def test_progress_dialog_set_progress_updates_render():
         await pilot.pause()
         dlg.set_progress(3, 10)
         await pilot.pause()
-        line1 = "".join(seg.text for seg in dlg.render_line(1))
-        assert "3 / 10" in line1
+        bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+        assert "3 / 10" in bar
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_copy_status_shows_filename_and_bytes():
+    from dunders.fm.actions import CopyStatus
+    dlg = ProgressDialog(title="Copying", total=1)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        dlg.set_copy_status(
+            CopyStatus(done=512 * 1024, total=1024 * 1024,
+                       label="/some/long/path/movie.mkv", is_bytes=True)
+        )
+        await pilot.pause()
+        label = "".join(seg.text for seg in dlg.render_line(dlg._LABEL_Y))
+        assert "movie.mkv" in label
+        bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+        # Human-readable byte counts + a percentage, not raw byte integers.
+        assert "512" in bar and "%" in bar
+        assert "524288" not in bar
 
 
 @pytest.mark.asyncio
@@ -189,7 +213,7 @@ async def test_progress_dialog_escape_also_cancels():
 
 @pytest.mark.asyncio
 async def test_progress_dialog_mouse_click_on_cancel_button_cancels():
-    """Click anywhere on the [C] Cancel row triggers cancel."""
+    """Click on the centred [ Cancel ] button triggers cancel."""
     from types import SimpleNamespace
     dlg = ProgressDialog(title="Working", total=5)
 
@@ -201,7 +225,7 @@ async def test_progress_dialog_mouse_click_on_cancel_button_cancels():
         await pilot.pause()
         stops: list[bool] = []
         dlg.on_click(SimpleNamespace(
-            x=dlg._CANCEL_X + 2,
+            x=dlg._cancel_x(dlg.size.width) + 2,
             y=dlg._CANCEL_Y,
             stop=lambda: stops.append(True),
         ))
@@ -223,7 +247,7 @@ async def test_progress_dialog_mouse_click_outside_button_is_ignored():
         dlg.on_click(SimpleNamespace(x=4, y=0, stop=lambda: None))
         assert not dlg.cancel_event.is_set()
         dlg.on_click(SimpleNamespace(
-            x=dlg._CANCEL_X + len(dlg._CANCEL_LABEL) + 5,
+            x=dlg._cancel_x(dlg.size.width) + len(dlg._CANCEL_LABEL) + 5,
             y=dlg._CANCEL_Y,
             stop=lambda: None,
         ))

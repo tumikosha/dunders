@@ -23,6 +23,8 @@ from textual import events
 from textual.widget import Widget
 from textual.widgets import Checkbox, DataTable, Input, Static
 
+from dunders.fm.actions import CopyStatus
+from dunders.fm.file_entry import format_size
 from dunders.windowing.content import WindowContent
 
 if TYPE_CHECKING:
@@ -716,11 +718,20 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
 
 
 class ProgressDialog(WindowContent):
-    """Progress modal: title + N/total counter + cancel.
+    """Progress modal: title + current file + bar + a real Cancel button.
 
-    The action helper running on a worker thread reads `cancel_event` to
-    know if it should stop. Pressing `c` or Esc inside the dialog sets the
-    event; the worker checks between items and reports `cancelled=True`.
+    Two progress channels feed it:
+
+    * ``set_copy_status(CopyStatus)`` — the copy path. Shows the file being
+      copied and moves the bar by **bytes**, so a multi-GB file animates
+      smoothly instead of jumping 0→100% in one step.
+    * ``set_progress(current, total)`` — the legacy whole-item counter used by
+      delete/pack/move.
+
+    The action helper running on a worker thread reads ``cancel_event`` to know
+    if it should stop. Pressing ``c``/``Esc``/``Enter`` or clicking the
+    ``[ Cancel ]`` button sets the event; the worker checks it (between items
+    and, for copy, between chunks) and reports ``cancelled=True``.
     """
 
     can_focus = True
@@ -728,6 +739,7 @@ class ProgressDialog(WindowContent):
     BINDINGS = [
         Binding("c", "cancel", show=False),
         Binding("escape", "cancel", show=False),
+        Binding("enter", "cancel", show=False),
     ]
 
     def __init__(self, title: str, total: int) -> None:
@@ -736,18 +748,29 @@ class ProgressDialog(WindowContent):
         self.window_title = title
         self.total = total
         self.current = 0
+        self.label = ""
+        self.is_bytes = False
         self.cancel_event = threading.Event()
 
     def set_progress(self, current: int, total: int) -> None:
         self.current = current
         self.total = total
+        self.is_bytes = False
         self.refresh()
 
-    # Cancel button render layout. _CANCEL_LABEL is the clickable text;
-    # _CANCEL_X is its starting column inside the dialog content area.
-    _CANCEL_LABEL = "[C] Cancel"
-    _CANCEL_X = 2
-    _CANCEL_Y = 3
+    def set_copy_status(self, status: "CopyStatus") -> None:
+        self.current = status.done
+        self.total = status.total
+        self.label = status.label
+        self.is_bytes = status.is_bytes
+        self.refresh()
+
+    # Layout: y0 title, y1 blank, y2 current file, y3 bar, y4 blank,
+    # y5 Cancel button. The button text is centred and the whole row clicks.
+    _LABEL_Y = 2
+    _BAR_Y = 3
+    _CANCEL_Y = 5
+    _CANCEL_LABEL = "[ Cancel ]"
 
     _BAR_FILLED = "█"
     _BAR_EMPTY = "░"
@@ -759,40 +782,83 @@ class ProgressDialog(WindowContent):
         if y == 0:
             text = (" " + self.title_text).ljust(width)[:width]
             return Strip([Segment(text, RichStyle(bold=True))])
-        if y == 1:
+        if y == self._LABEL_Y:
+            return self._render_label(width)
+        if y == self._BAR_Y:
             return self._render_bar(width)
         if y == self._CANCEL_Y:
-            pad = " " * self._CANCEL_X
-            text = (pad + self._CANCEL_LABEL + "  ").ljust(width)[:width]
-            return Strip([Segment(text, RichStyle(bold=True))])
+            return self._render_cancel(width)
         return Strip([Segment(" " * width)])
 
-    def _render_bar(self, width: int) -> Strip:
-        counter = f" {self.current} / {self.total}"
-        # 4 chars padding (2 each side), 2 chars for "[]" — leave the rest
-        # for the bar plus the counter suffix.
-        budget = max(1, width - 4 - 2 - len(counter))
-        bar_width = max(1, budget)
+    def _render_label(self, width: int) -> Strip:
+        shown = _ellipsize_left(self.label, max(1, width - 4))
+        text = ("  " + shown).ljust(width)[:width]
+        return Strip([Segment(text, RichStyle(dim=True))])
+
+    def _ratio(self) -> float:
         if self.total > 0:
-            ratio = max(0.0, min(1.0, self.current / self.total))
-        else:
-            ratio = 0.0
-        filled = int(ratio * bar_width)
+            return max(0.0, min(1.0, self.current / self.total))
+        # No measurable work (e.g. all-empty files): treat as complete.
+        return 1.0
+
+    def _counter_text(self) -> str:
+        if self.is_bytes:
+            return f" {format_size(self.current)} / {format_size(self.total)}"
+        return f" {self.current} / {self.total}"
+
+    def _render_bar(self, width: int) -> Strip:
+        counter = self._counter_text()
+        pct = f" {int(self._ratio() * 100):3d}%"
+        # 4 chars padding (2 each side), 2 chars for "[]" — leave the rest
+        # for the bar plus the counter + percentage suffix.
+        budget = width - 4 - 2 - len(counter) - len(pct)
+        bar_width = max(1, budget)
+        filled = int(self._ratio() * bar_width)
         bar = self._BAR_FILLED * filled + self._BAR_EMPTY * (bar_width - filled)
-        text = f"  [{bar}]{counter}".ljust(width)[:width]
+        text = f"  [{bar}]{counter}{pct}".ljust(width)[:width]
         return Strip([Segment(text)])
 
+    def _cancel_x(self, width: int) -> int:
+        """Left column of the centred Cancel button."""
+        return max(2, (width - len(self._CANCEL_LABEL)) // 2)
+
+    def _render_cancel(self, width: int) -> Strip:
+        start = self._cancel_x(width)
+        before = " " * start
+        after = " " * max(0, width - start - len(self._CANCEL_LABEL))
+        btn = RichStyle(bold=True, reverse=True)
+        return Strip([
+            Segment(before),
+            Segment(self._CANCEL_LABEL, btn),
+            Segment(after),
+        ])
+
     def on_click(self, event) -> None:
-        """Mouse cancel: click anywhere on the [C] Cancel row triggers cancel."""
+        """Mouse cancel: click on the centred [ Cancel ] button."""
         if getattr(event, "y", -1) != self._CANCEL_Y:
             return
+        start = self._cancel_x(self.size.width)
         x = getattr(event, "x", -1)
-        if self._CANCEL_X <= x < self._CANCEL_X + len(self._CANCEL_LABEL):
+        if start <= x < start + len(self._CANCEL_LABEL):
             event.stop()
             self.action_cancel()
 
     def action_cancel(self) -> None:
         self.cancel_event.set()
+
+
+def _ellipsize_left(text: str, width: int) -> str:
+    """Trim `text` to `width`, keeping the **tail** (basename) visible.
+
+    Long paths matter most at the end, so we drop the head and prefix `…`.
+    """
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return "…"
+    return "…" + text[-(width - 1):]
 
 
 _CHMOD_PERMS: tuple[tuple[int, str, str], ...] = (

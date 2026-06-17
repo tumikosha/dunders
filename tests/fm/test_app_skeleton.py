@@ -1735,3 +1735,35 @@ class TestImageRouting:
                 isinstance(w.content, ImageViewerContent)
                 for w in app.desktop.windows
             )
+
+
+def test_status_marshaller_throttles_flood_but_shows_each_file():
+    """Byte-granular copy fires thousands of statuses/sec; the marshaller must
+    drop most (so the UI thread stays free to receive Cancel) yet always show
+    the first sight of each new file and the final 100%."""
+    from types import SimpleNamespace
+    from dunders.fm.actions import CopyStatus
+
+    marshalled: list[CopyStatus] = []
+    progress = SimpleNamespace(set_copy_status=lambda s: None)
+    fake_self = SimpleNamespace(
+        call_from_thread=lambda fn, status: marshalled.append(status)
+    )
+    cb = DundersApp._status_marshaller(fake_self, progress)
+
+    # A storm of chunk updates for one big file, back-to-back (no real delay).
+    for done in range(0, 5000, 1):
+        cb(CopyStatus(done=done, total=10_000, label="big.bin", is_bytes=True))
+    # Throttled hard: far fewer than the 5000 chunks, but the file was announced.
+    assert len(marshalled) < 100
+    assert marshalled[0].label == "big.bin"
+
+    before_second = len(marshalled)
+    # A new file is always shown immediately (name-before-bytes).
+    cb(CopyStatus(done=5000, total=10_000, label="next.bin", is_bytes=True))
+    assert len(marshalled) == before_second + 1
+    assert marshalled[-1].label == "next.bin"
+
+    # The final 100% always lands so the bar completes.
+    cb(CopyStatus(done=10_000, total=10_000, label="next.bin", is_bytes=True))
+    assert marshalled[-1].done == 10_000
