@@ -48,6 +48,9 @@ sftp = ["paramiko>=3.0"]
 # Opt-in image-to-ASCII viewer (F3 on an image). Pillow is HPND-licensed
 # (permissive), kept out of the default install to stay dependency-light.
 image = ["pillow>=10"]
+# Opt-in document viewer (F3 on a PDF/office file → Markdown). markitdown is
+# MIT; kept out of the default install to stay dependency-light.
+office = ["markitdown[pdf,docx,pptx,xlsx]>=0.0.1"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

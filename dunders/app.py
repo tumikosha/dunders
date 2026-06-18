@@ -105,6 +105,12 @@ from dunders.fm.key_probe import KeyProbeContent
 from dunders.fm.viewer import ViewerContent
 from dunders.fm.image_viewer import ImageViewerContent, PILLOW_AVAILABLE, sniff_image
 from dunders.fm.markdown_viewer import MarkdownViewerContent, looks_markdown
+from dunders.fm.doc_converter import (
+    MARKITDOWN_AVAILABLE,
+    ConvertError,
+    convert_to_markdown,
+    looks_office,
+)
 from dunders.windowing.editor import EditorContent
 
 
@@ -3186,6 +3192,20 @@ class DundersApp(App):
                 win_id=f"imgviewer-{self._editor_seq}",
             )
             return
+        # Office/PDF member → convert to Markdown in a worker (from the bytes
+        # we just read, capped by _read_member_bytes). Before the CSV/NUL/hex
+        # branches so a binary .pdf/.docx member renders instead of going hex.
+        if looks_office(entry.name):
+            if MARKITDOWN_AVAILABLE:
+                self._convert_office_async(
+                    entry.name,
+                    data,
+                    lambda: HexViewerContent.from_bytes(entry.name, data),
+                )
+                return
+            self.notify(
+                "Install dunders[office] to view documents", severity="warning"
+            )
         if self._looks_csv(entry.name):
             # Before the NUL check: a UTF-16/Excel CSV member is NUL-heavy but
             # still tabulates (decode_text handles the encoding).
@@ -3208,6 +3228,49 @@ class DundersApp(App):
             title = f"View: {entry.name}"
             win_id = f"viewer-{self._editor_seq}"
         self._mount_maximized_content(content, title=title, win_id=win_id)
+
+    def _convert_office_async(self, name: str, source, fallback_factory) -> None:
+        """Convert a document to Markdown in a worker (markitdown is blocking),
+        showing a Converting… modal, then mount the Markdown viewer. On failure
+        mount ``fallback_factory()`` content (the hex viewer)."""
+        if self.desktop is None:
+            return
+        self._remember_active_panel_id()
+        progress = ProgressDialog(title=f"Converting {name}", total=0)
+        show_modal(self.desktop, progress, title="Converting", size=(64, 9))
+        self.call_after_refresh(progress.focus)
+
+        def _worker() -> None:
+            md: str | None = None
+            error: Exception | None = None
+            try:
+                md = convert_to_markdown(source, name)
+            except ConvertError as exc:
+                error = exc
+            self.call_from_thread(
+                self._finish_office, progress, name, md, error, fallback_factory
+            )
+
+        self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
+
+    def _finish_office(self, progress, name, md, error, fallback_factory) -> None:
+        cancelled = progress.cancel_event.is_set()
+        self._close_modal(progress)
+        if cancelled:
+            return
+        self._editor_seq += 1
+        if md is None:
+            if error is not None:
+                self.notify(f"Cannot convert {name}: {error}", severity="warning")
+            content = fallback_factory()
+            self._mount_maximized_content(
+                content, title=f"Hex: {name}", win_id=f"hexviewer-{self._editor_seq}"
+            )
+            return
+        content = MarkdownViewerContent.from_text(name, md)
+        self._mount_maximized_content(
+            content, title=f"Doc: {name}", win_id=f"docviewer-{self._editor_seq}"
+        )
 
     @staticmethod
     def _scratch_dir() -> Path:
@@ -3373,6 +3436,19 @@ class DundersApp(App):
                 )
                 return
             # Too large to tabulate → fall through to the hex viewer below.
+        # F3 on a PDF/office doc → convert to Markdown in a worker, then open
+        # in the Markdown viewer. Checked BEFORE the hex guard so a binary
+        # .pdf/.docx/.xlsx tabulates instead of opening as hex. Missing extra
+        # or a conversion error falls through to the hex viewer.
+        if read_only and looks_office(path):
+            if MARKITDOWN_AVAILABLE:
+                self._convert_office_async(
+                    path.name, path, lambda: HexViewerContent(path)
+                )
+                return
+            self.notify(
+                "Install dunders[office] to view documents", severity="warning"
+            )
         # F3 on a large or binary file → hex viewer with chunked mmap reads.
         # Skip the read_text() pre-load entirely so multi-GB files don't hang
         # the UI thread.

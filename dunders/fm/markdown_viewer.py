@@ -277,6 +277,11 @@ class MarkdownViewerContent(WindowContent):
             self._viewer = MarkdownViewer(
                 self._source, show_table_of_contents=False, open_links=False
             )
+            # MarkdownViewer defaults to can_focus=False, so focusing it on
+            # mount would be a no-op and arrow/wheel scroll wouldn't work until
+            # the user clicked the document. Make it focusable like the composed
+            # (_build_document) and raw (_raw_view) surfaces.
+            self._viewer.can_focus = True
             self._rendered = self._viewer
 
         self._raw_view = VerticalScroll(

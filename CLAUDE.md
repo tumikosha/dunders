@@ -126,6 +126,14 @@ NC-style panels and file ops, built on top of `windowing`.
     in-memory `text`; `from_bytes`/`from_text` build VFS members (no base dir, so
     images stay as text; gated on no NUL bytes in `_open_member_view`).
     `looks_markdown` is the pure extension sniffer.
+  - `doc_converter.py` (opt-in `dunders[office]` / markitdown) converts
+    `.pdf`/`.docx`/`.pptx`/`.xlsx`/`.epub` → Markdown, shown via
+    `MarkdownViewerContent.from_text`. Routed in `_open_editor_window` and
+    `_open_member_view` *after* the image branch and *before* the CSV/hex
+    branches (binary docs would otherwise open as hex); conversion runs in a worker
+    (`_convert_office_async`/`_finish_office`) behind a Converting… modal and
+    falls back to the hex viewer on failure or a missing extra. `looks_office`
+    is the pure extension sniffer.
   - `CsvViewerContent` is lazy: UTF-8/ASCII CSVs (`_make_csv_viewer` → `from_path`)
     use an mmap `_LineSource` with an *incremental* newline index (instant open at
     any size up to `_CSV_MMAP_SIZE_THRESHOLD` = 2 GiB; only visible rows parsed,

@@ -125,6 +125,16 @@ class TestMarkdownViewerContent:
             content._toggle_toc()
             assert content.show_toc is True
 
+    async def test_rendered_surface_is_focusable_on_mount(self):
+        # Regression: the plain MarkdownViewer defaults to can_focus=False, so
+        # focusing it on mount was a no-op and arrow/wheel scroll did nothing
+        # until the user clicked the document first.
+        app = _Host()
+        async with app.run_test():
+            content = app.query_one(MarkdownViewerContent)
+            assert content.document.can_focus is True
+            assert content.document.has_focus is True
+
     def test_from_bytes_lossy_decode(self):
         content = MarkdownViewerContent.from_bytes("x.md", b"# Hi\n\xff\xfe rest")
         assert content.window_title == "MD: x.md"
