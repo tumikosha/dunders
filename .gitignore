@@ -23,3 +23,7 @@ docs/
 .superpowers/
 .omc/
 vibe/
+
+# Local sample data — private lead lists used to test the Markdown viewer.
+# Real business data; must never be published to this public repo.
+examples/markdown/leads_germany_manuf.md
