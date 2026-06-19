@@ -547,8 +547,9 @@ class TestMmapSource:
         """Open indexes only a prefix; the rest fills in via index_batch, and a
         lazy line() pulls the index forward on demand."""
         import dunders.fm.csv_viewer as cv
+        import dunders.fm.line_source as ls
 
-        monkeypatch.setattr(cv, "_PREFIX_INDEX_LINES", 10)
+        monkeypatch.setattr(ls, "PREFIX_INDEX_LINES", 10)
         f = tmp_path / "big.csv"
         f.write_text("".join(f"r{i},v{i}\n" for i in range(5000)))
         src = cv._MmapSource(f)

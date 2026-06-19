@@ -35,7 +35,11 @@ from rich.color import Color as RichColor
 from rich.style import Style as RichStyle
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.geometry import Size
+from textual.scroll_view import ScrollView
+from textual.strip import Strip
 from textual.widgets import Markdown, MarkdownViewer, Static
 
 from dunders.fm.image_viewer import (
@@ -45,9 +49,12 @@ from dunders.fm.image_viewer import (
     image_to_ascii,
     sniff_image,
 )
+from rich.markdown import Markdown as _RichMarkdown
+
+from dunders.fm.line_source import LineSource, MmapSource, TextSource
 from dunders.windowing.content import WindowContent, WindowCommand
 
-__all__ = ["looks_markdown", "split_markdown_blocks", "MarkdownViewerContent"]
+__all__ = ["looks_markdown", "split_markdown_blocks", "estimate_blocks", "MarkdownViewerContent"]
 
 # Extensions we treat as Markdown. Kept conservative: only formats whose
 # rendering is genuinely Markdown (not, say, reStructuredText).
@@ -64,12 +71,54 @@ _REMOTE_SCHEMES = ("http://", "https://", "data:", "ftp://", "ftps://", "//")
 # Cap inline ASCII art so a tall image can't dominate the scroll.
 _INLINE_MAX_ROWS = 40
 
+# Render-cost tiers. Above _HUGE_CAP bytes a doc opens in the lazy line view;
+# at/under it, a doc with <= _MAX_BLOCKS estimated blocks renders interactively
+# (Textual MarkdownViewer + TOC) and a denser one renders via Rich in a single
+# Static. Opt-in render in the lazy tier is offered only at/under the hard cap.
+_HUGE_CAP = 128 * 1024
+_MAX_BLOCKS = 600
+_RICH_RENDER_HARD_CAP = 1024 * 1024
+
 
 def looks_markdown(name: object) -> bool:
     """True if ``name`` has a Markdown extension. Cheap, name-only check;
     the caller's size/binary guards still decide whether it's small enough
     to render."""
     return str(name).lower().endswith(_MARKDOWN_SUFFIXES)
+
+
+# A line that begins a block-level element Textual would mount as its own
+# widget (or several). Used by estimate_blocks as a cheap widget-count proxy.
+_BLOCK_LINE_RE = re.compile(
+    r"^\s*("
+    r"#{1,6}\s"          # ATX heading
+    r"|[-*+]\s"          # bullet list item
+    r"|\d+\.\s"          # ordered list item
+    r"|>\s?"             # blockquote
+    r"|```|~~~"          # fenced code fence
+    r"|\|"               # table row
+    r")"
+)
+
+
+def estimate_blocks(source: str) -> int:
+    """Cheap upper-ish estimate of how many widgets Textual's Markdown widget
+    would mount for ``source`` — without parsing. Counts block-level lines
+    (headings, list items, table rows, blockquotes, code fences) plus paragraph
+    starts (a non-blank line following a blank line or the start of file). Biased
+    to over-count list/table-heavy input so routing leans to the faster tier."""
+    count = 0
+    prev_blank = True
+    for line in source.splitlines():
+        if not line.strip():
+            prev_blank = True
+            continue
+        if _BLOCK_LINE_RE.match(line):
+            count += 1
+        elif prev_blank:
+            count += 1  # paragraph start
+        prev_blank = False
+    return count
 
 
 def _is_remote(src: str) -> bool:
@@ -247,52 +296,97 @@ class MarkdownViewerContent(WindowContent):
         self._path = Path(file_path) if file_path is not None else None
         name = display_name or (self._path.name if self._path else "markdown")
         self.window_title = f"MD: {name}"
-        if text is not None:
-            self._source = text
-        elif self._path is not None:
-            try:
-                self._source = self._path.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                self._source = f"# Could not read file\n\n{exc}"
-        else:
-            self._source = ""
-
-        # Images can only be resolved relative to a local directory and only
-        # rendered when Pillow is present; otherwise treat everything as text.
-        base_dir = (
-            self._path.parent
-            if (self._path is not None and PILLOW_AVAILABLE)
-            else None
-        )
-        self._segments = split_markdown_blocks(self._source, base_dir)
-        self._image_count = sum(1 for s in self._segments if s.kind == "img")
-        self._has_images = self._image_count > 0
+        self._display_name = name
         self._show_toc = False
         self._raw_mode = False
+        self._viewer: MarkdownViewer | None = None
+        self._rendered = None  # built on mount
+        self._source_text: str | None = None  # None only for the un-read huge file
 
-        if self._has_images:
-            self._viewer: MarkdownViewer | None = None
-            self._rendered = self._build_document()
+        # Decide the size cheaply. A huge local file is NOT read into memory.
+        if text is not None:
+            self._source_text = text
+            size = len(text.encode("utf-8", errors="replace"))
+        elif self._path is not None:
+            try:
+                size = self._path.stat().st_size
+            except OSError:
+                size = 0
+            if size <= _HUGE_CAP:
+                try:
+                    self._source_text = self._path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError as exc:
+                    self._source_text = f"# Could not read file\n\n{exc}"
+                    size = len(self._source_text.encode())
         else:
-            self._viewer = MarkdownViewer(
-                self._source, show_table_of_contents=False, open_links=False
-            )
-            # MarkdownViewer defaults to can_focus=False, so focusing it on
-            # mount would be a no-op and arrow/wheel scroll wouldn't work until
-            # the user clicked the document. Make it focusable like the composed
-            # (_build_document) and raw (_raw_view) surfaces.
-            self._viewer.can_focus = True
-            self._rendered = self._viewer
+            self._source_text = ""
+            size = 0
 
-        self._raw_view = VerticalScroll(
-            Static(self._source, classes="md-source"), classes="md-raw"
+        self._byte_size = size
+
+        # Images need the source; for the huge (un-read) case we treat the doc as
+        # image-free and go lazy. Otherwise split now (cheap relative to render).
+        if self._source_text is None:
+            self._segments = []
+            self._image_count = 0
+            self._has_images = False
+            self._tier = "lazy"
+        else:
+            base_dir = (
+                self._path.parent
+                if (self._path is not None and PILLOW_AVAILABLE)
+                else None
+            )
+            self._segments = split_markdown_blocks(self._source_text, base_dir)
+            self._image_count = sum(1 for s in self._segments if s.kind == "img")
+            self._has_images = self._image_count > 0
+            self._tier = self._choose_tier()
+
+        # The literal-source ("raw") surface, shown when _raw_mode is True. For
+        # the huge tier it IS the lazy line view (no in-memory source); otherwise
+        # a Static with markup disabled so source text containing markup-like
+        # tokens (e.g. "[/]") can't raise MarkupError.
+        if self._tier == "lazy":
+            self._raw_view = _LazyTextView(self._make_lazy_source())
+        else:
+            self._raw_view = VerticalScroll(
+                Static(self._source_text, classes="md-source", markup=False),
+                classes="md-raw",
+            )
+            self._raw_view.can_focus = True
+
+        # The huge tier opens raw (instant) and renders lazily on the first
+        # toggle. A file larger than the hard cap would freeze the render, so it
+        # is never offered (raw-only — no toggle button).
+        self._raw_mode = self._tier == "lazy"
+        self._can_render = (
+            self._tier != "lazy" or self._byte_size <= _RICH_RENDER_HARD_CAP
         )
-        self._raw_view.can_focus = True
-        self._raw_view.display = False
-        self._raw_btn = _ToolbarButton("[ Raw ]", on_press=self._toggle_raw)
+        self._rendered = None  # built in compose (eager) or on first toggle (lazy)
+
+        self._raw_btn = _ToolbarButton(
+            "[ Rendered ]" if self._raw_mode else "[ Raw ]",
+            on_press=self._toggle_raw,
+        )
         self._raw_btn.id = "md-raw-toggle"
         self._toc_btn = _ToolbarButton("[ Contents ]", on_press=self._toggle_toc)
         self._toc_btn.id = "md-toc-toggle"
+        self._fill_timer = None
+
+    def _choose_tier(self) -> str:
+        if self._byte_size > _HUGE_CAP:
+            return "lazy"
+        if self._has_images:
+            return "interactive"  # composed renderer (inline ASCII images)
+        if estimate_blocks(self._source_text or "") <= _MAX_BLOCKS:
+            return "interactive"
+        return "rich"
+
+    @property
+    def tier(self) -> str:
+        return self._tier
 
     @classmethod
     def from_text(cls, name: str, text: str) -> "MarkdownViewerContent":
@@ -320,19 +414,98 @@ class MarkdownViewerContent(WindowContent):
         return doc
 
     def compose(self) -> ComposeResult:
+        # Build the rendered surface eagerly except for the huge tier, which
+        # opens raw and renders lazily on the first toggle.
+        if self._tier != "lazy":
+            self._rendered = self._build_rendered_surface()
         with Horizontal(classes="md-toolbar"):
-            yield self._raw_btn
-            # The outline only exists for the plain MarkdownViewer; the
-            # composed image renderer has no aggregated TOC, so don't offer a
-            # dead button there.
-            if self._viewer is not None:
+            # The Raw/Rendered toggle is meaningful only when both modes exist.
+            if self._can_render:
+                yield self._raw_btn
+            # TOC only exists for the plain interactive MarkdownViewer.
+            if self._tier == "interactive" and not self._has_images:
                 yield self._toc_btn
-        yield self._rendered
         yield self._raw_view
+        if self._rendered is not None:
+            yield self._rendered
+        self._raw_view.display = self._raw_mode
+        if self._rendered is not None:
+            self._rendered.display = not self._raw_mode
+
+    def _build_rendered_surface(self):
+        """Build the formatted ("rendered") surface. Loads the source text if it
+        was not read at open (the huge tier). Image docs use the composed
+        renderer; the plain interactive tier uses Textual's MarkdownViewer;
+        everything else (dense, and huge-rendered-on-demand) renders via Rich in
+        a single Static."""
+        if self._source_text is None and self._path is not None:
+            try:
+                self._source_text = self._path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError as exc:
+                self._source_text = f"# Could not read file\n\n{exc}"
+        if self._has_images:
+            return self._build_document()
+        if self._tier == "interactive":
+            self._viewer = MarkdownViewer(
+                self._source_text or "", show_table_of_contents=False, open_links=False
+            )
+            self._viewer.can_focus = True
+            return self._viewer
+        return VerticalScroll(
+            Static(_RichMarkdown(self._source_text or ""), classes="md-rich"),
+            classes="md-doc",
+        )
+
+    def _make_lazy_source(self) -> LineSource:
+        if self._source_text is not None:
+            return TextSource(self._source_text)
+        try:
+            return MmapSource(self._path)  # type: ignore[arg-type]
+        except OSError:
+            # mmap failed — read the text and fall back to an in-memory source.
+            try:
+                self._source_text = self._path.read_text(  # type: ignore[union-attr]
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError as exc:
+                self._source_text = f"# Could not read file\n\n{exc}"
+            return TextSource(self._source_text)
 
     def on_mount(self) -> None:
-        self._rendered.focus()
+        visible = self._raw_view if self._raw_mode else self._rendered
+        if visible is not None:
+            visible.focus()
         self._update_subtitle()
+        # Grow the lazy index in the background so the scrollbar settles without
+        # blocking the open (mirrors CsvViewerContent). The lazy view is the raw
+        # surface and is never swapped, so the timer target is stable.
+        src = getattr(self._raw_view, "source", None)
+        if src is not None and not src.is_complete():
+            self._fill_timer = self.set_interval(0.05, self._fill_tick)
+
+    def _fill_tick(self) -> None:
+        src = getattr(self._raw_view, "source", None)
+        if src is None:
+            if self._fill_timer is not None:
+                self._fill_timer.stop()
+                self._fill_timer = None
+            return
+        more = src.index_batch(2000)
+        self._raw_view._resize_canvas()
+        self._raw_view.refresh()
+        if not more and self._fill_timer is not None:
+            self._fill_timer.stop()
+            self._fill_timer = None
+
+    def on_unmount(self) -> None:
+        if self._fill_timer is not None:
+            self._fill_timer.stop()
+            self._fill_timer = None
+        src = getattr(self._raw_view, "source", None)
+        if src is not None:
+            src.close()
 
     @property
     def viewer(self) -> MarkdownViewer | None:
@@ -363,7 +536,12 @@ class MarkdownViewerContent(WindowContent):
         return self._show_toc
 
     def _update_subtitle(self) -> None:
-        lines = self._source.count("\n") + 1
+        if self._source_text is not None:
+            lines = self._source_text.count("\n") + 1
+        else:
+            # Huge lazy file — use the indexed line count as a lower bound.
+            src = getattr(self._raw_view, "source", None)
+            lines = src.line_count() if src is not None else 0
         mode = "RAW" if self._raw_mode else "RENDERED"
         parts = [f"{lines} lines", mode]
         if self._has_images:
@@ -372,16 +550,29 @@ class MarkdownViewerContent(WindowContent):
         self.window_subtitle = "  ·  ".join(parts)
 
     def _toggle_raw(self) -> None:
-        self._raw_mode = not self._raw_mode
-        self._rendered.display = not self._raw_mode
+        # Raw-only (a huge file too large to render): nothing to toggle.
+        if not self._can_render:
+            return
+        going_to_raw = not self._raw_mode
+        if not going_to_raw and self._rendered is None:
+            # First switch to Rendered for the huge tier: build the formatted
+            # surface now (the expensive render the lazy tier deferred) and mount
+            # it after the raw view.
+            self._rendered = self._build_rendered_surface()
+            self.mount(self._rendered, after=self._raw_view)
+        self._raw_mode = going_to_raw
         self._raw_view.display = self._raw_mode
+        if self._rendered is not None:
+            self._rendered.display = not self._raw_mode
         self._raw_btn.set_label("[ Rendered ]" if self._raw_mode else "[ Raw ]")
-        (self._raw_view if self._raw_mode else self._rendered).focus()
+        visible = self._raw_view if self._raw_mode else self._rendered
+        if visible is not None:
+            visible.focus()
         self._update_subtitle()
 
     def _toggle_toc(self) -> None:
         # The outline only exists for the plain MarkdownViewer; the composed
-        # image renderer and raw view have nothing to toggle.
+        # image renderer, rich tier, lazy tier, and raw view have nothing to toggle.
         if self._viewer is None or self._raw_mode:
             return
         self._show_toc = not self._show_toc
@@ -405,3 +596,65 @@ class MarkdownViewerContent(WindowContent):
                 hotkey="c",
             ),
         ]
+
+
+class _LazyTextView(ScrollView):
+    """Scrollable plain-text view that renders only the visible lines of a
+    ``LineSource``. Used for the huge-file tier so a multi-MB Markdown opens
+    instantly (the source is never materialised into per-block widgets)."""
+
+    DEFAULT_CSS = """
+    _LazyTextView { background: $surface; color: $text; }
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("up",       "scroll_lines(-1)", show=False),
+        Binding("down",     "scroll_lines(1)",  show=False),
+        Binding("left",     "scroll_cols(-4)",  show=False),
+        Binding("right",    "scroll_cols(4)",   show=False),
+        Binding("pageup",   "scroll_page(-1)",  show=False),
+        Binding("pagedown", "scroll_page(1)",   show=False),
+        Binding("home",     "scroll_home",      show=False),
+        Binding("end",      "scroll_end",       show=False),
+    ]
+
+    def __init__(self, source: LineSource) -> None:
+        super().__init__()
+        self._source = source
+        self._resize_canvas()
+
+    @property
+    def source(self) -> LineSource:
+        return self._source
+
+    def _resize_canvas(self) -> None:
+        rows = max(1, self._source.line_count())
+        self.virtual_size = Size(max(1, self._longest_sampled()), rows)
+
+    def _longest_sampled(self) -> int:
+        # Width from a small prefix sample; horizontal scroll covers the rest.
+        return max((len(self._source.line(i)) for i in range(min(200, self._source.line_count()))), default=1)
+
+    def render_line(self, y: int) -> Strip:
+        idx = int(self.scroll_offset.y) + y
+        if idx < 0 or idx >= self._source.line_count():
+            return Strip([])
+        scroll_x = int(self.scroll_offset.x)
+        text = Text(self._source.line(idx))
+        strip = Strip(text.render(self.app.console))
+        strip = strip.crop(scroll_x, scroll_x + self.size.width)
+        return strip.adjust_cell_length(self.size.width, self.rich_style)
+
+    def action_scroll_lines(self, delta: int) -> None:
+        self.scroll_to(self.scroll_offset.x, self.scroll_offset.y + delta, animate=False)
+
+    def action_scroll_cols(self, delta: int) -> None:
+        self.scroll_to(self.scroll_offset.x + delta, self.scroll_offset.y, animate=False)
+
+    def action_scroll_page(self, sign: int) -> None:
+        page = max(1, self.size.height - 2)
+        self.scroll_to(
+            self.scroll_offset.x, self.scroll_offset.y + sign * page, animate=False
+        )

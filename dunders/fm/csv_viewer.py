@@ -18,8 +18,6 @@ from __future__ import annotations
 import codecs
 import csv
 import io
-import mmap
-from array import array
 from contextlib import suppress
 from pathlib import Path
 
@@ -35,6 +33,11 @@ from textual.strip import Strip
 
 from dunders.windowing.content import WindowContent, WindowCommand
 from dunders.windowing.palette import Palette
+from dunders.fm.line_source import (
+    LineSource as _LineSource,
+    TextSource as _TextSource,
+    MmapSource as _MmapSource,
+)
 
 
 __all__ = [
@@ -52,10 +55,6 @@ __all__ = [
 # point of the lazy viewer is to NOT scan a huge file on open, so widths are
 # estimated from this prefix (cells truncate at _MAX_COL_WIDTH anyway).
 _WIDTH_SAMPLE_ROWS = 200
-# Lines indexed synchronously on open — enough for the first screen + the width
-# sample. The rest of a big file's newline index is built incrementally so open
-# is instant regardless of size.
-_PREFIX_INDEX_LINES = 1024
 # Lines indexed per background tick while growing the scrollbar to its true
 # height. ~250k newline scans ≈ a few ms — small enough to keep the UI smooth.
 _FILL_BATCH_LINES = 250_000
@@ -175,127 +174,6 @@ def _split_line(line: str, delimiter: str) -> list[str]:
         return next(csv.reader([line], delimiter=delimiter))
     except (csv.Error, StopIteration):
         return line.split(delimiter)
-
-
-class _LineSource:
-    """Random access to lines 0..N without materialising them all at once."""
-
-    def line_count(self) -> int:
-        raise NotImplementedError
-
-    def line(self, i: int) -> str:
-        raise NotImplementedError
-
-    def sample(self) -> str:
-        """First few KiB as text, for delimiter sniffing."""
-        raise NotImplementedError
-
-    def is_complete(self) -> bool:
-        """True when ``line_count`` is final (in-memory sources always are)."""
-        return True
-
-    def index_batch(self, n: int) -> bool:
-        """Index up to ``n`` more lines incrementally; return True while more
-        remain. No-op for fully-known sources."""
-        return False
-
-    def close(self) -> None:
-        pass
-
-
-class _TextSource(_LineSource):
-    """Lines from an in-memory string (small files, archive members)."""
-
-    def __init__(self, text: str) -> None:
-        self._lines = text.splitlines() or [""]
-
-    def line_count(self) -> int:
-        return len(self._lines)
-
-    def line(self, i: int) -> str:
-        return self._lines[i] if 0 <= i < len(self._lines) else ""
-
-    def sample(self) -> str:
-        return "\n".join(self._lines[:50])
-
-
-class _MmapSource(_LineSource):
-    """Lines from an mmap'd file via an *incremental* newline offset index.
-
-    Opening indexes only a small prefix (first screen + width sample); the rest
-    of the ``\\n`` index is built on demand (when a line is requested) and in the
-    background (to grow the scrollbar), so even a multi-GB CSV opens instantly
-    and never freezes the UI. Offsets live in a compact ``array('Q')`` (8 bytes
-    each) rather than a Python list. Each line is sliced/decoded lazily.
-
-    Single-byte encodings only — UTF-16 takes the in-memory text path.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self._f = open(path, "rb")
-        self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
-        self._size = self._mm.size()
-        self._starts = array("Q", [0])  # starts[i] = byte offset of line i
-        self._scan_pos = 0
-        self._eof = self._size == 0
-        self.index_batch(_PREFIX_INDEX_LINES)
-
-    def _index_one(self) -> bool:
-        if self._eof:
-            return False
-        nl = self._mm.find(b"\n", self._scan_pos)
-        if nl == -1:
-            self._eof = True
-            return False
-        self._scan_pos = nl + 1
-        self._starts.append(self._scan_pos)
-        return True
-
-    def index_batch(self, n: int) -> bool:
-        for _ in range(n):
-            if not self._index_one():
-                break
-        return not self._eof
-
-    def _index_to_line(self, i: int) -> None:
-        while not self._eof and len(self._starts) < i + 2:
-            self._index_one()
-
-    def is_complete(self) -> bool:
-        return self._eof
-
-    def _exact_count(self) -> int:
-        n = len(self._starts)
-        # A trailing newline leaves a phantom empty start == size; drop it.
-        if n > 1 and self._starts[-1] >= self._size:
-            return n - 1
-        return n
-
-    def line_count(self) -> int:
-        if self._eof:
-            return self._exact_count()
-        # While still indexing, the last appended start has no known end yet, so
-        # only the fully-bounded lines count. Grows toward the true total.
-        return max(0, len(self._starts) - 1)
-
-    def line(self, i: int) -> str:
-        if i < 0:
-            return ""
-        self._index_to_line(i)  # pull the index forward to this row if needed
-        if i >= self.line_count():
-            return ""
-        begin = self._starts[i]
-        end = self._starts[i + 1] if i + 1 < len(self._starts) else self._size
-        return self._mm[begin:end].rstrip(b"\r\n").decode("utf-8", errors="replace")
-
-    def sample(self) -> str:
-        return self._mm[:8192].decode("utf-8", errors="replace")
-
-    def close(self) -> None:
-        with suppress(Exception):
-            self._mm.close()
-        with suppress(Exception):
-            self._f.close()
 
 
 class CsvViewerWidget(ScrollView):

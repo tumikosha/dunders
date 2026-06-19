@@ -107,18 +107,25 @@ NC-style panels and file ops, built on top of `windowing`.
   `HexViewerContent` so multi-GB files don't slurp into memory; `.md`/`.markdown`
   (small/text, *after* the hex guard) → `MarkdownViewerContent`; everything else
   → the plain `ViewerContent`.
-  - `MarkdownViewerContent` renders Markdown. Image-free docs use Textual's
-    `MarkdownViewer` (rendered document + optional TOC sidebar). Docs containing
-    *standalone* local image lines (`![alt](path)` on their own line, resolved
-    relative to the file's dir, magic-sniffed, Pillow present) switch to a
-    composed renderer: `split_markdown_blocks` splits the source into text/image
-    segments, text → `Markdown` widgets and each image → an `_InlineImage`
-    (`Static` redrawn on resize) showing **inline ASCII art** via the shared
-    `image_to_ascii`/`_fit` converter from `image_viewer.py` (capped at
-    `_INLINE_MAX_ROWS`). Remote/missing/non-image srcs stay as text (Textual's
+  - `MarkdownViewerContent` picks a render tier by cost (image-free docs):
+    `size > 128 KiB` → lazy `_LazyTextView` over an mmap `LineSource` (instant at
+    any size; opt-in `[ Render ]` ≤ 1 MiB); else `estimate_blocks ≤ 600` →
+    interactive Textual `MarkdownViewer` (+ TOC); else → `rich.markdown.Markdown`
+    in one `Static` (fast, no TOC). `__init__` is cheap and never reads a huge
+    file into memory; the surface is built on mount. Docs with inline images keep
+    the composed renderer regardless of size. Worker threads do not help (GIL),
+    so freezes are bounded by the thresholds.
+    Docs containing *standalone* local image lines (`![alt](path)` on their own
+    line, resolved relative to the file's dir, magic-sniffed, Pillow present)
+    switch to a composed renderer: `split_markdown_blocks` splits the source into
+    text/image segments, text → `Markdown` widgets and each image → an
+    `_InlineImage` (`Static` redrawn on resize) showing **inline ASCII art** via
+    the shared `image_to_ascii`/`_fit` converter from `image_viewer.py` (capped
+    at `_INLINE_MAX_ROWS`). Remote/missing/non-image srcs stay as text (Textual's
     🖼 placeholder). Toggles: Raw⇄Rendered (`t`) swaps to a scrollable read-only
-    source view; Contents (`c`) shows/hides the heading outline (only for the
-    plain `MarkdownViewer` — the composed image renderer has no aggregated TOC,
+    source view (no-op for the lazy tier — the lazy view is already the raw
+    source); Contents (`c`) shows/hides the heading outline (only for the plain
+    `MarkdownViewer` — the composed image renderer has no aggregated TOC,
     so that button is omitted and `viewer` is `None`, surface via `document`).
     The shared `_ToolbarButton.set_label` reflows (`refresh(layout=True)`) so a
     longer label like `[ Rendered ]` isn't clipped to the old width. Accepts a
@@ -147,6 +154,9 @@ NC-style panels and file ops, built on top of `windowing`.
     then opens via `from_path(owns_file=True)`. Temps live in `<tmp>/dunders/`,
     are unlinked immediately after mmap on POSIX (crash-proof) with an on_unmount
     fallback, and orphans are swept at startup (`_sweep_scratch`).
+- `line_source.py` — `LineSource`/`TextSource`/`MmapSource`: random-access lines
+  without materialising the whole file (mmap + incremental newline index).
+  Shared by the lazy CSV viewer and the lazy Markdown huge-file tier.
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 
 ### 3. `dunders.app` — top-level shell
