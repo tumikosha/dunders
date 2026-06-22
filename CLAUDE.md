@@ -260,6 +260,80 @@ NC-style panels and file ops, built on top of `windowing`.
   columns as JSON *strings* (recover via `json.loads`).
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 
+### 2.5 `dunders.ai` — LLM foundation
+
+Cross-cutting LLM layer, app-agnostic like `windowing`: **stdlib-only, no vendor
+SDK** — every provider talks its REST API directly over `urllib`
+(`providers/_http.py`: `post_json`/`get_json`/`aiter_stream_lines`, blocking calls
+pushed off the loop with `asyncio.to_thread`), so `pip install dunders` is enough
+(the `dunders[ai]` extra is empty, kept only so the name stays valid). Never
+imports `fm`/`windowing`. Public surface re-exported through `dunders.sdk`; the
+`dunders.ai.*` modules are private. The single runtime object is **`LlmService`**
+(`app.ai`, and `api.ai` for plugins — mirrors `api.vfs`/`api.events`).
+
+- **Provider abstraction** (`provider.py`, by analogy to `VfsProvider`): a
+  `capabilities: frozenset` (`chat/stream/tools/vision/json`) + an async surface
+  (`chat`/`stream`/`list_models` — the latter hits the provider's models endpoint,
+  `client.models.list()` for Anthropic and every OpenAI-compatible backend) + a
+  `config_schema()`/`from_config()` pair so the wizard builds a form and
+  constructs any provider generically. HTTP status codes map to the `AiError`
+  hierarchy (`_http.map_status`: `AuthError`/`RateLimitError`/`AiTimeoutError`/
+  `ProviderUnavailable`/…; plus `BudgetExceededError`/`NoAiZoneError`/
+  `CapabilityError`). Providers (`providers/`), all over stdlib HTTP:
+  `AnthropicProvider` (native Messages REST `/v1/messages`+SSE, `x-api-key`,
+  default `claude-opus-4-8`; drops `temperature`, maps `effort` to
+  `output_config` — Opus 4.x 400s on those); `OpenAICompatProvider`
+  (`/chat/completions`+`/models`, `Authorization: Bearer`, one class for every
+  OpenAI-compatible endpoint); `AzureOpenAIProvider` (subclass: `api-key` header,
+  deployment-scoped URL + `api-version`, fields `azure_endpoint`/`api_version`/
+  `deployment`); `OllamaProvider` (local, `is_local=True` → no cloud egress;
+  Ollama's native `/api/tags`+`/api/chat`); `FakeProvider` (network-free, the
+  test workhorse + fallback). `presets.py` turns groq/nvidia/deepseek/qwen into
+  pre-filled configs over `OpenAICompatProvider` — one class, many vendors.
+- **Roles** (`config.py`): `default/cheap/strong/local/vision`, a role→
+  `{provider, model}` map with `inherits` chains. Seed defaults: `cheap`=
+  ollama/`gemma4:e2b`, `strong`=groq/`gpt-oss-120b`, `default`→`cheap`. Consumers
+  request by role (`await app.ai.chat(msgs, role="strong")`); `provider=`/`model=`
+  override. Stored in the `ai` section of `config.json`; secrets are NOT here.
+- **Secrets** (`secrets.py`): `SecretResolver` resolves **env-first**, then a
+  0600 `secrets.json` next to `config.json` — an env var always overrides the
+  file. Secret config fields store the canonical env-var *name* (e.g.
+  `ANTHROPIC_API_KEY`); the value lives in the file or the environment.
+- **Guardrails** (`guardrails.py`), wired by `LlmService` around every call:
+  `TokenMeter` (per-call `Usage` + `pricing.py` cost + optional USD budget →
+  `BudgetExceededError`; emits `ai.call.done` on the `EventBus`); `ResponseCache`
+  (TTL+LRU, keyed on provider+model+messages+params, off for streaming/`cache=
+  False`); `Redactor` (conservative regex PII/secret redaction applied only
+  before a *cloud* call — local/Ollama exempt); `is_ai_allowed(path, cloud=…)`
+  (no-AI zones via `noai_globs` or a `.dunders-noai` marker searched upward).
+- **Async-native.** `chat` is `async`; `stream` yields `StreamEvent`s
+  (`TextDelta`/`ToolUseDelta`/`MessageDone`). `run_sync(coro)` bridges worker
+  threads to the app loop (`asyncio.run_coroutine_threadsafe`); the loop is
+  attached in `app.on_mount`.
+- **Wizard** (`fm/ai_config_dialog.py`, `AiConfigDialog`): opened from the `_`
+  menu → "AI / LLM settings…" (`ai.settings` command). Project TV idiom, not
+  stock Textual — roles are a row of `ShadowButton` tabs, the provider is a
+  `◀ name ▶` cycler, and the surface paints itself from the **palette** via
+  `apply_theme()` (`_get_palette()` walks ancestors for `.palette`; CSS is
+  layout-only, no Textual `$accent`/`$boost`) so a theme switch restyles it. The
+  provider drives a form built dynamically from `config_schema()` (so Azure's
+  different fields need no special-casing); `[ Models ]` fetches the provider's
+  live model list (`list_models`) into a themed `ModelPickerDialog` whose
+  selection fills the model field (manual entry still works for unlisted ids,
+  e.g. custom Ollama tags); `Test` does a live one-shot call;
+  `Save` writes non-secret fields to the config and secrets to `secrets.json`,
+  then `LlmService.reload()`s. Dismisses by posting `Window.Closed` (like
+  `SqlHistoryDialog`).
+- **First consumer — NL→command** (`fm/nl_command.py`): a `#`/`?` prefix in the
+  command line (or AI-command mode, toggled by `Alt+A` → `[AI]` hint) routes the
+  line to `app._suggest_command` (worker): `build_prompt` → `app.ai.chat(role=
+  "default")` → `parse_suggestion` (reads `CMD:`/`WHY:` markers, provider-agnostic
+  fallback) → `NlCommandDialog` (Run / Edit / Cancel). Run reuses
+  `_run_handover_command` (deferred past the dialog's `Window.Closed` so the modal
+  guard doesn't block it); Edit drops the command into the command line.
+  The F12 Agent is still a stub.
+  Specs: `docs/superpowers/specs/2026-06-22-{llm-foundation,nl-to-command}-design.md`.
+
 ### 3. `dunders.app` — top-level shell
 
 `DundersApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and
@@ -339,3 +413,12 @@ tests; widgets and the app shell have async smoke/integration tests
   file; first F2 with no file seeds an example. See `dunders/fm/user_menu.py`
   (pure parser/macros), `user_menu_loader.py` (I/O), `user_menu_dialog.py`
   (modal).
+- Command-line history: persisted to `config_dir()/history` (honours
+  `XDG_CONFIG_HOME` like the rest of the config). **Alt+H** opens a mc-style
+  popup (`fm/cmd_history_dialog.py`, `CommandHistoryDialog`) listing past entries
+  newest-first; Enter/click recalls one into the command line. Registered as the
+  app-level command `cmd.history` (so the SQL console's focus-scoped `db.history`
+  on Alt+H still wins when that window is focused — `hotkey_lookup` checks
+  focus-scoped commands before app-level). Freeing Alt+H moved the panel's
+  **Show hidden files** toggle to **Alt+.** (`alt+full_stop`; mc parity). Up/Down
+  in the command line keep step-through history / panel navigation as before.

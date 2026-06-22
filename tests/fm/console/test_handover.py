@@ -234,6 +234,15 @@ def test_prompt_hook_setup_writes_rc_to_fifo():
         assert "DUNDERS_END" not in setup  # no in-band stdout sentinel anymore
 
 
+def test_prompt_hook_disables_bang_history():
+    # Commands are fed programmatically, so `!` history expansion must be off —
+    # otherwise `!"` (e.g. in `echo "Hi!"`) mangles quoting and wedges the shell.
+    from dunders.fm.console.handover import _prompt_hook_setup
+
+    assert "setopt nobanghist" in _prompt_hook_setup("zsh", "/tmp/f")
+    assert "set +H" in _prompt_hook_setup("bash", "/tmp/f")
+
+
 def test_subprocess_command_screen_delegates_to_relay_on_posix_tty(
     monkeypatch, tmp_path
 ):

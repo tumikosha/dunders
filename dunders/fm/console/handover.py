@@ -43,14 +43,21 @@ def _prompt_hook_setup(shell_name: str, fifo_path: str) -> str:
     q = shlex.quote(fifo_path)
     if shell_name == "zsh":
         # Additive via precmd_functions so the user's own precmd hooks survive.
+        # `setopt nobanghist` disables `!` history expansion: commands are fed
+        # programmatically (not typed by a human), so a literal `!` — e.g. the
+        # `!"` in `echo "Hi!"` — must not trigger history expansion, which would
+        # mangle quoting and wedge the shell at a `dquote>` continuation prompt.
         return (
+            f"setopt nobanghist; "
             f"__dunders_precmd() {{ printf '%d\\n' \"$?\" >> {q} }}; "
             f"precmd_functions+=(__dunders_precmd)\n"
         )
     if shell_name == "bash":
-        # Prepend so we read $? before any pre-existing PROMPT_COMMAND mutates
-        # it; restore $? afterwards for chained commands.
+        # `set +H` disables `!` history expansion (same rationale as zsh above).
+        # Prepend the marker so we read $? before any pre-existing
+        # PROMPT_COMMAND mutates it; restore $? afterwards for chained commands.
         return (
+            f"set +H; "
             f"__dunders_mark() {{ local s=$?; printf '%d\\n' \"$s\" >> {q}; "
             f"return $s; }}; "
             f'PROMPT_COMMAND="__dunders_mark${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"\n'

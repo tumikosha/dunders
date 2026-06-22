@@ -210,6 +210,22 @@ class _RunModeChip(Static):
         self._owner.post_message(CommandLine.RunModeToggleRequested())
 
 
+class _HistoryChip(Static):
+    """Clickable chip ('▲') that opens the command-line history popup.
+
+    Sits to the right of the input; a click reports to the app, which shows the
+    mc-style history picker (same as the Alt+H hotkey)."""
+
+    def __init__(self, owner: "CommandLine") -> None:
+        super().__init__("▲", classes="cmdline-hist")
+        self.tooltip = "Command history (Alt+H)"
+        self._owner = owner
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self._owner.post_message(CommandLine.HistoryRequested())
+
+
 class CommandLine(Container):
     """Multi-line shell input with soft wrap, dynamic height, and history."""
 
@@ -236,6 +252,17 @@ class CommandLine(Container):
         text-style: bold;
     }}
     CommandLine Static.cmdline-mode:hover {{
+        background: $accent;
+    }}
+    CommandLine Static.cmdline-hist {{
+        width: auto;
+        height: 1;
+        padding: 0 1;
+        color: $text;
+        background: $panel;
+        text-style: bold;
+    }}
+    CommandLine Static.cmdline-hist:hover {{
         background: $accent;
     }}
     CommandLine TextArea {{
@@ -273,12 +300,17 @@ class CommandLine(Container):
         """Posted when the user clicks the run-mode chip — app flips the
         terminal handover mode (relay ↔ suspend)."""
 
+    class HistoryRequested(Message):
+        """Posted when the user clicks the '▲' chip — app opens the command
+        history popup (same as the Alt+H hotkey)."""
+
     def __init__(self, id: str | None = None, *, history: History | None = None) -> None:
         super().__init__(id=id)
         self._hint = Static("[Alt+C]", classes="cmdline-hint")
         self._input = _CmdInput(self, id="cmdline-input")
         self._mode_chip = _RunModeChip(self)
         self._mode_chip.display = False  # shown once the app sets a label
+        self._hist_chip = _HistoryChip(self)  # '▲' — opens the history popup
         self._history = history
         self._subscribers: list[Callable[[CommandLine.Submitted], None]] = []
         # Optional app-supplied hook: given a direction (-1 up / +1 down) it
@@ -291,6 +323,7 @@ class CommandLine(Container):
         with Horizontal():
             yield self._hint
             yield self._input
+            yield self._hist_chip
             yield self._mode_chip
 
     def set_run_mode(self, label: str, *, tooltip: str | None = None) -> None:
@@ -303,6 +336,10 @@ class CommandLine(Container):
         self._mode_chip.update(label)
         self._mode_chip.tooltip = tooltip
         self._mode_chip.display = True
+
+    def set_ai_mode(self, on: bool) -> None:
+        """Reflect AI-command mode in the hint chip ('[AI]' vs '[Alt+C]')."""
+        self._hint.update("[AI]" if on else "[Alt+C]")
 
     @property
     def text(self) -> str:

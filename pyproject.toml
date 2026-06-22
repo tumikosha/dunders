@@ -56,9 +56,14 @@ office = ["markitdown[pdf,docx,pptx,xlsx]>=0.0.1"]
 # postgresql:// and mysql:// URLs work out of the box (SQLite needs no driver).
 # Kept out of the default install to stay light.
 db = ["dbset>=0.1", "psycopg2-binary>=2.9", "pymysql>=1.1"]
+# LLM foundation (the __ai__ dunder / app.ai). NO dependency: every provider
+# (Anthropic, OpenAI, Azure, Ollama, groq, Nvidia, DeepSeek, Qwen) talks its REST
+# API directly over stdlib HTTP — `pip install dunders` is enough. The extra is
+# kept (empty) so `dunders[ai]` / `dunders[all]` stay valid.
+ai = []
 # Everything opt-in in one extra (self-referential) — what the quick-install
 # one-liner pulls so a single line installs the full-featured app.
-all = ["dunders[sftp,image,office,db]"]
+all = ["dunders[sftp,image,office,db,ai]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

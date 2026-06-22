@@ -371,6 +371,7 @@ class DundersApp(App):
         Binding("alt+l", "focus_left_panel", "Left panel", show=False),
         Binding("alt+r", "focus_right_panel", "Right panel", show=False),
         Binding("alt+c", "focus_command_line", "Command line", show=False, priority=True),
+        Binding("alt+a", "toggle_ai_cmd_mode", "AI command mode", show=False, priority=True),
         Binding("ctrl+n", "insert_current_file", "Insert file name/path", show=False),
         # IconTray restore: Ctrl+W is a chord prefix; the next 1..9 keypress
         # restores the corresponding tray icon. Priority so it fires even
@@ -419,10 +420,20 @@ class DundersApp(App):
         # _add_panel_windows), so a plugin-added provider is live from startup.
         # Set DUNDERS_NO_PLUGINS=1 to skip discovery (CI / bisecting).
         self.events = EventBus()
-        self.plugin_api = PluginApi(vfs=self._vfs_registry, events=self.events)
+        # The shared LLM foundation (app.ai / api.ai). Constructed without an
+        # event loop here; the loop is attached in on_mount for run_sync.
+        from dunders.ai import LlmService
+
+        self.ai = LlmService(events=self.events)
+        self.plugin_api = PluginApi(
+            vfs=self._vfs_registry, events=self.events, ai=self.ai
+        )
         self.loaded_plugins: list[str] = []
         if not os.environ.get("DUNDERS_NO_PLUGINS"):
             self.loaded_plugins = load_plugins(self.plugin_api)
+        # When on, command-line submissions are treated as natural-language
+        # intents (NL→command) without needing a #/? prefix. Toggled by Alt+A.
+        self._ai_cmd_mode = False
         # The active terminal-handover strategy in we-mc mode (None otherwise).
         self._handover = None
         self.desktop: Desktop | None = None
@@ -492,7 +503,9 @@ class DundersApp(App):
     def compose(self) -> ComposeResult:
         self.menu_bar = MenuBar()
         self.desktop = Desktop(theme_name=self._resolve_initial_theme())
-        hist_path = Path.home() / ".config" / "dunders" / "history"
+        # Honour XDG_CONFIG_HOME like the rest of the config (user_config) so the
+        # command history lives next to config.json and stays test-isolated.
+        hist_path = user_config.config_dir() / "history"
         self.command_history = History(hist_path, cap=1000)
         self.command_line = CommandLine(id="cmdline", history=self.command_history)
         # While file panels are visible, up/down at the cmdline buffer edge
@@ -512,6 +525,14 @@ class DundersApp(App):
 
     def on_mount(self) -> None:
         assert self.desktop is not None and self.menu_bar is not None
+        # Attach the running event loop to the LLM service so worker threads can
+        # bridge into it via ai.run_sync(...).
+        try:
+            import asyncio
+
+            self.ai.set_loop(asyncio.get_running_loop())
+        except RuntimeError:
+            pass
         # Clean any viewer-member temps orphaned by a previous crash.
         self._sweep_scratch()
         self.manager = WindowManager(self.desktop)
@@ -1016,6 +1037,8 @@ class DundersApp(App):
             WindowCommand(id="palette.open", label="Command Palette", handler=self.action_open_palette, hotkey="ctrl+k"),
             WindowCommand(id="bookmark.add", label="Add bookmark…", handler=self.action_add_bookmark, hotkey="ctrl+d"),
             WindowCommand(id="bookmark.open", label="Bookmarks…", handler=self.action_open_bookmarks, hotkey="ctrl+b"),
+            WindowCommand(id="cmd.history", label="Command history…", handler=self.action_show_command_history, hotkey="alt+h"),
+            WindowCommand(id="ai.settings", label="AI / LLM settings…", handler=self.action_ai_settings),
             WindowCommand(id="panels.fullscreen", label="Panels Fullscreen", handler=self.action_panels_fullscreen, hotkey="ctrl+p"),
             WindowCommand(
                 id="console.toggle",
@@ -1315,6 +1338,8 @@ class DundersApp(App):
                 ],
                 MenuItem(label="Tree (JSON/YAML)", command_id="dunder.open.tree"),
                 MenuSeparator(),
+                MenuItem(label="AI / LLM settings…", command_id="ai.settings"),
+                MenuSeparator(),
                 MenuItem(label="Add current location…", command_id="bookmark.add.menu"),
                 *[
                     MenuItem(label=b["label"], command_id=f"bookmark.open.{i}")
@@ -1396,7 +1421,7 @@ class DundersApp(App):
             Menu("View", [
                 MenuItem(command_id="panels.fullscreen"),  # Ctrl+P
                 MenuItem(command_id="console.toggle"),       # Ctrl+O
-                MenuItem(command_id="panel.toggle_hidden"),  # Alt+H
+                MenuItem(command_id="panel.toggle_hidden"),  # Alt+.
             ]),
             Menu("Options", [
                 MenuItem(label="Cycle theme", command_id="theme.cycle"),
@@ -2518,6 +2543,47 @@ class DundersApp(App):
         )
         show_modal(self.desktop, dialog, title="Bookmarks", size=(86, 24))
         self.call_after_refresh(dialog._table.focus)
+
+    def action_ai_settings(self) -> None:
+        """Open the LLM settings wizard (from the "_" menu)."""
+        if self._has_active_modal() or self.desktop is None:
+            return
+        from dunders.fm.ai_config_dialog import AiConfigDialog
+
+        self._remember_active_panel_id()
+        dialog = AiConfigDialog(self.ai)
+        show_modal(self.desktop, dialog, title="AI / LLM settings", size=(74, 26))
+        self.call_after_refresh(dialog.focus_first_input)
+
+    def action_show_command_history(self) -> None:
+        """Alt+H: mc-style popup of past command-line entries (newest first)."""
+        if self._has_active_modal() or self.desktop is None:
+            return
+        hist = self.command_history
+        entries = list(reversed(hist.entries())) if hist is not None else []
+        if not entries:
+            self.notify("No command history yet.", severity="information",
+                        title="Command history")
+            return
+        from dunders.fm.cmd_history_dialog import CommandHistoryDialog
+
+        dialog = CommandHistoryDialog(entries, on_pick=self._recall_command)
+        w = min(90, max(36, max(len(e) for e in entries) + 6))
+        h = min(len(entries) + 4, 22)
+        self._remember_active_panel_id()
+        show_modal(self.desktop, dialog, title="Command history", size=(w, h))
+        self.call_after_refresh(dialog.focus_list)
+
+    def on_command_line_history_requested(
+        self, event: CommandLine.HistoryRequested
+    ) -> None:
+        event.stop()
+        self.action_show_command_history()
+
+    def _recall_command(self, cmd: str) -> None:
+        if self.command_line is not None:
+            self.command_line.set_text(cmd)
+        self.call_after_refresh(self._focus_command_line)
 
     def on_bookmarks_dialog_open(self, event: BookmarksDialog.Open) -> None:
         self._close_modal(event.dialog)
@@ -4605,11 +4671,96 @@ class DundersApp(App):
 
     def on_command_line_submitted(self, event: CommandLine.Submitted) -> None:
         event.stop()
+        # A `#`/`?` prefix (or AI-command mode) routes the line to NL→command:
+        # the intent goes to the LLM, which suggests a shell command to confirm.
+        intent = self._nl_intent(event.text)
+        if intent is not None:
+            # Record the NL line as typed (with its #/? prefix) so it shows up in
+            # the command history and recalls verbatim — same as a real command.
+            if self.command_history is not None:
+                self.command_history.append(event.text.strip())
+            self._start_nl_command(intent)
+            return
         # Every typed command runs by handing over the real terminal (mc-style)
         # so full-screen TUIs (claude, vim, htop, …) get a proper terminal
         # instead of the thin relay-console ANSI emulator, which renders them as
         # garbage. we-mc always did this; we/fm/editor/cli now do too.
         self._run_handover_command(event.text)
+
+    def _nl_intent(self, text: str) -> str | None:
+        """Return the NL intent if ``text`` is a natural-language request
+        (``#``/``?`` prefix, or AI-command mode is on), else ``None``."""
+        s = text.strip()
+        if not s:
+            return None
+        if s[0] in "#?":
+            return s[1:].strip() or None
+        if self._ai_cmd_mode:
+            return s
+        return None
+
+    def action_toggle_ai_cmd_mode(self) -> None:
+        """Alt+A: flip AI-command mode (plain lines treated as NL intents)."""
+        self._ai_cmd_mode = not self._ai_cmd_mode
+        if self.command_line is not None:
+            self.command_line.set_ai_mode(self._ai_cmd_mode)
+        self.notify(
+            "AI command mode ON — type intents in plain language."
+            if self._ai_cmd_mode
+            else "AI command mode OFF.",
+            timeout=3.0,
+        )
+
+    def _start_nl_command(self, intent: str) -> None:
+        if self._has_active_modal():
+            return
+        self.notify("Thinking…", timeout=2.0)
+        self.run_worker(self._suggest_command(intent), exclusive=True)
+
+    async def _suggest_command(self, intent: str) -> None:
+        import platform as _platform
+
+        from dunders.ai import user
+        from dunders.fm.nl_command import (
+            SYSTEM_PROMPT,
+            NlCommandDialog,
+            build_prompt,
+            parse_suggestion,
+        )
+
+        cwd = str(self._panel_cwd_for_test())
+        plat = f"{_platform.system()} ({_platform.machine()})"
+        try:
+            resp = await self.ai.chat(
+                [user(build_prompt(intent, cwd, plat))],
+                system=SYSTEM_PROMPT, role="default", max_tokens=256,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface any backend error
+            self.notify(f"{exc}", severity="warning", title="NL→command")
+            return
+        cmd, why = parse_suggestion(resp.text or "")
+        if not cmd:
+            self.notify("No command suggested.", severity="warning",
+                        title="NL→command")
+            return
+        if self.desktop is None or self._has_active_modal():
+            return
+        dialog = NlCommandDialog(
+            intent=intent, command=cmd, why=why,
+            on_run=self._nl_run_command, on_edit=self._nl_edit_command,
+        )
+        show_modal(self.desktop, dialog, title="AI command", size=(80, 14))
+        self.call_after_refresh(dialog.focus_run)
+
+    def _nl_run_command(self, cmd: str) -> None:
+        # Defer until the dialog's Window.Closed has been processed, so the
+        # handover path's modal guard doesn't see the (just-dismissed) dialog.
+        self.call_after_refresh(lambda: self._run_handover_command(cmd))
+
+    def _nl_edit_command(self, cmd: str) -> None:
+        if self.command_line is not None:
+            self.command_line.set_text(cmd)
+        self.call_after_refresh(self._focus_command_line)
 
     def _run_handover_command(self, text: str) -> None:
         """Run a typed command by handing over the real terminal (mc-style)."""

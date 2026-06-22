@@ -24,6 +24,24 @@ A minimal plugin::
     plugin = MyPlugin()   # module-level object discovery looks for
 """
 
+from dunders.ai import (
+    AiError,
+    Capability,
+    ChatRequest,
+    ChatResponse,
+    FieldSpec,
+    ImageBlock,
+    LlmProvider,
+    LlmService,
+    Message,
+    ModelInfo,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolSpec,
+    ToolUseBlock,
+    Usage,
+)
 from dunders.core.plugins.api import PluginApi
 from dunders.core.plugins.events import EventBus
 from dunders.core.plugins.plugin import DunderPlugin
@@ -50,4 +68,21 @@ __all__ = [
     # Windowing (for content/command plugins)
     "WindowContent",
     "WindowCommand",
+    # AI / LLM foundation
+    "LlmService",
+    "LlmProvider",
+    "ChatRequest",
+    "ChatResponse",
+    "Message",
+    "TextBlock",
+    "ImageBlock",
+    "ToolUseBlock",
+    "ToolResultBlock",
+    "ToolSpec",
+    "FieldSpec",
+    "ModelInfo",
+    "Capability",
+    "Usage",
+    "StreamEvent",
+    "AiError",
 ]

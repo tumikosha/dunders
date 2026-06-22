@@ -1654,7 +1654,7 @@ class FilePanel(WindowContent):
             WindowCommand(id="panel.chmod",  label="Chmod",  handler=_bind("chmod"), hotkey="ctrl+a"),
             WindowCommand(id="panel.pack",   label="Create archive…", handler=_bind("pack")),
             WindowCommand(id="panel.find_file", label="Find file…", handler=_bind("find_file"), hotkey="alt+f7"),
-            WindowCommand(id="panel.toggle_hidden", label="Show hidden files", handler=_bind("toggle_hidden"), hotkey="alt+h"),
+            WindowCommand(id="panel.toggle_hidden", label="Show hidden files", handler=_bind("toggle_hidden"), hotkey="alt+full_stop"),
         ]
         try:
             provider = self._registry.resolve(self.cwd_loc)

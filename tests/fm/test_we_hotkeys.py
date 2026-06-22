@@ -49,17 +49,19 @@ async def test_we_tile_vertical_hotkey_dispatches():
 
 
 @pytest.mark.asyncio
-async def test_alt_h_toggles_show_hidden_on_active_panel(tmp_path):
+async def test_alt_dot_toggles_show_hidden_on_active_panel(tmp_path):
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         panel = app._active_panel()
         assert panel is not None
-        # Hidden files are shown by default; Alt+H toggles them off, then on.
+        # Hidden files are shown by default; Alt+. toggles them off, then on.
+        # (Alt+H was freed for the command-history popup; toggle-hidden moved to
+        # Alt+. — mc parity.)
         assert panel.show_hidden is True
-        await pilot.press("alt+h")
+        await pilot.press("alt+full_stop")
         await pilot.pause()
         assert panel.show_hidden is False
-        await pilot.press("alt+h")
+        await pilot.press("alt+full_stop")
         await pilot.pause()
         assert panel.show_hidden is True
