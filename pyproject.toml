@@ -56,6 +56,9 @@ office = ["markitdown[pdf,docx,pptx,xlsx]>=0.0.1"]
 # postgresql:// and mysql:// URLs work out of the box (SQLite needs no driver).
 # Kept out of the default install to stay light.
 db = ["dbset>=0.1", "psycopg2-binary>=2.9", "pymysql>=1.1"]
+# Everything opt-in in one extra (self-referential) — what the quick-install
+# one-liner pulls so a single line installs the full-featured app.
+all = ["dunders[sftp,image,office,db]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

@@ -25,22 +25,28 @@ waiting to be filled.
 ## Quick install (any OS — one line)
 
 Installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, then installs
-`dunders` (plus the `__` / `__w` launchers and the `sftp:` plugin) into an
-isolated environment — no system Python needed.
+`dunders` (plus the `__` / `__w` launchers and every opt-in dunder — `sftp:`,
+the `db:` database dunder, image and office/PDF viewers — via the `[all]` extra)
+into an isolated environment — no system Python needed.
 
 **Linux / macOS / WSL** (bash/zsh):
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git"
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"
+irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git"
 ```
 
-Then run `dunders` or just "__". (Already have `uv`? Just `uv tool install "dunders[sftp] @ git+https://github.com/tumikosha/dunders.git"`.)
+Then run `dunders` or just "__". (Already have `uv`? Just `uv tool install "dunders[all] @ git+https://github.com/tumikosha/dunders.git"`.)
+
+Want a leaner install? Pick only the extras you need instead of `[all]` —
+e.g. `dunders[db]` (database only), `dunders[sftp,db]`, or plain `dunders` for
+the base file manager + editor. Available extras: `sftp`, `db`, `image`,
+`office`, `all`.
 
 ## Features
 
