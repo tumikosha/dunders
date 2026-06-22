@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Local SQLite scratch/test databases (db dunder)
+*.db
 *.pyd
 .eggs/
 *.egg-info/

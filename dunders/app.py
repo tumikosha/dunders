@@ -148,7 +148,7 @@ class _FocusableEditorContent(EditorContent):
             commands.append(
                 WindowCommand(
                     id="project_view", label="Project View",
-                    handler=handler, hotkey="f1",
+                    handler=handler, hotkey="f9",
                 )
             )
         um = getattr(app, "action_user_menu", None)
@@ -163,6 +163,15 @@ class _FocusableEditorContent(EditorContent):
 
 
 from dunders.windowing.helpers import ModalWindow  # noqa: E402
+
+
+def _table_stem(name: str) -> str:
+    """A DB table name from a file/segment name — drop a trailing
+    ``.jsonl``/``.json`` so ``pages2.jsonl`` -> ``pages2``."""
+    for suffix in (".jsonl", ".json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 # --- Dialog payload types --------------------------------------------------
@@ -347,7 +356,7 @@ class DundersApp(App):
         # from FilePanel.get_commands() and are routed dynamically via
         # CommandRouter when a panel has focus. Editor-scoped hotkeys
         # (Save/Split/Fold) come from EditorContent.get_commands().
-        Binding("f9", "menu", "Menu", show=False),
+        Binding("f1", "menu", "Menu", show=False),
         Binding("f10", "quit", "Quit", show=False),
         Binding("escape", "close_editor", "Close editor", show=False),
         # priority=True so Tab routes to panel-switch instead of Textual's
@@ -453,7 +462,7 @@ class DundersApp(App):
         self._user_menu_ctx: MacroContext | None = None
         self._user_menu_pending: dict | None = None
         self._editor_seq = 0
-        # Project View (F1): id of the panel currently acting as the 1/4 tree,
+        # Project View (F9): id of the panel currently acting as the 1/4 tree,
         # or None when Project View is not active. Drives resize relayout and
         # the editor-side entry point; cleared by _toggle_panel (the exit path).
         self._project_tree_panel_id: str | None = None
@@ -552,7 +561,7 @@ class DundersApp(App):
                 self.call_after_refresh(self._focus_command_line)
         # Watch the menu bar's active index: when it transitions to None
         # the menu was dismissed (Esc / item chosen), so restore focus to
-        # whatever was active before F9.
+        # whatever was active before F1.
         self.watch(
             self.menu_bar,
             "active_index",
@@ -605,6 +614,15 @@ class DundersApp(App):
             return
         raw = (event.value or "").strip()
         if ctx.dest_loc.scheme != "file":
+            # Copying a file INTO a database: the typed locator's trailing
+            # segment names the target table (prefilled editable). Route the
+            # import to that table via a rename so _DbWriter picks up the name.
+            if ctx.dest_loc.scheme == "db" and len(ctx.targets) == 1:
+                table = self._db_dest_table(raw)
+                if table:
+                    root = VfsPath(scheme="db", root=ctx.dest_loc.root, parts=())
+                    self._run_copy_into_target(ctx, root, rename_to=f"{table}.jsonl")
+                    return
             # Copy/move INTO a browsed archive at its current sub-path; the
             # typed value is ignored (append-only, no path editing). Checked
             # before the provider-prefix path since the prefill is a "<scheme>://"
@@ -642,6 +660,20 @@ class DundersApp(App):
         except Exception:
             return None
 
+    def _db_dest_table(self, raw: str) -> str | None:
+        """Target table name from a typed ``db://<root>!/<table>`` destination.
+
+        Returns the (extension-stripped) trailing segment, or None when the
+        value isn't a db locator with a table segment (so the caller falls back
+        to the append-only archive path)."""
+        try:
+            parsed = VfsPath.parse(raw.strip())
+        except ValueError:
+            return None
+        if parsed.scheme != "db" or not parsed.parts:
+            return None
+        return _table_stem(parsed.parts[-1]) or None
+
     def _status_marshaller(self, progress: ProgressDialog):
         """Wrap a worker-thread copy callback so it can't starve the UI.
 
@@ -670,12 +702,14 @@ class DundersApp(App):
         self._run_copy_into_target(ctx, ctx.dest_loc)
 
     def _run_copy_into_target(
-        self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None
+        self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None, rename_to=None
     ) -> None:
         """Copy/move the selection into ``target`` via the transfer engine.
 
         ``open_in`` (a FilePanel) is navigated into ``target`` once the op
         succeeds — so creating ``zip:foo`` lands you inside the new archive.
+        ``rename_to`` overrides the destination basename for a single source
+        (used to name a target DB table on import).
         """
         if self.desktop is None:
             return
@@ -695,6 +729,7 @@ class DundersApp(App):
                 ctx.targets,
                 target,
                 mode=ctx.op,
+                rename_to=rename_to,
                 on_progress=_on_progress,
                 on_status=_on_status,
                 cancel_event=progress.cancel_event,
@@ -953,7 +988,7 @@ class DundersApp(App):
         Editor commands (Save/Find/Split/Fold) live on EditorContent.
         """
         m = self.manager
-        # Hotkeys ALREADY declared in BINDINGS (f9, f10, tab, alt+l, alt+r,
+        # Hotkeys ALREADY declared in BINDINGS (f1, f10, tab, alt+l, alt+r,
         # escape) are intentionally NOT duplicated here — both paths firing
         # would call the action twice (and destroy ``_pre_menu_focus``).
         cmds = [
@@ -1105,7 +1140,7 @@ class DundersApp(App):
         # fill the WHOLE screen (otherwise the console reserves the bottom
         # half in _tile_panels and the panels only get the top half).
         for w in list(self.desktop.windows):
-            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, MarkdownViewerContent, ConsoleContent)):
+            if isinstance(w.content, (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, MarkdownViewerContent, ConsoleContent)) or getattr(w.content, "closes_on_escape", False):
                 self.desktop.minimize_window(w)
         # Reveal both panels un-maximized.
         for panel_id in ("panel-left", "panel-right"):
@@ -1431,11 +1466,10 @@ class DundersApp(App):
         self._refresh_status_bar()
 
     def _panel_status_items(self) -> list[StatusItem]:
-        # F-keys that drive file-panel actions. F1 ("Prj Edit") opens Project
-        # View. F2 is unused — leaving its handler at None makes the status bar
-        # ignore clicks on that cell.
+        # F-keys that drive file-panel actions. F1 opens the Menu; F9 opens
+        # Project View (the two were swapped from the NC default).
         handlers: dict[str, Callable[[], None]] = {
-            "1":  self.action_project_view,
+            "1":  self.action_menu,
             "2":  self.action_user_menu,
             "3":  self.action_view,
             "4":  self.action_edit,
@@ -1443,7 +1477,7 @@ class DundersApp(App):
             "6":  self.action_move,
             "7":  self.action_mkdir,
             "8":  self.action_delete,
-            "9":  self.action_menu,
+            "9":  self.action_project_view,
             "10": self.action_quit,
         }
         return [
@@ -1462,7 +1496,7 @@ class DundersApp(App):
             return _run
 
         handlers: dict[str, Callable[[], None]] = {
-            "1":  _dispatch("project_view"),
+            "1":  self.action_menu,
             "2":  _dispatch("user_menu"),
             "3":  _dispatch("save_as"),
             "4":  _dispatch("replace"),
@@ -1470,7 +1504,7 @@ class DundersApp(App):
             "6":  _dispatch("split_v"),
             "7":  _dispatch("fold_toggle"),
             "8":  _dispatch("record_macro"),
-            "9":  self.action_menu,
+            "9":  _dispatch("project_view"),
             "10": self.action_quit,
         }
         return [
@@ -1953,7 +1987,7 @@ class DundersApp(App):
              window is unaffected since dropdowns aren't windows).
           3. ``_pre_menu_window.content`` — set when the menu was opened,
              so commands invoked via menu items still target the panel
-             the user was on before pressing F9.
+             the user was on before pressing F1.
           4. ``panel-left`` as a last-resort fallback.
         """
         node = self.focused
@@ -2236,8 +2270,63 @@ class DundersApp(App):
 
         self.run_worker(_work, thread=True, exclusive=False, group="dunder-connect")
 
+    def _selected_db_table_locs(self, panel) -> list:
+        """Locs of the panel's effective targets (the multi-selection, or the
+        cursor entry when nothing is selected) that are real DB tables, in panel
+        order. Empty when none apply (caller falls back to normal F-key logic)."""
+        selected = set(panel.effective_target_locs())
+        return [e.loc for e in panel.entries
+                if e.loc in selected
+                and e.loc.scheme == "db" and e.extra.get("db.kind") == "table"]
+
+    def _open_db_table_query(self, locs, *, mode: str) -> None:
+        """F3/F4 on table name(s): open the SQL console prefilled with a query.
+
+        ``mode='select'`` prefills ``SELECT * FROM <table>`` (View); ``mode='ddl'``
+        prefills each table's ``CREATE TABLE`` + indexes (Edit). With several
+        tables selected the per-table statements are concatenated (in panel
+        order) into one console. Prefill only — the user runs it with Ctrl+R."""
+        provider = self._vfs_registry.for_scheme("db")
+        blocks: list[str] = []
+        for loc in locs:
+            conn = provider.conn_for(loc.root)
+            table = loc.parts[0]
+            try:
+                blocks.append(conn.create_table_ddl(table) if mode == "ddl"
+                              else conn.select_all_sql(table))
+            except Exception as exc:  # noqa: BLE001 — reflection/DDL errors -> toast, no crash
+                self.notify(f"SQL console: {exc}", severity="warning")
+                return
+        if blocks:
+            self._open_db_console(initial_sql="\n\n".join(blocks))
+
+    def _open_db_console(self, *, open_history: bool = False, initial_sql: str = "") -> None:
+        if self._has_active_modal() or self.desktop is None:
+            return
+        panel = self._active_panel()
+        if panel is None or panel.cwd_loc.scheme != "db":
+            self.notify("SQL console: focus a database panel first", severity="warning")
+            return
+        from dunders.fm.db_console import DbConsoleContent
+        provider = self._vfs_registry.for_scheme("db")
+        conn = provider.conn_for(panel.cwd_loc.root)
+        self._editor_seq += 1
+        content = DbConsoleContent(conn, title_db=panel.cwd_loc.root, initial_sql=initial_sql)
+        self._mount_maximized_content(content, title="SQL console",
+                                      win_id=f"db-console-{self._editor_seq}")
+        if open_history:
+            # Database → SQL history: open the console, then pop its picker on top
+            # (deferred so the console is mounted first).
+            self.call_after_refresh(content._open_history)
+
     def _run_provider_action(self, action, targets=None) -> None:
         """Run a ProviderAction on the active panel's selection, off the UI thread."""
+        if getattr(action, "id", None) == "db.sql":
+            self._open_db_console()
+            return
+        if getattr(action, "id", None) == "db.history":
+            self._open_db_console(open_history=True)
+            return
         if self._has_active_modal():
             return
         panel = self._active_panel()
@@ -2320,21 +2409,54 @@ class DundersApp(App):
             return False
         return bool(getattr(provider, "accepts_empty_open", False))
 
-    def action_add_bookmark(self) -> None:
-        if self._has_active_modal():
+    def action_add_bookmark(self, *, loc: "VfsPath | None" = None,
+                            remember_override: "bool | None" = None) -> None:
+        if self._has_active_modal() or self.desktop is None:
             return
-        panel = self._active_panel()
-        if panel is None or self.desktop is None:
-            return
-        loc = panel.cwd_loc
+        if loc is None:
+            panel = self._active_panel()
+            if panel is None:
+                return
+            loc = panel.cwd_loc
         self._remember_active_panel_id()
+        ask_password, default_remember = self._remember_flags(loc)
+        # An inline choice from the Bookmarks picker overrides the computed
+        # default (the user explicitly ticked/unticked it there).
+        if remember_override is not None and ask_password:
+            default_remember = remember_override
         dialog = AddBookmarkDialog(
-            default_label=loc.name,
-            ask_password=self._scheme_is_slow(loc.scheme),
+            default_label=self._bookmark_label(loc),
+            ask_password=ask_password,
+            default_remember=default_remember,
             context=AddBookmarkRequest(loc=loc),
         )
-        show_modal(self.desktop, dialog, title="Add bookmark", size=(62, 9))
+        # Taller when the "remember password" row is present, else it (and the
+        # buttons) overflow the window and get clipped off the bottom.
+        show_modal(self.desktop, dialog, title="Add bookmark",
+                   size=(62, 11 if ask_password else 9))
         self.call_after_refresh(dialog._label_input.focus)
+
+    def _remember_flags(self, loc: "VfsPath") -> tuple[bool, bool]:
+        """``(can_remember, default_remember)`` for ``loc``: whether a 'remember
+        password' choice is meaningful (slow/network scheme), and whether to
+        pre-check it (the live connection actually has a password — the user
+        just authenticated, so saving it is the expected default and avoids the
+        silent 'no password supplied' on reopen)."""
+        can_remember = self._scheme_is_slow(loc.scheme)
+        if not can_remember:
+            return False, False
+        provider = self._vfs_registry.for_scheme(loc.scheme)
+        getpw = getattr(provider, "connection_password", None)
+        return True, bool(callable(getpw) and getpw(loc.root))
+
+    @staticmethod
+    def _bookmark_label(loc: "VfsPath") -> str:
+        """Friendly default bookmark label. A db:// locator's name is the whole
+        SQLAlchemy URL — noisy, and it invites users to edit the password into
+        it; use the trailing segment (the database name) instead."""
+        if loc.scheme == "db":
+            return loc.root.rstrip("/").rsplit("/", 1)[-1] or loc.root
+        return loc.name
 
     def _refresh_bookmarks_menu(self) -> None:
         # Re-register bookmark commands (labels/ids change as bookmarks change),
@@ -2382,7 +2504,18 @@ class DundersApp(App):
         if self._has_active_modal() or self.desktop is None:
             return
         self._remember_active_panel_id()
-        dialog = BookmarksDialog(list_bookmarks())
+        # Offer "remember password" inline when the active location is a
+        # password-capable connection (e.g. a db:// panel), so the choice is
+        # visible right here rather than only in the Add-bookmark dialog.
+        panel = self._active_panel()
+        can_remember = default_remember = False
+        if panel is not None:
+            can_remember, default_remember = self._remember_flags(panel.cwd_loc)
+        dialog = BookmarksDialog(
+            list_bookmarks(),
+            can_remember=can_remember,
+            default_remember=default_remember,
+        )
         show_modal(self.desktop, dialog, title="Bookmarks", size=(86, 24))
         self.call_after_refresh(dialog._table.focus)
 
@@ -2400,8 +2533,23 @@ class DundersApp(App):
         event.dialog.refresh_rows(list_bookmarks())
 
     def on_bookmarks_dialog_add_current(self, event: BookmarksDialog.AddCurrent) -> None:
+        # Resolve the panel that was active when the picker opened BEFORE closing
+        # the modal — afterwards _active_panel() can fall back to panel-left,
+        # losing a db:// scheme (so the "remember password" checkbox would be
+        # wrongly omitted and the wrong location bookmarked).
+        loc = None
+        pid = self._pre_modal_panel_id
+        if pid and self.desktop is not None:
+            try:
+                win = self.desktop.query_one(f"#{pid}", Window)
+            except Exception:
+                win = None
+            if win is not None and isinstance(win.content, FilePanel):
+                loc = win.content.cwd_loc
         self._close_modal(event.dialog)
-        self.action_add_bookmark()
+        # Carry the picker's "remember password" choice into the Add dialog so
+        # the inline checkbox actually governs the saved password.
+        self.action_add_bookmark(loc=loc, remember_override=event.remember)
 
     def on_bookmarks_dialog_cancelled(self, event: BookmarksDialog.Cancelled) -> None:
         self._close_modal(event.dialog)
@@ -2416,7 +2564,14 @@ class DundersApp(App):
             self.notify(f"Bad bookmark: {bm.get('label')!r}", severity="warning")
             return
         if self._scheme_is_slow(loc.scheme):
-            spec = loc.root + ("/" + "/".join(loc.parts) if loc.parts else "/")
+            # A provider whose root is itself a full URL (db://<sqlalchemy-url>)
+            # reopens with that URL verbatim — appending a path "/" would corrupt
+            # it (e.g. the database name "mydb" becomes "mydb/"). Host/path
+            # providers (sftp/ftp) keep their in-source path suffix.
+            if "://" in loc.root:
+                spec = loc.root
+            else:
+                spec = loc.root + ("/" + "/".join(loc.parts) if loc.parts else "/")
             self._do_open_dunder(loc.scheme, spec, password=bm.get("password"))
         else:
             panel._change_cwd_loc(loc)
@@ -2751,7 +2906,18 @@ class DundersApp(App):
         self._remember_active_panel_id()
         dest = opposite.cwd
         verb = "Copy" if op == "copy" else "Move"
-        if into_archive:
+        if dest_loc.scheme == "db" and len(targets) == 1:
+            # Copying a file INTO a database: the destination is editable and
+            # names the TARGET TABLE. Prefill the connection locator with a
+            # table segment (the source's stem, or the current table when the
+            # panel is already inside one); the user edits the part after "!/"
+            # to choose/rename the table. _DbWriter derives the table from the
+            # destination basename, so the typed name flows through as a rename.
+            stem = _table_stem(targets[0].name)
+            base_table = dest_loc.parts[0] if dest_loc.parts else stem
+            initial = VfsPath(scheme="db", root=dest_loc.root, parts=(base_table,)).as_uri()
+            prompt = f"{verb} '{targets[0].name}' into table (edit after !/):"
+        elif into_archive:
             # Destination is a browsed archive dir; the path isn't user-editable
             # (append at the current sub-path). Show the locator for clarity.
             initial = dest_loc.as_uri()
@@ -2782,6 +2948,13 @@ class DundersApp(App):
         if panel is None or self.desktop is None:
             return
         if not (0 <= panel.cursor < len(panel.entries)):
+            return
+        # F4 on selected DB table(s) -> SQL console with each table's CREATE
+        # TABLE + indexes (multi-selection supported). Checked before the
+        # cursor/is_dir logic since a table is a directory.
+        table_locs = self._selected_db_table_locs(panel)
+        if table_locs:
+            self._open_db_table_query(table_locs, mode="ddl")
             return
         entry = panel.entries[panel.cursor]
         if entry.is_dir:
@@ -2815,10 +2988,18 @@ class DundersApp(App):
         if not (0 <= panel.cursor < len(panel.entries)):
             return
         entry = panel.entries[panel.cursor]
+        if entry.loc.scheme == "db" and entry.extra.get("db.kind") == "table":
+            # F3 on a table -> SQL console prefilled with SELECT * FROM <table>.
+            self._open_db_table_query([entry.loc], mode="select")
+            return
         if entry.is_dir:
             return  # F3 on a dir is a no-op
         if not self._is_local_entry(entry):
             self._open_member_view(entry)  # read through the VFS provider
+            return
+        match = self._dunder_for_local_file(entry.path)
+        if match is not None:
+            self._do_open_dunder(*match)  # navigate the panel into the dunder (e.g. a SQLite DB)
             return
         self._open_editor_window(entry.path, read_only=True)
 
@@ -2876,6 +3057,39 @@ class DundersApp(App):
         except OSError:
             return False
         return sniff_image(head)
+
+    def _dunder_for_local_file(self, path: Path) -> tuple[str, str] | None:
+        """A registered provider that claims to open ``path`` for viewing, as
+        ``(scheme, open_spec)`` — else None. Magic byte-prefixes take precedence
+        over filename extensions; schemes are scanned in sorted order so the
+        choice is deterministic. A provider participates only if it declares
+        ``spec_from_path`` plus at least one of ``view_magic`` / ``view_extensions``.
+        """
+        providers = [self._vfs_registry.for_scheme(s)
+                     for s in sorted(self._vfs_registry.schemes())]
+        eligible = [p for p in providers if hasattr(p, "spec_from_path")
+                    and (getattr(p, "view_magic", ()) or getattr(p, "view_extensions", ()))]
+        if not eligible:
+            return None
+        max_magic = max((len(m) for p in eligible for m in getattr(p, "view_magic", ())),
+                        default=0)
+        head = b""
+        if max_magic:
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(max_magic)
+            except OSError:
+                head = b""
+        for p in eligible:  # magic first
+            for sig in getattr(p, "view_magic", ()):
+                if sig and head.startswith(sig):
+                    return (p.scheme, p.spec_from_path(str(path)))
+        name = path.name.lower()
+        for p in eligible:  # then extension
+            for ext in getattr(p, "view_extensions", ()):
+                if ext and name.endswith(ext):
+                    return (p.scheme, p.spec_from_path(str(path)))
+        return None
 
     def _should_use_hex_viewer(self, path: Path) -> bool:
         try:
@@ -2973,7 +3187,7 @@ class DundersApp(App):
         return node
 
     def action_project_view(self) -> None:
-        """F1: enter Project View. Branches on whether an editor or panel is focused."""
+        """F9: enter Project View. Branches on whether an editor or panel is focused."""
         if self._has_active_modal():
             return
         if self.desktop is None:
@@ -3004,7 +3218,7 @@ class DundersApp(App):
             return
         entry = panel.entries[panel.cursor]
         if entry.is_dir:
-            return  # F1 on a directory is a no-op, mirroring F4.
+            return  # F9 on a directory is a no-op, mirroring F4.
         tree_id = tree_win.id
         other_id = "panel-right" if tree_id == "panel-left" else "panel-left"
         # Hide the opposite panel.
@@ -3097,7 +3311,7 @@ class DundersApp(App):
         self._project_tree_panel_id = tree_id
         self._enter_tree_short_mode(tree_win.content)
         self._layout_project_view(tree_win=tree_win, editor_win=editor_win)
-        # F1 from the editor jumps focus INTO the tree so the user can navigate
+        # F9 from the editor jumps focus INTO the tree so the user can navigate
         # the file listing immediately (the editor stays open on the right).
         self.desktop.focus_window(tree_win)
 
@@ -3509,6 +3723,10 @@ class DundersApp(App):
         if not self._is_local_entry(event.entry):
             self._open_member_view(event.entry)  # read-only inside archives
             return
+        match = self._dunder_for_local_file(event.entry.path)
+        if match is not None:
+            self._do_open_dunder(*match)  # a SQLite file opens as a database (magic wins)
+            return
         cmd = self._executable_command(event.entry.path)
         if cmd is not None and self._run_in_console(cmd):
             return
@@ -3663,7 +3881,7 @@ class DundersApp(App):
             if isinstance(
                 win.content,
                 (EditorContent, ViewerContent, HexViewerContent, ImageViewerContent, CsvViewerContent, MarkdownViewerContent),
-            ):
+            ) or getattr(win.content, "closes_on_escape", False):
                 self.desktop.remove_window(win)
                 # on_window_closed isn't fired by remove_window; do the
                 # post-close housekeeping inline.
@@ -3822,7 +4040,7 @@ class DundersApp(App):
             self.menu_bar.activate(0)
             self.set_focus(self.menu_bar)
             # Drop the first menu open straight away, as if the user pressed
-            # Enter on it — F9 should reveal the menu, not just highlight it.
+            # Enter on it — F1 should reveal the menu, not just highlight it.
             self.menu_bar.open_active()
 
     def action_quit(self) -> None:  # noqa: D401 - overrides Textual's built-in
@@ -3851,6 +4069,14 @@ class DundersApp(App):
             getattr(message.current, "content", None), FilePanel
         ):
             self._last_focused_panel_window = message.current
+        message.stop()
+
+    def on_file_panel_scheme_changed(self, message: "FilePanel.SchemeChanged") -> None:
+        # A panel navigated into/out of a provider (e.g. db:) — its provider-scoped
+        # menus (the contextual "Database" menu / SQL console) changed. Window focus
+        # didn't move, so on_window_focus_changed never fired; recompute here so the
+        # menu appears/disappears with the active scheme.
+        self._recompute_menu_bar()
         message.stop()
 
     def on_menu_bar_open_requested(self, message: MenuBar.OpenRequested) -> None:

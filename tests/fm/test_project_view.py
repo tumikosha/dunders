@@ -249,10 +249,10 @@ async def test_f2_commands_registered(tmp_path):
         cmds = {c.id: c for c in panel.get_commands()}
         cmd = cmds.get("panel.project_view")
         assert cmd is not None
-        assert cmd.hotkey == "f1"
+        assert cmd.hotkey == "f9"  # F1/F9 swapped: Project View is now F9
 
 
-async def test_f1_hotkey_routes_from_panel(tmp_path):
+async def test_f9_hotkey_routes_from_panel(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("a = 1\n")
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
@@ -261,7 +261,7 @@ async def test_f1_hotkey_routes_from_panel(tmp_path):
         _focus_panel_on_file(app, "panel-left", f)
         await _settle(pilot)
 
-        await pilot.press("f1")
+        await pilot.press("f9")
         await _settle(pilot)
 
         assert len(_editor_windows(app)) == 1

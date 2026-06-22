@@ -153,6 +153,13 @@ def default_registry() -> VfsRegistry:
         reg.register(SftpProvider())
     except ImportError:
         pass
+    # Database dunder needs dbset (optional dep); register only when it imports
+    # so the "db:" scheme simply doesn't appear otherwise.
+    try:
+        from dunders.fm.providers.db_provider import DbProvider
+        reg.register(DbProvider())
+    except ImportError:
+        pass
     # Docker is browsed via its CLI; only offer the scheme when the binary is
     # present and the daemon answers, like the 7z provider.
     from dunders.fm.providers.docker_provider import DockerProvider, docker_available

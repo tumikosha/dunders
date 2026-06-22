@@ -150,6 +150,38 @@ def _generic_transfer(
             return result
         dest = dest_dir.child(single_rename or src.name)
         try:
+            src_provider = registry.resolve(src)
+            export = getattr(src_provider, "export_as_file", None)
+            exported = export(src) if callable(export) else None
+            if exported is not None:
+                name, reader = exported
+                out_name = single_rename or name
+                # Exports carry a fixed format suffix (e.g. a DB table -> .jsonl).
+                # The copy dialog pre-fills the source's dir-name, which for a
+                # table has no extension, so single_rename would otherwise drop
+                # the suffix and land the file as bare "<table>".
+                _dot = name.rfind(".")
+                suffix = name[_dot:] if _dot > 0 else ""
+                if suffix and not out_name.endswith(suffix):
+                    out_name += suffix
+                dst = dest_dir.child(out_name)
+                dst_p = registry.resolve(dst)
+                try:
+                    with reader, dst_p.open_write(dst) as writer:
+                        while True:
+                            if _cancelled(cancel_event):
+                                raise _Cancelled
+                            chunk = reader.read(_CHUNK)
+                            if not chunk:
+                                break
+                            writer.write(chunk)
+                            on_chunk(name, len(chunk))
+                except _Cancelled:
+                    _cleanup_partial(dst_p, dst)
+                    raise
+                on_file_done(name)
+                result.succeeded.append(dst.to_local() if dst.scheme == "file" else dst)
+                continue  # exported sources are copy-only even in move mode (data-safe; the table is not deleted)
             _copy_tree(registry, src, dest, on_chunk=on_chunk,
                        on_file_done=on_file_done, cancel_event=cancel_event)
         except _Cancelled:
@@ -231,6 +263,18 @@ def _measure(registry: VfsRegistry, loc: VfsPath) -> tuple[int, int]:
     provider = registry.resolve(loc)
     if not provider.is_dir(loc):
         return 1, _size_of(provider, loc)
+    # A "directory" that exports as a single file (e.g. a DB table -> .jsonl) is
+    # copied as ONE file, not walked as a tree. Recursing it would re-page the
+    # whole table just to size it and stall the bar at 0%; use the provider's
+    # cheap size hint instead (None -> not export-capable -> measure normally).
+    hint = getattr(provider, "export_size_hint", None)
+    if callable(hint):
+        try:
+            est = hint(loc)
+        except OSError:
+            est = None
+        if est is not None:
+            return 1, est
     files = total = 0
     try:
         children = provider.scan(loc, include_parent=False)

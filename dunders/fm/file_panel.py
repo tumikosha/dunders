@@ -80,6 +80,18 @@ class FilePanel(WindowContent):
             self.entry = entry
             super().__init__()
 
+    class SchemeChanged(Message):
+        """The panel navigated across a VFS scheme boundary (e.g. file→db).
+        Provider-scoped menus (the contextual ``Database`` menu, etc.) depend on
+        the focused panel's scheme, but window focus doesn't change on a
+        same-panel cwd switch — so the app needs this to recompute the menu bar."""
+
+        def __init__(self, panel: "FilePanel", old_scheme: str, new_scheme: str) -> None:
+            self.panel = panel
+            self.old_scheme = old_scheme
+            self.new_scheme = new_scheme
+            super().__init__()
+
     BINDINGS = [
         Binding("up", "cursor_up", show=False),
         Binding("down", "cursor_down", show=False),
@@ -468,6 +480,11 @@ class FilePanel(WindowContent):
         # (its sole consumer is local navigation). Skip across archive edges.
         if old.scheme == "file" and new.scheme == "file":
             self.post_message(FilePanel.PathChanged(self, old.to_local(), new.to_local()))
+        # Crossing a scheme boundary (entering/leaving a provider like db:) flips
+        # which provider-scoped menus apply. Focus didn't move, so signal the app
+        # to recompute the menu bar.
+        if old.scheme != new.scheme:
+            self.post_message(FilePanel.SchemeChanged(self, old.scheme, new.scheme))
 
     # ------------------------------------------------------------------
     # Selection
@@ -1257,7 +1274,14 @@ class FilePanel(WindowContent):
     def _render_entry_row(self, idx: int, width: int) -> Strip:
         if not (0 <= idx < len(self.entries)):
             # Blank row below the listing, but keep the column separators so
-            # the vertical bars run to the bottom of the panel.
+            # the vertical bars run to the bottom of the panel. Under a provider
+            # layout (e.g. db Name|Rows|Cols) the separators sit at DIFFERENT x
+            # than the default Name|Size|Date row — so a blank row must mirror the
+            # provider geometry, else its bar lands mid-panel as a stray vertical
+            # streak that doesn't line up with the columns above it.
+            layout = self._provider_layout(width)
+            if layout is not None:
+                return self._empty_provider_row(width, layout)
             return Strip([Segment(empty_row_text(self.view_mode, width), self._base_style())])
         entry = self.entries[idx]
         is_cursor = idx == self.cursor
@@ -1309,6 +1333,22 @@ class FilePanel(WindowContent):
             if hi is not None:
                 return Strip(hi)
         return Strip([Segment(text, style)])
+
+    def _empty_provider_row(self, width, layout) -> Strip:
+        """A blank row under a provider layout whose separators sit at the SAME x
+        as the data rows, so the vertical bars run cleanly to the bottom (no
+        mid-panel streak from the default Size/Date geometry)."""
+        _cols, name_w, ranges, _buttons_x0 = layout
+        style = self._base_style()
+        segs = [Segment(" " * name_w, style)]
+        used = name_w
+        for _x0, _x1, col in ranges:
+            segs.append(Segment(COL_SEP, style))
+            segs.append(Segment(" " * col.width, style))
+            used += len(COL_SEP) + col.width
+        if used < width:
+            segs.append(Segment(" " * (width - used), style))
+        return Strip(segs)
 
     def _render_provider_row(self, idx, width, entry, style, layout) -> Strip:
         """Render "Name | provider columns | action buttons" (e.g. Docker)."""
@@ -1603,7 +1643,7 @@ class FilePanel(WindowContent):
 
         cmds = [
             WindowCommand(id="panel.new",    label="New",    handler=_bind("new")),
-            WindowCommand(id="panel.project_view", label="Project View", handler=_bind("project_view"), hotkey="f1"),
+            WindowCommand(id="panel.project_view", label="Project View", handler=_bind("project_view"), hotkey="f9"),
             WindowCommand(id="panel.user_menu", label="User menu", handler=_bind("user_menu"), hotkey="f2"),
             WindowCommand(id="panel.view",   label="View",   handler=_bind("view"),   hotkey="f3"),
             WindowCommand(id="panel.edit",   label="Edit",   handler=_bind("edit"),   hotkey="f4"),

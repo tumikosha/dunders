@@ -1,9 +1,28 @@
 import pytest
 
-from dunders.app import DundersApp
+from dunders.app import DundersApp, _table_stem
 from dunders.fm.file_panel import FilePanel
 from dunders.windowing import Desktop, MenuBar, StatusBar, Window
 from dunders.fm.commandline import CommandLine
+
+
+def test_table_stem_strips_jsonl_json():
+    assert _table_stem("pages2.jsonl") == "pages2"
+    assert _table_stem("rec.json") == "rec"
+    assert _table_stem("plain") == "plain"
+
+
+def test_db_dest_table_parses_locator_table_segment():
+    # The copy dialog prefills db://<root>!/<table>; the trailing segment (with
+    # any .jsonl/.json dropped) is the target table. Non-db / table-less values
+    # return None so the caller falls back to the append-only archive path.
+    get = lambda raw: DundersApp._db_dest_table(None, raw)  # pure: ignores self
+    assert get("db://sqlite:////x.db!/germany_db") == "germany_db"
+    assert get("db://postgresql://u@h:5432/g!/NEW_TABLE") == "NEW_TABLE"
+    assert get("db://sqlite:////x.db!/t.jsonl") == "t"
+    assert get("db://sqlite:////x.db") is None       # no table segment
+    assert get("zip:///a.zip!/inner") is None        # not a db locator
+    assert get("not a uri") is None
 
 
 @pytest.mark.asyncio
@@ -225,13 +244,13 @@ async def test_app_f9_then_esc_returns_focus_to_panel(tmp_path):
         assert app.desktop is not None
         assert app.desktop.focused_window is not None
         assert app.desktop.focused_window.id == "panel-left"
-        await pilot.press("f9")
+        await pilot.press("f1")  # F1 opens the menu (swapped with F9)
         await pilot.pause()
         # MenuBar is now focused — no panel id under app.focused.
         assert _focused_panel_id(app) is None
         await pilot.press("escape")
         await pilot.pause()
-        # Focus is back on whatever had focus before F9 (the cmdline input).
+        # Focus is back on whatever had focus before F1 (the cmdline input).
         assert app.focused is not None
         # The active panel window is still panel-left.
         assert app.desktop.focused_window.id == "panel-left"
@@ -983,16 +1002,37 @@ async def test_editor_z_order_preserved_after_mouse_menu_open(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_f9_opens_first_dropdown_immediately(tmp_path):
-    """F9 should reveal the first menu's dropdown right away, not merely
-    highlight the leftmost label — as if the user pressed Enter on it."""
+async def test_f1_opens_first_dropdown_immediately(tmp_path):
+    """F1 (the menu key, swapped with F9) should reveal the first menu's
+    dropdown right away, not merely highlight the leftmost label — as if the
+    user pressed Enter on it."""
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        await pilot.press("f9")
+        await pilot.press("f1")
         await pilot.pause(); await pilot.pause()
         assert app.menu_bar.active_index == 0
         assert app._active_dropdown is not None
+
+
+@pytest.mark.asyncio
+async def test_f1_f9_swapped(tmp_path):
+    """The F1/F9 swap: F1 opens the menu and F9 no longer does (F9 now drives
+    Project View, routed through the focused panel)."""
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    fired = {"pv": 0}
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        app.action_project_view = lambda *a, **k: fired.__setitem__("pv", fired["pv"] + 1)
+        assert app.desktop.focused_window.id == "panel-left"
+        await pilot.press("f9")          # F9 -> Project View, NOT the menu
+        await pilot.pause()
+        assert fired["pv"] == 1
+        assert app.menu_bar.active_index is None
+        await pilot.press("f1")          # F1 -> the menu
+        await pilot.pause()
+        assert app.menu_bar.active_index == 0
+        assert fired["pv"] == 1          # F1 did not also fire Project View
 
 
 @pytest.mark.asyncio
@@ -1767,3 +1807,61 @@ def test_status_marshaller_throttles_flood_but_shows_each_file():
     # The final 100% always lands so the bar completes.
     cb(CopyStatus(done=10_000, total=10_000, label="next.bin", is_bytes=True))
     assert marshalled[-1].done == 10_000
+
+
+def _make_sqlite(path):
+    import sqlite3
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE _init (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_detector_matches_sqlite_by_magic(tmp_path):
+    db = tmp_path / "data.db"
+    _make_sqlite(db)
+    (tmp_path / "note.txt").write_text("hello, not a database")
+    (tmp_path / "empty.db").write_bytes(b"")
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # db is an absolute Path, so f"sqlite:///{db}" is the 4-slash absolute form.
+        assert app._dunder_for_local_file(db) == ("db", f"sqlite:///{db}")
+        assert app._dunder_for_local_file(tmp_path / "note.txt") is None
+        assert app._dunder_for_local_file(tmp_path / "empty.db") is None
+
+
+@pytest.mark.asyncio
+async def test_f3_on_sqlite_routes_to_open_dunder(tmp_path, monkeypatch):
+    db = tmp_path / "data.db"
+    _make_sqlite(db)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        captured = {}
+        monkeypatch.setattr(app, "_do_open_dunder",
+                            lambda scheme, spec, **kw: captured.update(scheme=scheme, spec=spec))
+        panel = app._active_panel()
+        idx = next(i for i, e in enumerate(panel.entries) if e.name == "data.db")
+        panel.cursor = idx
+        app.action_view()
+        assert captured == {"scheme": "db", "spec": f"sqlite:///{db}"}
+
+
+@pytest.mark.asyncio
+async def test_enter_on_sqlite_routes_to_open_dunder(tmp_path, monkeypatch):
+    import types
+    from dunders.fm.file_entry import FileEntry
+    db = tmp_path / "data.db"
+    _make_sqlite(db)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        captured = {}
+        monkeypatch.setattr(app, "_do_open_dunder",
+                            lambda scheme, spec, **kw: captured.update(scheme=scheme, spec=spec))
+        entry = FileEntry(path=db, name="data.db", size=db.stat().st_size,
+                          mtime=0.0, is_dir=False)
+        app.on_file_panel_item_activated(types.SimpleNamespace(entry=entry))
+        assert captured == {"scheme": "db", "spec": f"sqlite:///{db}"}

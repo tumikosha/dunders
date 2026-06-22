@@ -157,6 +157,83 @@ NC-style panels and file ops, built on top of `windowing`.
 - `line_source.py` — `LineSource`/`TextSource`/`MmapSource`: random-access lines
   without materialising the whole file (mmap + incremental newline index).
   Shared by the lazy CSV viewer and the lazy Markdown huge-file tier.
+- Database dunder (opt-in `dunders[db]` / `dbset`, a SQLAlchemy 2.x wrapper for
+  SQLite/Postgres/MySQL). Opened from the `_` menu (Database → connection URL,
+  e.g. `sqlite:///f.db`, `postgresql://user@host/db`); connects on a worker
+  (`slow` capability). All `dbset`/SQLAlchemy access is isolated in
+  `providers/db_access.py` (`DbConn`: tables/indexes/columns/PK, paged
+  `fetch`, get/insert/update/delete, raw `query`, JSON record (de)serialization,
+  `ReadOnlyError`; mutations through `dbset`, metadata/reads/raw-SQL through
+  SQLAlchemy). `providers/db_provider.py` is the `VfsProvider` (`scheme="db"`)
+  that maps **tables → directories** and **records → files** so the panel and
+  the generic `transfer()` engine work unchanged: root `scan` lists tables
+  (`is_dir`, with Rows/Cols `ProviderColumns`) + indexes; entering a table lists
+  records as `<pk>.json` (paged at `_DB_PAGE=1000`, sorted by PK, trailing
+  `▼ more N…` page entry). `open_read` yields a record's JSON (or an index's
+  DDL); `open_write` imports `.json`→insert/`.jsonl`→import, or
+  (`overwrite=True`, F4 edit path) update — `db_access.ensure_columns` widens
+  the schema (identifiers quoted via the dialect preparer) when an edit adds a
+  field. `delete` removes records by PK; a single-part loc naming a real table
+  does `DROP TABLE` (`db_access.drop_table`, identifier quoted via the preparer);
+  other non-record targets (indexes, `_page` pseudo-entries) are no-ops. Whole
+  tables copy out as one `<table>.jsonl` via the generic
+  `export_as_file` hook in `vfs_engine.py` (a source provider opts a "directory"
+  into single-file export; `is_dir(table)` stays True for navigation), so a
+  table-`move` is intentionally copy-only (source not deleted). The export
+  streams **lazily** — `_TableExportReader` serializes one paged `fetch` per
+  `read()` so a multi-GB table never buffers in memory and the copy bar advances
+  per chunk (an eager in-memory build used to freeze the worker at 0%, then jump
+  to 100%). `export_size_hint` (count + a 100-row sample) gives `_measure` a
+  cheap byte denominator so it short-circuits an export-capable dir instead of
+  re-paging the whole table just to size it. The reverse direction — importing a
+  local `.jsonl` into the db — **streams**: `_DbWriter` parses complete lines out
+  of each write and `_JsonlImporter` inserts them in `_BATCH`-sized
+  `insert_many` round trips as bytes arrive, so a multi-GB import never buffers
+  in memory and the copy bar tracks real insert progress (the old writer buffered
+  the whole file — bar to 100% on buffering — then did every insert row-by-row in
+  `close`, a long freeze at 100%). `_JsonlImporter` decides PK stripping ONCE
+  (defaulting to `id` for a not-yet-existing table) so every row is treated the
+  same: mixing an explicit-PK first insert with stripped later ones left a
+  Postgres serial sequence un-advanced and the next id collided. Plain inserts
+  strip the PK so cross-DB copies don't collide (re-import into the same table
+  duplicates rows). When a file is copied INTO a db panel the copy dialog is
+  **editable** (not the append-only archive prefill): it prefills the connection
+  locator with a table segment (`db://<root>!/<src-stem>`) and the user edits the
+  part after `!/` to name/rename the target table; `app._db_dest_table` parses
+  that trailing segment (extension stripped) and the import is routed via
+  `transfer(rename_to="<table>.jsonl")` so `_DbWriter` picks up the name. The SQL
+  console (`db_console.py`, `DbConsoleContent`) is a
+  `TextArea` editor over a `DataTable` grid, opened by the provider's `SQL
+  console` action (Alt+S) bound to the panel's connection; `run_sql` runs via
+  `DbConn.query` (SELECT → grid, capped at 1000; non-SELECT → rowcount), and
+  `_render_grid` no-ops when unmounted so it is unit-testable headless. The
+  console accepts an `initial_sql` prefill: **F3/View on a table** opens it with
+  `DbConn.select_all_sql` (`SELECT * FROM <table>`) and **F4/Edit on a table**
+  with `DbConn.create_table_ddl` (the reflected `CREATE TABLE` via SQLAlchemy
+  `CreateTable`, followed by a `CREATE INDEX` per secondary index so the DDL
+  fully describes the table); both prefill only (the user runs with Ctrl+R). `action_view`/
+  `action_edit` route a `db.kind == "table"` entry to `_open_db_table_query`
+  *before* their `is_dir` no-op guard (a table is a directory); F4 uses
+  `_selected_db_table_locs` so a **multi-selection** of tables concatenates all
+  their DDL into one console (in panel order). The prefill is
+  tab-expanded (`expandtabs`) before it reaches the editor — SQLAlchemy's
+  `CreateTable` indents with raw `\t`, and a literal tab advances to a terminal
+  tab stop, shifting the line so the window's right border lands in the wrong
+  column. The SQL pane keeps its fixed 5-row height (a long DDL scrolls within;
+  the splitter resizes it) rather than growing to fit, which would push the
+  splitter and result grid off the bottom unrecoverably. Every
+  `run_sql` (success *and* error) appends to a per-connection **query history**
+  (`config/sql_history.py`, a 0600 `sql_history.json` keyed by the normalized
+  connection root, newest-first, move-to-top dedup, capped at 200). The
+  `[ History ]` toolbar button / `Alt+H` / the **Database menu's `SQL history`**
+  (provider action `db.history`, which opens a console then pops the picker on top)
+  open `SqlHistoryDialog` — a modal picker (mirrors `BookmarksDialog`) that is **callback-driven, not message-based** (so
+  the wiring stays in `db_console`, not `app.py`): Enter recalls a past query into
+  the editor (replacing the buffer), the ✗ column / Delete removes an entry, and
+  `[ Clear all ]` wipes the connection's history. The dialog dismisses itself by
+  posting `Window.Closed` (handled by `Desktop.on_window_closed`), since
+  `ModalWindow.Dismissed` has no handler. dbset on SQLite returns dict/JSON
+  columns as JSON *strings* (recover via `json.loads`).
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 
 ### 3. `dunders.app` — top-level shell

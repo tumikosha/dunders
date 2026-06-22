@@ -51,6 +51,11 @@ image = ["pillow>=10"]
 # Opt-in document viewer (F3 on a PDF/office file → Markdown). markitdown is
 # MIT; kept out of the default install to stay dependency-light.
 office = ["markitdown[pdf,docx,pptx,xlsx]>=0.0.1"]
+# Opt-in database dunder (the db: dunder). dbset wraps SQLAlchemy 2.x; the
+# Postgres (psycopg2) and MySQL (pymysql) DBAPI drivers are bundled so
+# postgresql:// and mysql:// URLs work out of the box (SQLite needs no driver).
+# Kept out of the default install to stay light.
+db = ["dbset>=0.1", "psycopg2-binary>=2.9", "pymysql>=1.1"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -59,6 +64,7 @@ dev = [
     "ruff>=0.5",
     "build>=1.2",
     "twine>=5.0",
+    "dbset>=0.1",     # database dunder adapter tests (in-memory/temp SQLite)
 ]
 
 [project.urls]

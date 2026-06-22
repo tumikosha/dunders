@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from dunders.core.vfs import VfsPath
 from dunders.fm.file_entry import FileEntry
 from dunders.fm.file_panel import FilePanel
 from dunders.fm.sort import SortOrder
@@ -217,6 +218,7 @@ class _FmHarness(App):
         self.path_changed: list[tuple[Path, Path]] = []
         self.item_activated: list[FileEntry] = []
         self.selection_changed: int = 0
+        self.scheme_changed: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
         yield self.panel
@@ -229,6 +231,9 @@ class _FmHarness(App):
 
     def on_file_panel_selection_changed(self, _event: FilePanel.SelectionChanged) -> None:
         self.selection_changed += 1
+
+    def on_file_panel_scheme_changed(self, event: FilePanel.SchemeChanged) -> None:
+        self.scheme_changed.append((event.old_scheme, event.new_scheme))
 
 
 @pytest.mark.asyncio
@@ -270,6 +275,40 @@ async def test_panel_ascend_at_filesystem_root_is_noop():
         p.ascend()
         await pilot.pause()
         assert p.cwd == Path("/")
+
+
+@pytest.mark.asyncio
+async def test_scheme_change_emits_scheme_changed_message(tmp_path: Path):
+    # Navigating across a VFS scheme boundary (file: → a provider scheme) must
+    # emit SchemeChanged so the app recomputes provider-scoped menus (e.g. the
+    # "Database" menu / SQL console). Window focus does NOT change on a same-panel
+    # cwd switch, so this is the only signal the menu bar gets.
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    harness = _FmHarness(p)
+    async with harness.run_test() as pilot:
+        p._change_cwd_loc(VfsPath(scheme="db", root="sqlite:///x.db", parts=()))
+        await pilot.pause()
+        assert harness.scheme_changed == [("file", "db")]
+        # Returning to a local dir emits the reverse edge (menu must disappear).
+        p._change_cwd_loc(VfsPath.local(tmp_path))
+        await pilot.pause()
+        assert harness.scheme_changed[-1] == ("db", "file")
+
+
+@pytest.mark.asyncio
+async def test_same_scheme_navigation_emits_no_scheme_changed(tmp_path: Path):
+    # Moving between two local dirs (file: → file:) must NOT emit SchemeChanged —
+    # the provider menu set is unchanged, recomputing it every keystroke is waste.
+    sub = tmp_path / "child"
+    sub.mkdir()
+    p = FilePanel(cwd=tmp_path)
+    p.refresh_listing()
+    harness = _FmHarness(p)
+    async with harness.run_test() as pilot:
+        p._change_cwd_loc(VfsPath.local(sub))
+        await pilot.pause()
+        assert harness.scheme_changed == []
 
 
 @pytest.mark.asyncio

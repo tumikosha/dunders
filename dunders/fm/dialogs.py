@@ -21,7 +21,7 @@ from textual.message import Message
 from textual.strip import Strip
 from textual import events
 from textual.widget import Widget
-from textual.widgets import Checkbox, DataTable, Input, Static
+from textual.widgets import DataTable, Input, Static
 
 from dunders.fm.actions import CopyStatus
 from dunders.fm.file_entry import format_size
@@ -960,9 +960,10 @@ class _PermCheckbox(Static):
             self.box = box
             super().__init__()
 
-    def __init__(self, *, label_markup: str, mask: int, checked: bool = False) -> None:
+    def __init__(self, *, label_markup: str, mask: int = 0, checked: bool = False,
+                 id: str | None = None) -> None:
         mark = "x" if checked else " "
-        super().__init__(f"\\[{mark}] {label_markup}", markup=True)
+        super().__init__(f"\\[{mark}] {label_markup}", markup=True, id=id)
         self._label_markup = label_markup
         self.mask = mask
         self.checked = checked
@@ -1452,15 +1453,17 @@ class AddBookmarkDialog(FocusChainMixin, Container, WindowContent):
             self.dialog = dialog
             super().__init__()
 
-    def __init__(self, *, default_label: str, ask_password: bool, context: object | None = None) -> None:
+    def __init__(self, *, default_label: str, ask_password: bool,
+                 default_remember: bool = False, context: object | None = None) -> None:
         super().__init__()
         self.window_title = "Add bookmark"
         self._default_label = default_label
         self._ask_password = ask_password
         self.context = context
         self._label_input = Input(id="ab-input")
-        self._remember = Checkbox(
-            "Remember password (stored in a 0600 file)", value=False, id="ab-remember"
+        self._remember = _PermCheckbox(
+            label_markup="Remember password (stored in a 0600 file)",
+            checked=default_remember, id="ab-remember",
         )
 
     def compose(self) -> ComposeResult:
@@ -1488,7 +1491,7 @@ class AddBookmarkDialog(FocusChainMixin, Container, WindowContent):
         return out
 
     def action_submit(self) -> None:
-        remember = self._ask_password and self._remember.value
+        remember = self._ask_password and self._remember.checked
         self.post_message(AddBookmarkDialog.Submitted(self, self._label_input.value, remember))
 
     def action_cancel(self) -> None:
@@ -1561,6 +1564,7 @@ class BookmarksDialog(Container, WindowContent):
     BookmarksDialog { layout: vertical; width: 60; height: auto; max-height: 24; padding: 1 1; }
     BookmarksDialog DataTable { height: auto; max-height: 16; }
     BookmarksDialog #bm-empty { margin: 1; color: $text-muted; }
+    BookmarksDialog #bm-remember { margin: 1 1 0 1; }
     BookmarksDialog #bm-buttons { height: 1; align: center middle; margin-top: 1; }
     """
 
@@ -1577,8 +1581,9 @@ class BookmarksDialog(Container, WindowContent):
             super().__init__()
 
     class AddCurrent(Message):
-        def __init__(self, dialog: "BookmarksDialog") -> None:
+        def __init__(self, dialog: "BookmarksDialog", remember: bool = False) -> None:
             self.dialog = dialog
+            self.remember = remember
             super().__init__()
 
     class Cancelled(Message):
@@ -1593,15 +1598,23 @@ class BookmarksDialog(Container, WindowContent):
 
     _DEL_COL = 0  # the ✗ column index
 
-    def __init__(self, bookmarks: list[dict]) -> None:
+    def __init__(self, bookmarks: list[dict], *, can_remember: bool = False,
+                 default_remember: bool = False) -> None:
         super().__init__()
         self.window_title = "Bookmarks"
         self._bookmarks = bookmarks
+        self._can_remember = can_remember
         self._table = _BookmarkTable(click_cb=self._on_cell_click, id="bm-table")
+        self._remember = _PermCheckbox(
+            label_markup="Remember password (stored in a 0600 file)",
+            checked=default_remember, id="bm-remember",
+        ) if can_remember else None
 
     def compose(self) -> ComposeResult:
         yield self._table
         yield Static("No bookmarks yet — press Ctrl+D in a panel to add one.", id="bm-empty")
+        if self._remember is not None:
+            yield self._remember
         with Horizontal(id="bm-buttons"):
             yield ShadowButton("Add current", id="bm-add", face_bg="rgb(0,160,90)", hotkey="a")
             yield ShadowButton("Close", id="bm-close", face_bg="rgb(160,40,40)", hotkey="c")
@@ -1650,7 +1663,8 @@ class BookmarksDialog(Container, WindowContent):
     def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
         event.stop()
         if event.button.id == "bm-add":
-            self.post_message(BookmarksDialog.AddCurrent(self))
+            remember = self._remember.checked if self._remember is not None else False
+            self.post_message(BookmarksDialog.AddCurrent(self, remember))
         elif event.button.id == "bm-close":
             self.post_message(BookmarksDialog.Cancelled(self))
 
