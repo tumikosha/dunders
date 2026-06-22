@@ -204,9 +204,17 @@ NC-style panels and file ops, built on top of `windowing`.
   `transfer(rename_to="<table>.jsonl")` so `_DbWriter` picks up the name. The SQL
   console (`db_console.py`, `DbConsoleContent`) is a
   `TextArea` editor over a `DataTable` grid, opened by the provider's `SQL
-  console` action (Alt+S) bound to the panel's connection; `run_sql` runs via
-  `DbConn.query` (SELECT → grid, capped at 1000; non-SELECT → rowcount), and
-  `_render_grid` no-ops when unmounted so it is unit-testable headless. The
+  console` action (Alt+S) bound to the panel's connection; `run_sql` dispatches
+  on `_is_pageable` (SELECT/WITH/VALUES): a row-returning statement is
+  **paginated** (`DbConn.query_page` wraps it in `SELECT * FROM (<sql>) AS …
+  LIMIT n+1 OFFSET m`, `_PAGE`=200 rows/page; the `+1` row signals `has_next`
+  without a COUNT), with toolbar `◀ Prev`/`Next ▶` buttons (shown only for the
+  directions that lead somewhere) and a `Page N · rows a–b` status; everything
+  else (and a SELECT whose wrapping fails, e.g. duplicate output columns) falls
+  back to `_run_unpaged` → `DbConn.query` (cap 1000, rowcount for writes).
+  History is recorded once per run, not per page flip; the editable target
+  (`_compute_edit_target`) is recomputed per page so cell-save works on any
+  page. `_render_grid` no-ops when unmounted so it is unit-testable headless. The
   console accepts an `initial_sql` prefill: **F3/View on a table** opens it with
   `DbConn.select_all_sql` (`SELECT * FROM <table>`) and **F4/Edit on a table**
   with `DbConn.create_table_ddl` (the reflected `CREATE TABLE` via SQLAlchemy
@@ -232,7 +240,23 @@ NC-style panels and file ops, built on top of `windowing`.
   the editor (replacing the buffer), the ✗ column / Delete removes an entry, and
   `[ Clear all ]` wipes the connection's history. The dialog dismisses itself by
   posting `Window.Closed` (handled by `Desktop.on_window_closed`), since
-  `ModalWindow.Dismissed` has no handler. dbset on SQLite returns dict/JSON
+  `ModalWindow.Dismissed` has no handler. Enter/click on a result-grid cell
+  (`on_data_table_cell_selected`) opens `CellEditDialog` — a modal showing the
+  cell's **full** (un-`_clip`ped) value in the app-native editor, with a
+  `Markdown ⇄ Text` button that swaps the editor for a read-only
+  `rich.markdown.Markdown` preview of the current text. `Save` writes the edit
+  back with an `UPDATE` — but only when the result is an *updatable single-table
+  SELECT*: `db_access.single_table_target` (pure, conservative — rejects
+  JOIN/UNION/GROUP BY/comma-joins/sub-queries) names the one table, and
+  `run_sql` sets `_edit_table`/`_edit_pk` only when that table exists and its PK
+  is among the result columns (so a row can be located). `_resolve_cell` then
+  gates each cell: read-only conn, non-single-table result, or a
+  computed/aliased column (not in `DbConn.columns`) → view-only with the reason
+  shown and no Save button. `_save_cell` coerces the edited text back to the
+  original value's Python type (`_coerce_cell`; bool→int→float→str), updates by
+  PK, and mirrors the change into `last_rows` + the visible grid via
+  `update_cell_at`. Like the history picker the dialog posts `Window.Closed`
+  itself. dbset on SQLite returns dict/JSON
   columns as JSON *strings* (recover via `json.loads`).
 - `commandline.py`, `keymap.py`, `scan.py`, `sort.py` — supporting bits.
 

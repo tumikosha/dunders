@@ -16,6 +16,7 @@ not as Python dicts. Callers recover the nested value with ``json.loads``.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -24,7 +25,50 @@ import dbset
 import sqlalchemy as sa
 
 
-__all__ = ["DbConn", "ReadOnlyError", "record_to_json", "json_to_record"]
+__all__ = [
+    "DbConn", "ReadOnlyError", "record_to_json", "json_to_record",
+    "single_table_target",
+]
+
+
+# Stop the FROM-table capture at the next top-level clause keyword (or the end).
+_FROM_RE = re.compile(
+    r"\bfrom\b\s+(.+?)(?:\bwhere\b|\bgroup\b|\bhaving\b|\border\b|\blimit\b"
+    r"|\bwindow\b|\bunion\b|$)",
+    re.I | re.S,
+)
+
+
+def single_table_target(sql: str) -> str | None:
+    """The bare name of the one table a plain ``SELECT`` reads from, else None.
+
+    Used by the SQL console to decide whether a result cell can be written back
+    with an ``UPDATE``: only a single-table ``SELECT`` (no JOIN/UNION/GROUP BY,
+    no comma-joined tables, no sub-query in FROM) maps a row to one table. The
+    name is returned unquoted and schema-stripped (``public.users`` → ``users``)
+    so the caller can match it case-insensitively against ``tables()``. This is
+    a deliberately conservative heuristic — when in doubt it returns None and
+    the cell stays view-only."""
+    s = sql.strip().rstrip(";").strip()
+    if not re.match(r"select\b", s, re.I):
+        return None
+    if re.search(r"\bjoin\b|\bunion\b|\bgroup\s+by\b", s, re.I):
+        return None
+    m = _FROM_RE.search(s)
+    if not m:
+        return None
+    expr = m.group(1).strip()
+    if "," in expr or expr.startswith("("):  # multi-table or a sub-query
+        return None
+    parts = expr.split()
+    if not parts:
+        return None
+    token = parts[0]                      # drop any "table alias" / "table AS alias"
+    if token.startswith("("):
+        return None
+    name = token.split(".")[-1]           # schema.table -> table
+    name = name.strip("\"`[]'")
+    return name or None
 
 
 class ReadOnlyError(Exception):
@@ -261,6 +305,36 @@ class DbConn:
                 result.close()
                 return cols, rows, len(rows), truncated
             return [], [], int(result.rowcount or 0), False
+
+    def query_page(
+        self, sql: str, *, limit: int, offset: int
+    ) -> tuple[list[str], list[dict], bool]:
+        """Run a row-returning ``sql`` one page at a time. Returns
+        ``(columns, rows, has_next)``.
+
+        The statement is wrapped in a sub-query so LIMIT/OFFSET apply to *its*
+        result regardless of what it is (joins, ORDER BY, an inner LIMIT, …):
+        ``SELECT * FROM (<sql>) AS _dunders_pg LIMIT :l OFFSET :o``. ``limit + 1``
+        rows are fetched so the caller learns whether a further page exists
+        without a second COUNT round trip; the extra row is dropped. The wrapper
+        works on SQLite/Postgres/MySQL (all require the sub-query alias and
+        accept ``LIMIT n OFFSET m``). A statement that can't be wrapped (e.g.
+        duplicate output column names) raises — the console falls back to an
+        un-paged run."""
+        inner = sql.strip().rstrip(";").strip()
+        wrapped = (
+            f"SELECT * FROM (\n{inner}\n) AS _dunders_pg "
+            "LIMIT :_dunders_l OFFSET :_dunders_o"
+        )
+        with self._engine.begin() as cx:
+            result = cx.execute(
+                sa.text(wrapped), {"_dunders_l": limit + 1, "_dunders_o": offset})
+            cols = list(result.keys())
+            fetched = result.mappings().fetchmany(limit + 1)
+            result.close()
+        has_next = len(fetched) > limit
+        rows = [dict(m) for m in fetched[:limit]]
+        return cols, rows, has_next
 
     def close(self) -> None:
         try:

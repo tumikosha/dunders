@@ -4315,10 +4315,23 @@ class DundersApp(App):
                 break
             node = getattr(node, "parent", None)
         if target is None:
-            # Tab pressed outside a file panel (e.g. inside the editor).
-            # The app-level priority binding consumed the key before the
-            # focused widget could see it — forward to its own insert_tab
-            # action so editors keep their tab behaviour.
+            # Tab pressed outside a file panel (e.g. inside an editor or the
+            # SQL console). The app-level priority binding consumed the key
+            # before the focused widget could see it.
+            # First give the enclosing window's content a chance to cycle its
+            # own panes (the SQL console toggles SQL editor <-> result grid);
+            # duck-typed so app.py needn't import DbConsoleContent (and pull
+            # dbset) at startup.
+            win = self._enclosing_window(focused) if focused is not None else None
+            cycler = getattr(getattr(win, "content", None), "focus_other_pane", None)
+            if callable(cycler):
+                try:
+                    if cycler():
+                        return
+                except Exception:
+                    pass
+            # Otherwise forward to the focused widget's own insert_tab action
+            # so plain editors keep their tab behaviour.
             insert = getattr(focused, "action_insert_tab", None) if focused is not None else None
             if callable(insert):
                 try:

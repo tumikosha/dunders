@@ -149,6 +149,33 @@ def test_select_all_sql_quotes_identifier(conn):
     assert conn.select_all_sql("we ird") == 'SELECT * FROM "we ird"'
 
 
+def test_query_page_limits_offsets_and_signals_more(tmp_path):
+    c = da.DbConn.open(f"sqlite:///{tmp_path/'p.db'}")
+    for i in range(5):
+        c.insert("nums", {"n": i})
+    cols, rows, has_next = c.query_page("SELECT * FROM nums ORDER BY n",
+                                        limit=2, offset=0)
+    assert "n" in cols
+    assert [r["n"] for r in rows] == [0, 1]
+    assert has_next is True                       # 5 rows, more beyond page 1
+    cols, rows, has_next = c.query_page("SELECT * FROM nums ORDER BY n",
+                                        limit=2, offset=4)
+    assert [r["n"] for r in rows] == [4]
+    assert has_next is False                      # last partial page
+    c.close()
+
+
+def test_query_page_respects_inner_limit(tmp_path):
+    c = da.DbConn.open(f"sqlite:///{tmp_path/'p.db'}")
+    for i in range(10):
+        c.insert("nums", {"n": i})
+    _, rows, has_next = c.query_page("SELECT * FROM nums LIMIT 3",
+                                     limit=200, offset=0)
+    assert len(rows) == 3                          # the query's own LIMIT wins
+    assert has_next is False
+    c.close()
+
+
 def test_create_table_ddl_describes_table(conn):
     ddl = conn.create_table_ddl("users")
     assert ddl.upper().startswith("CREATE TABLE")
