@@ -150,6 +150,69 @@ class TestDropdown:
             assert called["n"] == 1
 
     @pytest.mark.asyncio
+    async def test_dropdown_clamps_height_to_max(self):
+        """A tall menu must not exceed max_height (would clip past the bottom)."""
+        app = MenuApp([Menu("X", [])])
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            items = [MenuItem(f"item {i}") for i in range(30)]
+            dd = Dropdown(items, palette=app.desktop.palette, max_height=10)
+            app.desktop.mount(dd)
+            await pilot.pause()
+            assert dd._height == 10
+            # The bottom border is the last rendered row (not clipped away).
+            bottom = "".join(s.text for s in dd.render_line(dd.size.height - 1))
+            assert bottom.startswith("└") and bottom.endswith("┘")
+
+    @pytest.mark.asyncio
+    async def test_dropdown_scrolls_to_keep_highlight_visible(self):
+        """Navigating past the visible window scrolls so the item stays drawn."""
+        app = MenuApp([Menu("X", [])])
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            items = [MenuItem(f"item {i}") for i in range(30)]
+            dd = Dropdown(items, palette=app.desktop.palette, max_height=8)
+            app.desktop.mount(dd)
+            await pilot.pause()
+            vis = dd._visible_rows()
+            assert dd._scroll == 0
+            for _ in range(vis + 2):  # walk below the fold
+                dd.move_highlight(1)
+            assert dd._scroll > 0
+            # The highlighted item is within the scroll window.
+            assert dd._scroll <= dd.highlight < dd._scroll + vis
+            # Its label is actually rendered somewhere in the box.
+            text = "".join(
+                "".join(s.text for s in dd.render_line(y))
+                for y in range(dd.size.height)
+            )
+            assert f"item {dd.highlight}" in text
+
+    @pytest.mark.asyncio
+    async def test_dropdown_mouse_wheel_moves_highlight(self):
+        """Wheel down/up moves the highlight like the arrow keys."""
+
+        class _Ev:
+            def stop(self):
+                pass
+
+        app = MenuApp([Menu("X", [])])
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            items = [MenuItem(f"item {i}") for i in range(30)]
+            dd = Dropdown(items, palette=app.desktop.palette, max_height=8)
+            app.desktop.mount(dd)
+            await pilot.pause()
+            assert dd.highlight == 0
+            dd.on_mouse_scroll_down(_Ev())
+            assert dd.highlight == 1
+            for _ in range(dd._visible_rows() + 2):
+                dd.on_mouse_scroll_down(_Ev())
+            assert dd._scroll > 0  # wheel scrolled the window too
+            dd.on_mouse_scroll_up(_Ev())
+            assert dd._scroll <= dd.highlight < dd._scroll + dd._visible_rows()
+
+    @pytest.mark.asyncio
     async def test_demo_menu_bar_integration(self):
         from dunders.windowing.demo.app import WindowingDemo
 

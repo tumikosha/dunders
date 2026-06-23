@@ -4167,11 +4167,15 @@ class DundersApp(App):
         menu = self.menu_bar.menus[index]
         spans = self.menu_bar._menu_spans()
         start_x = spans[index][1] if index < len(spans) else 0
+        # Clamp the dropdown to the desktop's usable height so a tall menu
+        # (e.g. the 20-item "_" menu) never spills past the bottom and loses
+        # its border / trailing items; the overflow is reached by scrolling.
         dd = Dropdown(
             menu.items,
             position=(start_x, 0),
             palette=self.desktop.palette,
             dispatcher=self.dispatcher,
+            max_height=self.desktop.usable_size.height,
         )
         self.desktop.mount(dd)
         self._active_dropdown = dd

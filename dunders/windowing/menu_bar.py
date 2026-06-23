@@ -307,6 +307,7 @@ class Dropdown(Container):
         position: tuple[int, int] = (0, 1),
         palette: Palette | None = None,
         dispatcher: "CommandDispatcher | None" = None,
+        max_height: int | None = None,
     ) -> None:
         super().__init__()
         self._palette = palette
@@ -315,7 +316,17 @@ class Dropdown(Container):
         # available (e.g. panel.view when the editor is focused). Renders
         # would otherwise show the raw id as a label.
         self.items = self._filter_items(items)
+        # Index of the first item drawn in the interior; non-zero only when
+        # the menu is taller than the area it was given (see max_height).
+        self._scroll = 0
         w, h = self._natural_size()
+        # Clamp to the area the host says is available so a tall menu never
+        # spills past the bottom of the desktop and loses its bottom border /
+        # trailing items. The overflow is reached by scrolling (see
+        # ``_ensure_visible``).
+        if max_height is not None and max_height >= 3:
+            h = min(h, max_height)
+        self._height = h
         self.styles.offset = Offset(*position)
         self.styles.width = w
         self.styles.height = h
@@ -414,10 +425,25 @@ class Dropdown(Container):
             steps += 1
         return None
 
+    def _visible_rows(self) -> int:
+        """How many item rows fit inside the borders."""
+        return max(1, self._height - 2)
+
+    def _ensure_visible(self) -> None:
+        """Slide the scroll window so ``highlight`` is drawn inside the box."""
+        vis = self._visible_rows()
+        if self.highlight < self._scroll:
+            self._scroll = self.highlight
+        elif self.highlight >= self._scroll + vis:
+            self._scroll = self.highlight - vis + 1
+        max_scroll = max(0, len(self.items) - vis)
+        self._scroll = max(0, min(self._scroll, max_scroll))
+
     def on_mount(self) -> None:
         first = self._first_selectable(0, 1)
         if first is not None:
             self.highlight = first
+        self._ensure_visible()
         # Grab focus immediately AND on next refresh for robustness
         self._grab_focus()
         self.call_after_refresh(self._grab_focus)
@@ -436,6 +462,7 @@ class Dropdown(Container):
         nxt = self._first_selectable(idx, 1 if direction > 0 else -1)
         if nxt is not None:
             self.highlight = nxt
+            self._ensure_visible()
 
     def choose_current(self) -> None:
         if 0 <= self.highlight < len(self.items):
@@ -508,9 +535,18 @@ class Dropdown(Container):
             self.dismiss()
             event.stop()
 
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.move_highlight(1)
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.move_highlight(-1)
+        event.stop()
+
     def on_click(self, event: events.Click) -> None:
-        # y=0 and y=height-1 are borders; rows 1..height-2 are items.
-        row = event.y - 1
+        # y=0 and y=height-1 are borders; rows 1..height-2 are items. The
+        # scroll window maps a visible row to its item index.
+        row = event.y - 1 + self._scroll
         if 0 <= row < len(self.items):
             it = self.items[row]
             if isinstance(it, MenuItem) and self._resolved_enabled(it):
@@ -541,13 +577,23 @@ class Dropdown(Container):
             text = render_bottom(width, BorderStyle.SINGLE, BorderSides.all(), Decorations())
             return Strip([Segment(text, border_style_rich)])
 
-        # Interior — one row per item.
+        # Interior — one row per item, offset by the scroll window.
         row_index = y - 1
+        item_index = row_index + self._scroll
         left = render_left_char(BorderStyle.SINGLE, BorderSides.all())
         right = render_right_char(BorderStyle.SINGLE, BorderSides.all())
         inner_width = width - len(left) - len(right)
 
-        if not (0 <= row_index < len(self.items)):
+        # Scroll affordances: ▲ on the first row when content is hidden above,
+        # ▼ on the last row when content is hidden below.
+        vis = self._visible_rows()
+        arrow = ""
+        if row_index == 0 and self._scroll > 0:
+            arrow = "▲"
+        elif row_index == vis - 1 and self._scroll + vis < len(self.items):
+            arrow = "▼"
+
+        if not (0 <= item_index < len(self.items)):
             # Empty padding row.
             return Strip([
                 Segment(left, border_style_rich),
@@ -555,7 +601,7 @@ class Dropdown(Container):
                 Segment(right, border_style_rich),
             ])
 
-        it = self.items[row_index]
+        it = self.items[item_index]
         if isinstance(it, MenuSeparator):
             return Strip([
                 Segment(left, border_style_rich),
@@ -564,7 +610,7 @@ class Dropdown(Container):
             ])
 
         # MenuItem row.
-        active = row_index == self.highlight
+        active = item_index == self.highlight
         enabled = self._resolved_enabled(it)
         if enabled:
             body_style = item_active_rich if active else item_rich
@@ -588,6 +634,11 @@ class Dropdown(Container):
             raw = raw[: inner_width - 1] + "…"
         elif len(raw) < inner_width:
             raw += " " * (inner_width - len(raw))
+
+        # Overlay a scroll arrow on this row's trailing pad (a single space),
+        # so the user can tell the menu continues above/below.
+        if arrow and inner_width and raw[-1] == " ":
+            raw = raw[:-1] + arrow
 
         # Split the row so the hotkey gets its own style.
         if hotkey and not active:
