@@ -3086,9 +3086,12 @@ class DundersApp(App):
     _HEX_VIEW_SIZE_THRESHOLD = 4 * 1024 * 1024
     # UTF-8/ASCII CSVs open via a lazy mmap source that indexes incrementally
     # (instant open at any size, only visible rows parsed). The cap only bounds
-    # the newline-offset array's memory (~8 bytes per line); a multi-GB CSV
-    # still opens as a table rather than falling into the hex viewer.
-    _CSV_MMAP_SIZE_THRESHOLD = 2 * 1024 * 1024 * 1024
+    # the newline-offset array's memory (~8 bytes per line), and that array is
+    # built lazily (only as far as the user scrolls), so a multi-GB CSV opens
+    # as a table rather than falling into the hex viewer. 64-bit mmap handles
+    # files far past 2 GiB, so the cap is generous (16 GiB) — only truly huge
+    # files fall through to hex.
+    _CSV_MMAP_SIZE_THRESHOLD = 16 * 1024 * 1024 * 1024
     # UTF-16 (Excel) CSVs can't use the byte-level mmap newline scan, so they
     # decode wholly into memory under a smaller cap; beyond it, fall back to hex.
     _CSV_VIEW_SIZE_THRESHOLD = 32 * 1024 * 1024

@@ -19,6 +19,7 @@ never offers to enter a ``.7z`` it cannot open.
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import tempfile
@@ -136,29 +137,88 @@ class _SevenZipMemberWriter(io.RawIOBase):
     The generic transfer engine does ``with open_write(dest) as w: copy into w``;
     this feeds the member to a ``7z a`` process via stdin and, on close, finishes
     the process and surfaces a non-zero exit as an OSError.
+
+    7z consumes stdin quickly but the heavy LZMA work (``-mx=9``) shows up as
+    7z's own progress, not as time spent in ``write``. So the byte-fed bar the
+    transfer engine would otherwise drive races to 100% and then freezes during
+    ``close``. Instead ``-bsp1`` makes 7z stream its progress (``<N>M`` MiB of
+    input processed on p7zip, or ``<N>%`` on newer 7-Zip); a reader thread parses
+    it and, via :meth:`attach_progress`, advances the bar in step with the real
+    work. The stdout pipe is *always* drained — a chatty 7z would block once its
+    buffer filled if we didn't.
     """
 
+    _PROGRESS = re.compile(rb"(\d+)([M%])")
+
     def __init__(self, binary: str, archive: str, inner: str) -> None:
+        # -mx=9 = maximum compression (the 7z default is -mx=5 "normal");
+        # -bsp1 streams progress to stdout so the bar can track real work.
         self._proc = subprocess.Popen(
-            [binary, "a", archive, f"-si{inner}"],
+            [binary, "a", "-mx=9", "-bsp1", archive, f"-si{inner}"],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        self._fed = 0          # bytes received == the member's size == bar total
+        self._reported = 0     # bytes already pushed to the sink
+        self._report = None    # progress sink (set by attach_progress)
+        self._reader = threading.Thread(target=self._drain_progress, daemon=True)
+        self._reader.start()
+
+    # -- progress ---------------------------------------------------------
+
+    def attach_progress(self, report) -> bool:
+        """Accept a ``report(delta_bytes)`` sink the reader thread drives from
+        7z's own progress, and return True so the transfer engine stops counting
+        fed bytes (which would hit 100% before compression even starts)."""
+        self._report = report
+        return True
+
+    def _emit(self, done: int) -> None:
+        done = max(0, min(done, self._fed))
+        if done > self._reported:
+            if self._report is not None:
+                self._report(done - self._reported)
+            self._reported = done
+
+    def _drain_progress(self) -> None:
+        out = self._proc.stdout
+        if out is None:
+            return
+        buf = b""
+        while True:
+            block = out.read(64)
+            if not block:
+                break
+            buf += block
+            last = None
+            for m in self._PROGRESS.finditer(buf):
+                last = m
+            if last is not None:
+                n, unit = int(last.group(1)), last.group(2)
+                if unit == b"M":
+                    self._emit(n * 1024 * 1024)
+                elif self._fed:  # percent form (newer 7-Zip)
+                    self._emit(n * self._fed // 100)
+            buf = buf[-16:]  # keep a tail in case a token straddles two reads
 
     def writable(self) -> bool:
         return True
 
     def write(self, b) -> int:
-        return self._proc.stdin.write(b)
+        n = self._proc.stdin.write(b)
+        self._fed += n
+        return n
 
     def close(self) -> None:
         if not self.closed and self._proc.stdin and not self._proc.stdin.closed:
             self._proc.stdin.close()
             rc = self._proc.wait()
+            self._reader.join()  # no concurrent _emit after this
             err = self._proc.stderr.read() if self._proc.stderr else b""
             if rc != 0:
                 raise OSError(f"7z add failed: {err.decode(errors='replace').strip()}")
+            self._emit(self._fed)  # finalize: the tail MiB carry no token
         super().close()
 
 

@@ -165,6 +165,31 @@ class TestWrite:
         with p.open_read(loc) as fh:
             assert fh.read() == b"fresh"
 
+    def test_open_write_compresses_member(self, tmp_path):
+        # -mx=9 max compression: highly compressible data must shrink a lot.
+        SevenZipProvider().resolve_target("c.7z", base=VfsPath.local(tmp_path))
+        archive = tmp_path / "c.7z"
+        member = VfsPath(scheme="7z", root=str(archive), parts=("big.txt",))
+        with SevenZipProvider().open_write(member) as w:
+            w.write(b"A" * 1_000_000)
+        assert archive.stat().st_size < 50_000
+
+    def test_attach_progress_reports_full_size_during_compression(self, tmp_path):
+        # The writer self-reports 7z's real progress (so the bar doesn't race to
+        # 100% then freeze). attach_progress -> True, and the deltas it pushes
+        # sum to exactly the bytes fed once the member finishes.
+        SevenZipProvider().resolve_target("p.7z", base=VfsPath.local(tmp_path))
+        member = VfsPath(
+            scheme="7z", root=str(tmp_path / "p.7z"), parts=("big.bin",)
+        )
+        reported = [0]
+        w = SevenZipProvider().open_write(member)
+        assert w.attach_progress(lambda n: reported.__setitem__(0, reported[0] + n))
+        data = bytes((i * 73) & 0xFF for i in range(2_000_000))  # not trivially RLE
+        w.write(data)
+        w.close()
+        assert reported[0] == len(data)
+
     def test_open_write_refuses_existing_member(self, tmp_path):
         archive = _make_7z(tmp_path)  # already has a.txt
         loc = VfsPath(scheme="7z", root=str(archive), parts=("a.txt",))

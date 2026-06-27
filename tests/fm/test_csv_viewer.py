@@ -73,6 +73,11 @@ class TestColumnWidths:
         rows = [["x" * 100]]
         assert column_widths(rows, max_width=10) == [10]
 
+    def test_cjk_counts_double_width(self):
+        # Each full-width glyph spans 2 terminal cells: "onebox" (6) + 4×2 = 14.
+        rows = [["onebox株式会社"], ["ab"]]
+        assert column_widths(rows) == [14]
+
 
 class TestFitCell:
     def test_pads_short(self):
@@ -86,6 +91,29 @@ class TestFitCell:
 
     def test_newlines_and_tabs_flattened(self):
         assert fit_cell("a\nb", 3) == "a b"
+
+    def test_cjk_padded_to_cell_width(self):
+        from rich.cells import cell_len
+
+        # Padding lands on real terminal columns, not character counts.
+        assert cell_len(fit_cell("株式", 6)) == 6
+        # Truncation keeps the result within the target cell width.
+        assert cell_len(fit_cell("株式会社株式会社", 5)) == 5
+
+    def test_orphan_combining_marks_stripped(self):
+        import unicodedata
+        from rich.cells import cell_len
+
+        # Turkish dotted-i: base "i" + U+0307 (combining dot above). Terminals
+        # can't compose the orphan mark, so it must be dropped or columns shift.
+        cell = fit_cell("ti̇caret", 7)
+        assert not any(unicodedata.combining(ch) for ch in cell)
+        assert cell == "ticaret"
+        assert cell_len(cell) == 7
+
+    def test_composable_diacritics_preserved(self):
+        # NFC keeps Latin/European text intact (only un-composable marks go).
+        assert fit_cell("Việt", 4).rstrip() == "Việt"
 
 
 class TestCsvViewerContent:

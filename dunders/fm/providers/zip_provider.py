@@ -94,12 +94,25 @@ def _build_index(zf: zipfile.ZipFile) -> _Index:
     return {parent: list(nodes.values()) for parent, nodes in grouped.items()}
 
 
-class _ZipMemberWriter(io.BytesIO):
-    """A write buffer that appends its contents to a zip member on close.
+class _ZipMemberWriter(io.RawIOBase):
+    """A writable stream that feeds its bytes into a zip member.
 
-    The generic transfer engine does ``with open_write(dest) as w: copy into w``;
-    this buffers the bytes and flushes them via ``writestr`` exactly once when
-    the ``with`` block exits.
+    The generic transfer engine does ``with open_write(dest) as w: copy into w``
+    and drives a byte progress bar off each ``write``. Two flush strategies:
+
+    * **append (default)** — open the archive and a streaming member writer
+      (``ZipFile.open(inner, "w")``) up front, so every ``write`` *deflates and
+      writes that chunk to disk immediately*. Progress tracks real compression
+      and memory stays bounded (a multi-GB file is never buffered whole). The
+      old ``BytesIO`` design buffered everything then compressed in ``close`` —
+      the bar hit 100% instantly and froze during the (unaccounted) flush.
+    * **overwrite** — zipfile can't rewrite a member in place, so buffer in
+      memory and rebuild the archive via :func:`_replace_member` on close. Used
+      only by the F4 editor save (small, in-memory bytes), never the big-copy
+      path, so it has no progress concern.
+
+    The existing-member dup check (append only) runs in ``__init__`` so a
+    ``FileExistsError`` still propagates out of ``open_write``.
     """
 
     def __init__(self, archive: str, inner: str, *, overwrite: bool = False) -> None:
@@ -107,18 +120,50 @@ class _ZipMemberWriter(io.BytesIO):
         self._archive = archive
         self._inner = inner
         self._overwrite = overwrite
-        self._flushed = False
+        self._buf: io.BytesIO | None = None
+        self._zf: zipfile.ZipFile | None = None
+        self._member: BinaryIO | None = None
+        if overwrite:
+            self._buf = io.BytesIO()
+            return
+        # ZIP_DEFLATED at max level (9): the ZipFile default is ZIP_STORED
+        # (uncompressed). force_zip64 because the streamed size is unknown up
+        # front, so a >4 GiB member must be allowed. Existing members keep their
+        # own compression — this only governs the new one.
+        zf = zipfile.ZipFile(
+            archive, "a", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        )
+        try:
+            if inner in zf.namelist():
+                raise FileExistsError(f"{inner} already exists in archive")
+            self._member = zf.open(inner, "w", force_zip64=True)
+        except BaseException:
+            zf.close()
+            raise
+        self._zf = zf
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b) -> int:
+        if self._overwrite:
+            return self._buf.write(b)
+        return self._member.write(b)
 
     def close(self) -> None:
-        if not self._flushed and not self.closed:
-            self._flushed = True
-            data = self.getvalue()
+        if self.closed:
+            return
+        try:
             if self._overwrite:
-                _replace_member(self._archive, self._inner, data)
+                if self._buf is not None:
+                    _replace_member(self._archive, self._inner, self._buf.getvalue())
             else:
-                with zipfile.ZipFile(self._archive, "a") as zf:
-                    zf.writestr(self._inner, data)
-        super().close()
+                if self._member is not None:
+                    self._member.close()
+                if self._zf is not None:
+                    self._zf.close()
+        finally:
+            super().close()
 
 
 def _replace_member(archive: str, inner: str, data: bytes) -> None:
@@ -129,12 +174,12 @@ def _replace_member(archive: str, inner: str, data: bytes) -> None:
     """
     tmp = archive + ".tmp"
     with zipfile.ZipFile(archive, "r") as src, \
-         zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+         zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as dst:
         for item in src.infolist():
             if item.filename == inner:
                 continue
             dst.writestr(item, src.read(item.filename))
-        dst.writestr(inner, data)
+        dst.writestr(inner, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
     os.replace(tmp, archive)
 
 
@@ -245,20 +290,18 @@ class ZipProvider:
     def open_write(
         self, loc: VfsPath, *, size_hint: int | None = None, overwrite: bool = False
     ) -> BinaryIO:
-        """Return a writer for ``loc`` flushed to the archive on close.
+        """Return a writer for ``loc``.
 
-        Default is append-only: an existing member name is refused. With
-        ``overwrite=True`` (editing a member in place) the writer rewrites the
-        archive with that member replaced. Bytes are buffered in memory — fine
-        for the file sizes a panel/editor deals with.
+        Default is append-only: the writer streams the member straight into the
+        archive (compressing per chunk), and an existing member name is refused
+        (``FileExistsError`` raised from the writer's constructor). With
+        ``overwrite=True`` (editing a member in place) the writer buffers in
+        memory and rewrites the archive with that member replaced on close —
+        fine for the small bytes the editor deals with.
         """
         inner = "/".join(loc.parts)
         if not inner:
             raise OSError("cannot write the archive root as a member")
-        if not overwrite:
-            with zipfile.ZipFile(loc.root, "a") as zf:
-                if inner in zf.namelist():
-                    raise FileExistsError(f"{inner} already exists in archive")
         return _ZipMemberWriter(loc.root, inner, overwrite=overwrite)
 
     def mkdir(self, parent: VfsPath, name: str) -> OpResult:

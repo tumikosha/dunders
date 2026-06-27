@@ -18,9 +18,11 @@ from __future__ import annotations
 import codecs
 import csv
 import io
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 
+from rich.cells import cell_len, set_cell_size
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.text import Text
@@ -142,11 +144,15 @@ def parse_csv(text: str, delimiter: str) -> list[list[str]]:
 def column_widths(
     rows: list[list[str]], max_width: int = _MAX_COL_WIDTH
 ) -> list[int]:
-    """Width of each column = the widest cell in it, clamped to ``[1, max_width]``."""
+    """Width of each column = the widest cell in it, clamped to ``[1, max_width]``.
+
+    Width is measured in terminal *cells* (``cell_len``), not characters, so a
+    column of CJK / full-width text (each glyph spans 2 cells) is sized to its
+    real on-screen footprint and the column separators stay aligned."""
     widths: list[int] = []
     for row in rows:
         for i, cell in enumerate(row):
-            w = min(max_width, max(1, len(cell)))
+            w = min(max_width, max(1, cell_len(cell)))
             if i < len(widths):
                 widths[i] = max(widths[i], w)
             else:
@@ -154,14 +160,36 @@ def column_widths(
     return widths
 
 
-def fit_cell(value: str, width: int) -> str:
-    """Pad ``value`` to ``width`` (left-justified) or truncate with an ellipsis."""
+def _display_safe(value: str) -> str:
+    """Make a cell safe to lay out as a fixed-width column.
+
+    Flattens embedded whitespace, then drops zero-width combining marks that
+    terminals render inconsistently. ``cell_len`` (correctly) counts a combining
+    mark as 0 cells, but many terminals/fonts can't compose an *orphan* mark
+    onto its base — e.g. Turkish dotted-i ``i̇`` ("İ" lowercased) paints
+    the dot as its own spacing cell — so our width math desyncs from what's drawn
+    and every column to the right shifts. NFC first so composable diacritics
+    (most Latin/European text) survive as single precomposed glyphs; only the
+    remaining un-composable marks are removed. Pure & cheap (fast path when the
+    cell has no combining marks)."""
     value = value.replace("\n", " ").replace("\t", " ")
-    if len(value) > width:
+    if any(unicodedata.combining(ch) for ch in value):
+        value = unicodedata.normalize("NFC", value)
+        value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value
+
+
+def fit_cell(value: str, width: int) -> str:
+    """Pad ``value`` to ``width`` *cells* (left-justified) or truncate with an
+    ellipsis. Uses cell width (``set_cell_size``), so a full-width CJK glyph
+    counts as 2 — padding/truncation land on real terminal-column boundaries."""
+    value = _display_safe(value)
+    if cell_len(value) > width:
         if width <= 1:
             return "…"[:width]
-        return value[: width - 1] + "…"
-    return value.ljust(width)
+        # Truncate the body to width-1 cells, then the ellipsis fills the last.
+        return set_cell_size(value, width - 1) + "…"
+    return set_cell_size(value, width)
 
 
 def _split_line(line: str, delimiter: str) -> list[str]:
@@ -580,14 +608,17 @@ class CsvViewerContent(WindowContent):
         )
 
     def _update_subtitle(self) -> None:
+        # Row / match counts get thousands separators (e.g. 1,234,567) so a
+        # multi-GB CSV's size reads at a glance.
         subtitle = (
             f"{self._widget.mode.upper()}  ·  delim: {self._delim_label()}  ·  "
-            f"{self._widget.n_cols}×{self._widget.n_rows}"
+            f"{self._widget.n_cols}×{self._widget.n_rows:,}"
         )
         if self._widget.filter_query is not None:
+            matches = self._widget.match_count or 0
             subtitle += (
                 f"  ·  filter: {self._widget.filter_query!r} "
-                f"({self._widget.match_count})"
+                f"({matches:,})"
             )
         self.window_subtitle = subtitle
 

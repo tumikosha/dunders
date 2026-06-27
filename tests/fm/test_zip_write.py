@@ -39,6 +39,38 @@ class TestProviderWrite:
         with zipfile.ZipFile(archive) as zf:
             assert zf.read("new.txt") == b"hello"
 
+    def test_appended_member_is_compressed(self, tmp_path):
+        # Members must be DEFLATED, not stored uncompressed (the ZipFile
+        # default). Use highly compressible data so the size drop is obvious.
+        archive = _make_zip(tmp_path / "a.zip")
+        loc = VfsPath(scheme="zip", root=str(archive), parts=("big.txt",))
+        data = b"A" * 100_000
+        with ZipProvider().open_write(loc) as w:
+            w.write(data)
+        with zipfile.ZipFile(archive) as zf:
+            info = zf.getinfo("big.txt")
+            assert info.compress_type == zipfile.ZIP_DEFLATED
+            assert info.compress_size < info.file_size
+
+    def test_partial_member_then_cleanup_leaves_valid_archive(self, tmp_path):
+        # The writer streams into the archive, so a cancelled copy closes the
+        # member after only partial bytes. That must leave a VALID archive whose
+        # partial member delete() can then remove, with siblings intact — the
+        # cancel-cleanup path the transfer engine relies on.
+        archive = _make_zip(tmp_path / "a.zip")  # existing.txt
+        loc = VfsPath(scheme="zip", root=str(archive), parts=("partial.bin",))
+        w = ZipProvider().open_write(loc)
+        w.write(b"X" * 50_000)  # partial; simulate a mid-file cancel
+        w.close()
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.testzip() is None  # archive is well-formed
+            assert set(zf.namelist()) == {"existing.txt", "partial.bin"}
+        res = ZipProvider().delete([loc])  # what _cleanup_partial does
+        assert not res.errors
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.namelist() == ["existing.txt"]
+            assert zf.read("existing.txt") == b"old"
+
     def test_open_write_refuses_existing_member(self, tmp_path):
         archive = _make_zip(tmp_path / "a.zip")
         loc = VfsPath(scheme="zip", root=str(archive), parts=("existing.txt",))

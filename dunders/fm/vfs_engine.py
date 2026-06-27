@@ -168,6 +168,7 @@ def _generic_transfer(
                 dst_p = registry.resolve(dst)
                 try:
                     with reader, dst_p.open_write(dst) as writer:
+                        owns = _attach_writer_progress(writer, on_chunk, name)
                         while True:
                             if _cancelled(cancel_event):
                                 raise _Cancelled
@@ -175,7 +176,8 @@ def _generic_transfer(
                             if not chunk:
                                 break
                             writer.write(chunk)
-                            on_chunk(name, len(chunk))
+                            if not owns:
+                                on_chunk(name, len(chunk))
                 except _Cancelled:
                     _cleanup_partial(dst_p, dst)
                     raise
@@ -228,6 +230,7 @@ def _copy_tree(
         label = src.name
         try:
             with src_p.open_read(src) as reader, dst_p.open_write(dest) as writer:
+                owns = _attach_writer_progress(writer, on_chunk, label)
                 while True:
                     if _cancelled(cancel_event):
                         raise _Cancelled
@@ -235,7 +238,8 @@ def _copy_tree(
                     if not chunk:
                         break
                     writer.write(chunk)
-                    on_chunk(label, len(chunk))
+                    if not owns:
+                        on_chunk(label, len(chunk))
         except _Cancelled:
             _cleanup_partial(dst_p, dest)
             raise
@@ -303,6 +307,21 @@ def _size_of(provider: VfsProvider, loc: VfsPath) -> int:
     except OSError:
         pass
     return 0
+
+
+def _attach_writer_progress(writer, on_chunk, label: str) -> bool:
+    """Let a writer that does its heavy work at ``close`` drive the byte bar.
+
+    Some destinations don't compress in ``write`` — notably 7z, which buffers
+    stdin and only then runs LZMA. Feeding such a writer makes the byte counter
+    race to 100% before the real work starts, then freeze during ``close``. If
+    the writer exposes ``attach_progress``, hand it a sink that advances the bar
+    by real byte deltas (the writer reports them from the tool's own progress)
+    and return True so the copy loop stops counting fed bytes itself."""
+    attach = getattr(writer, "attach_progress", None)
+    if attach is None:
+        return False
+    return bool(attach(lambda n: on_chunk(label, n)))
 
 
 def _cleanup_partial(dst_p: VfsProvider, dest: VfsPath) -> None:
