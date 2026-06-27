@@ -15,8 +15,7 @@ Far Manager — with a real windowing layer (Turbo Vision–inspired), code fold
 recordable macros, a command palette, and an embedded LLM/agent CLI mode — and
 makes that surface extensible.
 
-The CLI command is **`__`** or **`dunders`** (the four QWERTY keys right after `qwer`y,
-picked in the same spirit as vim's `hjkl`); the `__` is the platform's blank,
+The CLI command is **`__`** or **`dunders`** ; the `__` is the platform's blank,
 waiting to be filled.
 
 > Status: **alpha**. Core file-manager and editor are usable; agent/CLI

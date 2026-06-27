@@ -413,6 +413,21 @@ tests; widgets and the app shell have async smoke/integration tests
   file; first F2 with no file seeds an example. See `dunders/fm/user_menu.py`
   (pure parser/macros), `user_menu_loader.py` (I/O), `user_menu_dialog.py`
   (modal).
+- File associations: `config_dir()/associations.toml` (`~/.config/dunders/`,
+  honours `XDG_CONFIG_HOME`); single global TOML with per-extension `[ext]`
+  sections and three verbs — `open` (Enter), `view` (F3), `edit` (F4). Value =
+  a built-in handler name (`auto editor viewer hex image csv markdown office
+  database`; unknown → `auto`) or `!external command` (User Menu macros
+  `%f %d %t %s %F %D %x %b %%` via the handover); a verb may be a plain string
+  (all OSes) or an `[ext.verb]` table with `macos`/`linux`/`windows`/`default`
+  keys. Built-in defaults (`BUILTIN_DEFAULTS`) merge under the user file at
+  (ext, verb) granularity — images/csv/md/office open correctly out of the box,
+  fixing the old `.jpg`-on-Enter `read_text()` crash (undecodable files fall
+  back to the hex viewer). `Command` menu → "Edit file associations…" (`assoc.edit`)
+  seeds an example and opens it. See `dunders/fm/associations.py` (pure
+  parser/resolve), `associations_loader.py` (I/O). v1: no per-project override
+  file; interactive `%{Prompt}` macros are not collected for association external
+  commands.
 - Command-line history: persisted to `config_dir()/history` (honours
   `XDG_CONFIG_HOME` like the rest of the config). **Alt+H** opens a mc-style
   popup (`fm/cmd_history_dialog.py`, `CommandHistoryDialog`) listing past entries

@@ -111,6 +111,12 @@ from dunders.fm.doc_converter import (
     convert_to_markdown,
     looks_office,
 )
+from dunders.fm import associations_loader
+from dunders.fm.associations import (
+    ExternalAction,
+    current_os_name,
+    resolve as resolve_association,
+)
 from dunders.windowing.editor import EditorContent
 
 
@@ -1039,6 +1045,7 @@ class DundersApp(App):
             WindowCommand(id="bookmark.open", label="Bookmarks…", handler=self.action_open_bookmarks, hotkey="ctrl+b"),
             WindowCommand(id="cmd.history", label="Command history…", handler=self.action_show_command_history, hotkey="alt+h"),
             WindowCommand(id="ai.settings", label="AI / LLM settings…", handler=self.action_ai_settings),
+            WindowCommand(id="assoc.edit", label="Edit file associations…", handler=self.action_edit_associations),
             WindowCommand(id="panels.fullscreen", label="Panels Fullscreen", handler=self.action_panels_fullscreen, hotkey="ctrl+p"),
             WindowCommand(
                 id="console.toggle",
@@ -1382,6 +1389,8 @@ class DundersApp(App):
                 MenuItem(command_id="panel.delete"),
                 MenuItem(command_id="panel.pack"),
                 MenuItem(command_id="panel.find_file"),
+                MenuSeparator(),
+                MenuItem(label="Edit file associations…", command_id="assoc.edit"),
             ]),
             Menu("Right", [
                 MenuItem(label="Toggle visibility", command_id="panel.right.toggle"),
@@ -2555,6 +2564,13 @@ class DundersApp(App):
         show_modal(self.desktop, dialog, title="AI / LLM settings", size=(74, 26))
         self.call_after_refresh(dialog.focus_first_input)
 
+    def action_edit_associations(self) -> None:
+        """Seed (if needed) and open the file-associations TOML for editing."""
+        if self._has_active_modal() or self.desktop is None:
+            return
+        path = associations_loader.seed_associations()
+        self._open_editor_window(path, read_only=False)
+
     def action_show_command_history(self) -> None:
         """Alt+H: mc-style popup of past command-line entries (newest first)."""
         if self._has_active_modal() or self.desktop is None:
@@ -3028,7 +3044,7 @@ class DundersApp(App):
         if not self._is_local_entry(entry):
             self._open_member_edit(entry)  # edit in place via the provider
             return
-        self._open_editor_window(entry.path, read_only=False)
+        self._dispatch_association(entry, "edit")
 
     @staticmethod
     def _is_local_entry(entry) -> bool:
@@ -3067,7 +3083,7 @@ class DundersApp(App):
         if match is not None:
             self._do_open_dunder(*match)  # navigate the panel into the dunder (e.g. a SQLite DB)
             return
-        self._open_editor_window(entry.path, read_only=True)
+        self._dispatch_association(entry, "view")
 
     def action_toggle_hidden(self) -> None:
         """Alt+H / View menu: show or hide dot-files in the active panel."""
@@ -3683,6 +3699,120 @@ class DundersApp(App):
             content, title=f"Edit: {entry.name}", win_id=f"editor-{self._editor_seq}"
         )
 
+    # ------------------------------------------------------------------ #
+    # File-association helpers                                             #
+    # ------------------------------------------------------------------ #
+
+    def _assoc_table(self) -> dict:
+        table, err = associations_loader.load_table()
+        if err is not None:
+            self.notify(
+                f"associations.toml ignored (parse error): {err}",
+                severity="warning",
+            )
+        return table
+
+    @staticmethod
+    def _safe_read_text(path: Path) -> str | None:
+        """Read the file as text, or None if it is binary/undecodable."""
+        try:
+            return path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _dispatch_association(self, entry, verb: str) -> None:
+        """Resolve and run the association for ``entry`` under ``verb``."""
+        ext = Path(entry.name).suffix.lstrip(".").lower()
+        action = resolve_association(self._assoc_table(), ext, verb, current_os_name())
+        if isinstance(action, ExternalAction):
+            ctx, cwd = self._build_macro_context()
+            body = expand_macros(action.command, ctx, {})
+            self._run_user_menu_body(body, cwd)
+            return
+        # BuiltinAction: view is read-only; open/edit are editable for `auto`.
+        self._open_with_handler(entry.path, action.handler, read_only=(verb == "view"))
+
+    def _open_with_handler(self, path: Path, handler: str, *, read_only: bool) -> None:
+        if self.desktop is None:
+            return
+        if handler in ("auto", "editor"):
+            self._open_editor_window(path, read_only=read_only and handler == "auto")
+            return
+        if handler == "database":
+            match = self._dunder_for_local_file(path)
+            if match is not None:
+                self._do_open_dunder(*match)
+            else:
+                self._open_editor_window(path, read_only=read_only)
+            return
+        if handler == "office":
+            if MARKITDOWN_AVAILABLE:
+                self._convert_office_async(
+                    path.name, path, lambda: HexViewerContent(path)
+                )
+            else:
+                self.notify(
+                    "Install dunders[office] to view documents", severity="warning"
+                )
+                self._open_with_handler(path, "hex", read_only=True)
+            return
+        self._remember_active_panel_id()
+        self._editor_seq += 1
+        seq = self._editor_seq
+        if handler == "image":
+            if PILLOW_AVAILABLE:
+                self._mount_maximized_content(
+                    ImageViewerContent(path),
+                    title=f"Image: {path.name}",
+                    win_id=f"imgviewer-{seq}",
+                )
+                return
+            self.notify(
+                "Install dunders[image] to view images as ASCII", severity="warning"
+            )
+            handler = "hex"
+        if handler == "csv":
+            content = self._make_csv_viewer(path)
+            if content is not None:
+                self._mount_maximized_content(
+                    content, title=f"CSV: {path.name}", win_id=f"csvviewer-{seq}"
+                )
+                return
+            handler = "hex"  # too large to tabulate
+        if handler == "markdown":
+            if self._should_use_hex_viewer(path):
+                handler = "hex"
+            else:
+                text = self._safe_read_text(path)
+                if text is not None:
+                    self._mount_maximized_content(
+                        MarkdownViewerContent(file_path=path, text=text),
+                        title=f"MD: {path.name}",
+                        win_id=f"mdviewer-{seq}",
+                    )
+                    return
+                handler = "hex"
+        if handler == "viewer":
+            if self._should_use_hex_viewer(path):
+                handler = "hex"
+            else:
+                text = self._safe_read_text(path)
+                if text is not None:
+                    self._mount_maximized_content(
+                        ViewerContent(initial_text=text, file_path=str(path)),
+                        title=f"View: {path.name}",
+                        win_id=f"viewer-{seq}",
+                    )
+                    return
+                handler = "hex"
+        if handler == "hex":
+            self._mount_maximized_content(
+                HexViewerContent(path), title=f"Hex: {path.name}", win_id=f"hexviewer-{seq}"
+            )
+            return
+        # Unknown handler → safe fallback.
+        self._open_editor_window(path, read_only=read_only)
+
     def _open_editor_window(self, path: Path, *, read_only: bool = False) -> None:
         if self.desktop is None:
             return
@@ -3740,14 +3870,15 @@ class DundersApp(App):
             title = f"Hex: {path.name}"
             win_id = f"hexviewer-{seq}"
         else:
-            # EditorContent.__init__ does NOT read the file — it only stores
-            # file_path on the buffer for later save. We have to load the
-            # text ourselves and feed it as initial_text.
-            try:
-                text = path.read_text()
-            except OSError:
-                text = ""
-            if read_only and looks_markdown(path):
+            # EditorContent.__init__ does NOT read the file — load the text
+            # ourselves. A binary/undecodable file falls back to the hex viewer
+            # rather than raising UnicodeDecodeError (the .jpg-on-Enter crash).
+            text = self._safe_read_text(path)
+            if text is None:
+                content = HexViewerContent(path)
+                title = f"Hex: {path.name}"
+                win_id = f"hexviewer-{seq}"
+            elif read_only and looks_markdown(path):
                 # F3 on Markdown → rendered document (toggle to raw with `t`).
                 # Reached only past the hex guard above, so a huge/binary .md
                 # still opens as hex rather than choking the renderer.
@@ -3799,7 +3930,7 @@ class DundersApp(App):
         cmd = self._executable_command(event.entry.path)
         if cmd is not None and self._run_in_console(cmd):
             return
-        self._open_editor_window(event.entry.path)
+        self._dispatch_association(event.entry, "open")
 
     @staticmethod
     def _read_shebang(path: Path) -> str | None:
