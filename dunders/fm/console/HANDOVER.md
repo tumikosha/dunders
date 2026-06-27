@@ -95,6 +95,32 @@ running **detaches** from it (back to the panels) and a later Ctrl+O
 - Ctrl+O is **reserved** for the toggle, so a child that uses Ctrl+O itself
   (e.g. nano = save) won't receive it — exactly as under `mc`.
 
+## cwd synchronisation panel ⇄ subshell (silent, both directions)
+
+> **UPDATE (2026-06-27):** the cwd sync is now **silent** and **bidirectional**.
+
+**Panel → subshell (silent).** Before each command (`run_foreground`) and before
+the fresh interactive screen (`command_screen`, non-suspended branch) the panel
+dir is synced with `_sync_cwd` (writes `cd <dir> 2>/dev/null`) immediately
+followed by `_drain_to_marker`, which swallows the shell's **echo** of that `cd`
+off the master up to the next FIFO prompt marker. So `_send_command` now writes
+*only* the command — the `cd` no longer leaks through `_pump` onto the real
+terminal, where it used to smear a launching full-screen TUI's first frame
+(claude's prompt line). `_send_command` therefore carries no `cd` prefix anymore.
+
+**Subshell → panel (both screens).** `run_foreground` already captured the
+subshell's resulting cwd (`_capture_cwd`) so a `cd` inside a command follows the
+panel. The **fresh interactive screen** now does the same: after
+`_interactive_relay` returns (Ctrl+O out) it calls `_capture_cwd`, so a plain
+`cd ..` typed at the Ctrl+O command screen moves the active panel too. (The
+**reattach** branch still must NOT sync or capture mid-run — those writes would
+land inside the running child.)
+
+**Guard while a command is suspended.** Typing a new command while a foreground
+job is detached (`has_suspended_command`) is refused at the app level
+(`_run_handover_command`) with a "press Ctrl+O to return to it" notice — sending
+it would inject the command (and its `cd`) as keystrokes into the running child.
+
 ### Gotcha: reattaching to a full-screen TUI needs a *real* resize
 
 > **Why the obvious fixes fail.** Textual's `App.suspend()` emits the

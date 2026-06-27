@@ -276,23 +276,51 @@ class RelayHandover:
                 if self._read_rc_from_fifo() is not None:
                     return
 
-    def _send_command(self, cmd: str, cwd: Path) -> None:
-        """Write the command to the shell, prefixed with a silent ``cd`` to the
-        active panel dir so the persistent subshell tracks the panel (mc
-        parity). NEVER writes a sentinel — completion comes via the FIFO."""
+    def _send_command(self, cmd: str) -> None:
+        """Write just the command to the shell. NO ``cd`` prefix: the cwd is
+        synced separately and *silently* (``_sync_cwd`` + ``_drain_to_marker``)
+        so the shell's echo of that ``cd`` is swallowed on our side instead of
+        being forwarded to the real terminal — otherwise it smears across a
+        launching full-screen TUI's first frame (the reported bug). NEVER writes
+        a sentinel — completion comes via the FIFO."""
         assert self._proc is not None
-        line = f"cd {shlex.quote(str(cwd))} 2>/dev/null; {cmd}\n"
-        self._proc.write(line.encode("utf-8", errors="replace"))
+        self._proc.write(f"{cmd}\n".encode("utf-8", errors="replace"))
 
     def _sync_cwd(self, cwd: Path) -> None:
-        """``cd`` the persistent subshell to the active panel dir before the
-        interactive command screen appears. The shell is long-lived and may
-        have been left in a different directory by an earlier command, so
-        without this Ctrl+O would land in a stale cwd instead of the directory
-        shown in the panel (mc parity)."""
+        """``cd`` the persistent subshell to the active panel dir. The shell is
+        long-lived and may have been left elsewhere by an earlier command, so
+        without this a command / Ctrl+O would land in a stale cwd instead of the
+        directory shown in the panel (mc parity). Pair it with
+        :meth:`_drain_to_marker` to swallow the ``cd`` echo silently."""
         assert self._proc is not None
         line = f"cd {shlex.quote(str(cwd))} 2>/dev/null\n"
         self._proc.write(line.encode("utf-8", errors="replace"))
+
+    def _drain_to_marker(self, timeout: float = 2.0) -> None:
+        """Silently consume the subshell's echo from master up to the next FIFO
+        prompt marker (or ``timeout``). Called right after a programmatic
+        ``_sync_cwd`` so the ``cd`` echo is discarded here rather than forwarded
+        to the real terminal — the command screen / launching TUI then opens on
+        a clean prompt (mc parity). Touches only our private PTY/FIFO fds."""
+        if self._proc is None:
+            return
+        while True:
+            try:
+                r, _, _ = select.select(
+                    [self._proc.fd, *self._watch_fifo()], [], [], timeout
+                )
+            except InterruptedError:
+                continue
+            if not r:
+                return  # timed out — proceed best-effort
+            if self._proc.fd in r:
+                try:
+                    os.read(self._proc.fd, 65536)  # discard echo
+                except OSError:
+                    return
+            if self._fifo_fd >= 0 and self._fifo_fd in r:
+                if self._read_rc_from_fifo() is not None:
+                    return
 
     def _pump(self, in_fds: list[int], master_fd: int, out) -> int | None:
         """Bridge bytes verbatim until the completion marker arrives on the
@@ -379,7 +407,12 @@ class RelayHandover:
             try:
                 assert self._proc is not None
                 self._propagate_winsize()
-                self._send_command(cmd, cwd)
+                # Sync the panel cwd *silently* (swallow the cd echo) before the
+                # command, so launching a full-screen TUI (claude) isn't smeared
+                # by a forwarded `cd <dir>; ...` line.
+                self._sync_cwd(cwd)
+                self._drain_to_marker()
+                self._send_command(cmd)
                 rc = self._pump([stdin_fd], self._proc.fd, sys.stdout.buffer)
             finally:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
@@ -545,13 +578,17 @@ class RelayHandover:
                         self._suspended_cmd = False
                         self.last_cwd = self._capture_cwd()
                 else:
-                    # Fresh interactive screen: sync to the panel dir, which also
-                    # nudges a fresh prompt.
+                    # Fresh interactive screen: sync to the panel dir *silently*
+                    # (swallow the cd echo so the screen opens on a clean prompt),
+                    # relay until Ctrl+O, then capture where an interactive `cd`
+                    # left the shell so the panel can follow it (mc parity).
                     self.last_cwd = None
                     self._sync_cwd(cwd)
+                    self._drain_to_marker()
                     self._interactive_relay(
                         stdin_fd, self._proc.fd, sys.stdout.buffer
                     )
+                    self.last_cwd = self._capture_cwd()
             finally:
                 termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
 

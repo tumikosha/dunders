@@ -141,12 +141,11 @@ def test_relay_pump_does_not_hold_back_small_bursts():
         os.close(slave)
 
 
-def test_relay_send_command_cds_to_cwd_and_carries_no_sentinel():
-    # The per-command PTY write must (1) cd to the active panel dir so the
-    # persistent shell tracks it, and (2) carry NO in-band sentinel — an
-    # interactive child like htop would otherwise eat queued sentinel bytes.
-    from pathlib import Path
-
+def test_relay_send_command_writes_only_the_command_no_cd_no_sentinel():
+    # The per-command PTY write carries ONLY the command: NO `cd` prefix (the
+    # cwd is synced separately and silently, so its echo never smears a launching
+    # TUI) and NO in-band sentinel (an interactive child like htop would
+    # otherwise eat queued sentinel bytes; completion comes on the FIFO).
     h = RelayHandover(_FakeApp())
 
     class _CapturingProc:
@@ -154,11 +153,10 @@ def test_relay_send_command_cds_to_cwd_and_carries_no_sentinel():
             self.last = data
 
     h._proc = _CapturingProc()
-    h._send_command("htop", Path("/tmp/some dir"))
+    h._send_command("htop")
     text = h._proc.last.decode()
-    assert text.endswith("htop\n")
-    assert "cd " in text
-    assert "'/tmp/some dir'" in text  # shlex-quoted path
+    assert text == "htop\n"
+    assert "cd " not in text
     assert "DUNDERS_END" not in text
 
 
@@ -206,6 +204,8 @@ def test_relay_command_screen_syncs_cwd_to_panel(monkeypatch, tmp_path):
         h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _CapturingProc())
     )
     monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    monkeypatch.setattr(h, "_drain_to_marker", lambda *a, **k: None)
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: None)
     monkeypatch.setattr(h, "_interactive_relay", lambda *a, **k: None)
     monkeypatch.setattr(termios, "tcgetattr", lambda fd: None)
     monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: None)
@@ -299,7 +299,7 @@ def test_relay_runs_real_command(tmp_path):
     try:
         out = io.BytesIO()
         # Completion is detected via the FIFO marker, not a fed-in sentinel.
-        h._send_command("echo marker-hi", tmp_path)
+        h._send_command("echo marker-hi")
         rc = h._pump([], h._proc.fd, out)
         assert rc == 0
         assert b"marker-hi" in out.getvalue()
@@ -327,11 +327,46 @@ def test_relay_capture_cwd_follows_cd(tmp_path):
     signal.alarm(10)
     try:
         # Run a `cd` into the subdir, then read the subshell's resulting cwd.
-        h._send_command(f"cd {_shlex.quote(str(sub))}", tmp_path)
+        h._send_command(f"cd {_shlex.quote(str(sub))}")
         h._pump([], h._proc.fd, io.BytesIO())
         captured = h._capture_cwd()
         assert captured is not None
         assert captured.resolve() == sub.resolve()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+        h.shutdown()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pty only")
+def test_relay_silent_sync_swallows_cd_echo(tmp_path):
+    # The reported bug: a programmatic `cd` was echoed by the shell and forwarded
+    # to the terminal, smearing a launching TUI's frame. _sync_cwd + the silent
+    # _drain_to_marker must consume that echo, so a following command's forwarded
+    # output contains the command + its result but NOT the `cd`. The shell is
+    # also genuinely moved (so the panel can follow it).
+    import signal
+
+    def _alarm(_signum, _frame):
+        raise TimeoutError("relay silent-sync hung")
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    h = RelayHandover(_FakeApp())
+    h._ensure_shell(tmp_path)
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(10)
+    try:
+        h._sync_cwd(sub)
+        h._drain_to_marker()  # swallow the `cd` echo silently
+        out = io.BytesIO()
+        h._send_command("echo MARKER_OK")
+        h._pump([], h._proc.fd, out)
+        text = out.getvalue().decode(errors="replace")
+        assert "MARKER_OK" in text          # the command ran and its output shows
+        assert "cd " not in text            # but the cd echo was swallowed
+        assert str(sub) not in text         # ...and so was the cd's path argument
+        assert h._capture_cwd().resolve() == sub.resolve()  # shell really moved
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
@@ -489,7 +524,9 @@ def test_run_foreground_detach_marks_suspended(monkeypatch, tmp_path):
     h = RelayHandover(_FakeApp())
     monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
     monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
-    monkeypatch.setattr(h, "_send_command", lambda cmd, cwd: None)
+    monkeypatch.setattr(h, "_sync_cwd", lambda cwd: None)
+    monkeypatch.setattr(h, "_drain_to_marker", lambda *a, **k: None)
+    monkeypatch.setattr(h, "_send_command", lambda cmd: None)
     monkeypatch.setattr(h, "_pump", lambda *a, **k: None)
     captured = []
     monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: captured.append(True))
@@ -500,6 +537,32 @@ def test_run_foreground_detach_marks_suspended(monkeypatch, tmp_path):
     assert h.has_suspended_command is True
     assert h.last_cwd is None
     assert captured == []  # cwd must NOT be read while the command runs
+
+
+def test_run_foreground_syncs_cwd_silently_before_sending_command(
+    monkeypatch, tmp_path
+):
+    # The cwd sync must happen as a separate, silent step (cd + drain the echo)
+    # BEFORE the command is written, so the shell's `cd` echo is swallowed on our
+    # side and never forwarded to smear a launching full-screen TUI's frame.
+    h = RelayHandover(_FakeApp())
+    monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
+    monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
+    order = []
+    monkeypatch.setattr(h, "_sync_cwd", lambda cwd: order.append(("sync", cwd)))
+    monkeypatch.setattr(h, "_drain_to_marker", lambda *a, **k: order.append(("drain",)))
+    monkeypatch.setattr(h, "_send_command", lambda cmd: order.append(("send", cmd)))
+    monkeypatch.setattr(h, "_pump", lambda *a, **k: order.append(("pump",)) or 0)
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: None)
+    _stub_tty(monkeypatch)
+
+    h.run_foreground("claude", tmp_path)
+    assert order == [
+        ("sync", tmp_path),
+        ("drain",),
+        ("send", "claude"),
+        ("pump",),
+    ]
 
 
 def test_command_screen_reattaches_and_finalizes_on_completion(monkeypatch, tmp_path):
@@ -603,20 +666,27 @@ def test_prime_reattach_enters_alt_and_forces_real_resize(monkeypatch):
 
 
 def test_command_screen_fresh_interactive_when_not_suspended(monkeypatch, tmp_path):
-    # No suspended command: the normal interactive screen syncs cwd and relays.
+    # No suspended command: the normal interactive screen silently syncs cwd,
+    # relays, then captures where an interactive `cd` left the shell so the panel
+    # can follow it (mc parity).
     h = RelayHandover(_FakeApp())
     monkeypatch.setattr(h, "_ensure_shell", lambda cwd: setattr(h, "_proc", _Proc()))
     monkeypatch.setattr(h, "_propagate_winsize", lambda: None)
-    synced, relayed, pumped = [], [], []
+    synced, drained, relayed, pumped = [], [], [], []
     monkeypatch.setattr(h, "_sync_cwd", lambda cwd: synced.append(cwd))
+    monkeypatch.setattr(h, "_drain_to_marker", lambda *a, **k: drained.append(True))
     monkeypatch.setattr(h, "_interactive_relay", lambda *a, **k: relayed.append(True))
     monkeypatch.setattr(h, "_pump", lambda *a, **k: pumped.append(True))
+    sub = tmp_path / "sub"
+    monkeypatch.setattr(h, "_capture_cwd", lambda *a, **k: sub)
     _stub_tty(monkeypatch)
 
     h.command_screen(tmp_path)
     assert synced == [tmp_path]
+    assert drained == [True]  # the cd echo is swallowed silently
     assert relayed == [True]
     assert pumped == []  # the reattach pump is not used here
+    assert h.last_cwd == sub  # an interactive `cd` is captured for panel-follow
 
 
 def test_read_rc_from_fifo_parses_latest_complete_line():

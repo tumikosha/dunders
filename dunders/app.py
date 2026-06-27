@@ -4779,6 +4779,16 @@ class DundersApp(App):
             return
         if self._ensure_handover() is None:
             return
+        # A foreground command (e.g. claude) may still be running, detached via
+        # Ctrl+O. Sending a new command now would inject its bytes — including
+        # the cwd-sync `cd` — as keystrokes into that running child. Refuse and
+        # point the user back to it (mc parity).
+        if getattr(self._handover, "has_suspended_command", False):
+            self.notify(
+                "A command is still running — press Ctrl+O to return to it.",
+                severity="warning",
+            )
+            return
         cwd = self._panel_cwd_for_test()
         self._handover.run_foreground(text, cwd)
         if self.command_history is not None:

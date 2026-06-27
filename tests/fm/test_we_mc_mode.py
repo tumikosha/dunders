@@ -98,6 +98,22 @@ async def test_we_mc_command_that_cds_moves_active_panel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_we_mc_command_refused_while_command_suspended(tmp_path):
+    # A foreground command (e.g. claude) detached via Ctrl+O is still running in
+    # the subshell. Typing a new command must NOT hand it over (its bytes — incl.
+    # the cwd-sync `cd` — would be injected into the running child); refuse and
+    # tell the user to return via Ctrl+O.
+    app = DundersApp(launch_mode="we-mc", terminal_mode="relay")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        spy = _SpyHandover()
+        spy.has_suspended_command = True
+        app._handover = spy
+        app._run_handover_command("ls")
+        assert spy.ran == []  # not handed over while a command is suspended
+
+
+@pytest.mark.asyncio
 async def test_we_mc_ctrl_o_shows_command_screen(tmp_path):
     app = DundersApp(launch_mode="we-mc", terminal_mode="suspend")
     async with app.run_test() as pilot:
