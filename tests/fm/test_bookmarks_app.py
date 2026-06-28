@@ -5,7 +5,8 @@ import pytest
 from dunders.app import DundersApp
 from dunders.config.bookmarks import add_bookmark, list_bookmarks
 from dunders.core.vfs import VfsPath
-from dunders.fm.dialogs import AddBookmarkDialog
+from dunders.fm.dialogs import AddBookmarkDialog, BookmarksDialog, _BookmarkTable
+from dunders.windowing.helpers import show_modal
 
 
 @pytest.mark.asyncio
@@ -244,3 +245,26 @@ async def test_bookmarks_listed_in_brand_menu(tmp_path):
         labels = [getattr(it, "label", None) for it in brand.items]
         assert "srv one" in labels
         assert any(lbl and "Add current" in lbl for lbl in labels)
+
+
+@pytest.mark.asyncio
+async def test_bookmarks_dialog_mouse_wheel_scrolls_list(tmp_path):
+    """The mouse wheel moves the row cursor through the bookmark list (and
+    clamps at the ends)."""
+    bms = [{"label": f"bm{i}", "uri": f"file:///p{i}", "password": None} for i in range(30)]
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        dialog = BookmarksDialog(bms)
+        show_modal(app.desktop, dialog, title="Bookmarks", size=(60, 20))
+        await pilot.pause()
+        await pilot.pause()
+        table = dialog.query_one(_BookmarkTable)
+        assert table.cursor_coordinate.row == 0
+        table._wheel_move(table._WHEEL_STEP)
+        assert table.cursor_coordinate.row == table._WHEEL_STEP  # scrolled down
+        table._wheel_move(-table._WHEEL_STEP)
+        assert table.cursor_coordinate.row == 0  # back up, clamped at top
+        for _ in range(20):
+            table._wheel_move(table._WHEEL_STEP)
+        assert table.cursor_coordinate.row == table.row_count - 1  # clamped at bottom

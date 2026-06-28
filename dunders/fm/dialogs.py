@@ -1534,9 +1534,30 @@ class _BookmarkTable(DataTable):
     it.
     """
 
+    _WHEEL_STEP = 3
+
     def __init__(self, *, click_cb, **kwargs) -> None:
         super().__init__(cursor_type="row", show_header=False, **kwargs)
         self._click_cb = click_cb
+
+    def _wheel_move(self, delta: int) -> None:
+        """Move the row cursor by ``delta`` rows (clamped), which scrolls the
+        list to keep the cursor visible."""
+        if self.row_count == 0:
+            return
+        row = self.cursor_coordinate.row + delta
+        row = max(0, min(self.row_count - 1, row))
+        self.move_cursor(row=row)
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._wheel_move(self._WHEEL_STEP)
+        event.stop()
+        event.prevent_default()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._wheel_move(-self._WHEEL_STEP)
+        event.stop()
+        event.prevent_default()
 
     async def _on_click(self, event: events.Click) -> None:
         meta = event.style.meta

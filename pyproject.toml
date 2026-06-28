@@ -100,6 +100,7 @@ packages = ["dunders"]
 [tool.hatch.build.targets.wheel.force-include]
 "dunders/themes/dark.yaml"  = "dunders/themes/dark.yaml"
 "dunders/themes/light.yaml" = "dunders/themes/light.yaml"
+"dunders/HELP.md"           = "dunders/HELP.md"
 
 [tool.hatch.build.targets.sdist]
 include = [

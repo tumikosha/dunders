@@ -1084,6 +1084,11 @@ class DundersApp(App):
                 label="Key Probe",
                 handler=self.action_key_probe,
             ),
+            WindowCommand(
+                id="help.show",
+                label="Help (keys & AI)…",
+                handler=self.action_help_show,
+            ),
         ]
         # Per-panel sort commands. Side-suffixed labels are what the command
         # palette shows; menu items override the label so the dropdown reads
@@ -1314,6 +1319,24 @@ class DundersApp(App):
         self.desktop.add_window(win)
         self.call_after_refresh(content.focus)
 
+    def action_help_show(self) -> None:
+        """Help ▸ Help (keys & AI)… — open the bundled HELP.md in the Markdown
+        viewer (read-only, rendered)."""
+        if self.desktop is None or self._has_active_modal():
+            return
+        help_path = Path(__file__).parent / "HELP.md"
+        try:
+            text = help_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            self.notify(f"Could not open help: {exc}", severity="error")
+            return
+        self._editor_seq += 1
+        self._mount_maximized_content(
+            MarkdownViewerContent.from_text("HELP.md", text),
+            title="Help",
+            win_id=f"help-{self._editor_seq}",
+        )
+
     def action_open_file(self) -> None:
         if self.desktop is None:
             return
@@ -1371,6 +1394,7 @@ class DundersApp(App):
                 MenuItem(label="AI / LLM settings…", command_id="ai.settings"),
                 MenuSeparator(),
                 MenuItem(label="Add current location…", command_id="bookmark.add.menu"),
+                MenuItem(label="Bookmarks…", hotkey="Ctrl+B", command_id="bookmark.open"),
                 *[
                     MenuItem(label=b["label"], command_id=f"bookmark.open.{i}")
                     for i, b in enumerate(list_bookmarks())
@@ -1466,6 +1490,7 @@ class DundersApp(App):
                 ],
             ]),
             Menu("Help", [
+                MenuItem(command_id="help.show"),
                 MenuItem(command_id="help.key_probe"),
             ]),
             # Items are rebuilt on every menu activation by
