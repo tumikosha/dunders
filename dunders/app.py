@@ -1391,10 +1391,9 @@ class DundersApp(App):
                 ],
                 MenuItem(label="Tree (JSON/YAML)", command_id="dunder.open.tree"),
                 MenuSeparator(),
-                MenuItem(label="AI / LLM settings…", command_id="ai.settings"),
-                MenuSeparator(),
                 MenuItem(label="Add current location…", command_id="bookmark.add.menu"),
                 MenuItem(label="Bookmarks…", hotkey="Ctrl+B", command_id="bookmark.open"),
+                *([MenuSeparator()] if list_bookmarks() else []),
                 *[
                     MenuItem(label=b["label"], command_id=f"bookmark.open.{i}")
                     for i, b in enumerate(list_bookmarks())
@@ -1481,6 +1480,8 @@ class DundersApp(App):
                 MenuItem(command_id="panel.toggle_hidden"),  # Alt+.
             ]),
             Menu("Options", [
+                MenuItem(label="AI / LLM settings…", command_id="ai.settings"),
+                MenuSeparator(),
                 MenuItem(label="Cycle theme", command_id="theme.cycle"),
                 MenuItem(label="Edit theme", command_id="theme.edit"),
                 MenuSeparator(),
