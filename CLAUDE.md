@@ -334,6 +334,28 @@ imports `fm`/`windowing`. Public surface re-exported through `dunders.sdk`; the
   The F12 Agent is still a stub.
   Specs: `docs/superpowers/specs/2026-06-22-{llm-foundation,nl-to-command}-design.md`.
 
+### 2.6 `dunders.forms` — form editor
+
+App-agnostic stdlib-only core, never imports `fm`/`windowing`. **Schema format**
+(variant A, TOML/YAML/JSON) → `FormSpec`/`FieldSpec` via `schema.py`; `$`-prefixed
+meta keys (`$required`, `$help`) are parsed and removed, leaving clean field names.
+`looks_form` detects `.form.json`/`.form.toml`/`.form.yaml`. **Type registry** (`types.py`):
+`str/int/real/date/combo/ecombo/clipboard/selected_text/bool/text` → widget kind +
+validator + converter; `date` uses optional `dunders[forms]`/`dateparser` for ISO 8601
+output, passthrough string when absent. `clipboard` auto-fills from system clipboard
+(subprocess, soft-degrade on unavailable); `selected_text` auto-fills from the active
+editor's selection (supplied by the app at launch). **Validation** (`result.py`):
+`validate_all` type-checks and coerces; `build_result` merges defaults + validated
+values into a clean result dict. `dunders/fm/form_dialog.py` — `FormDialog(WindowContent)`:
+scrollable, blocking validation on GO, Cancel; ecombo (no Textual editable combobox) = a
+`Select` widget + "✎ Custom…" swap using `Select.NULL` sentinel. `app.forms` (`FormsService`,
+mirrors `app.ai`): `await app.forms.ask(spec, *, selected_text=None)` → awaitable Future
+resolving to result dict or None. **Launch**: File menu → "Form editor…" (`form.open`,
+hybrid: `.form.json` under cursor else prompt for path); F3/F4/Enter on a `.form.json`
+open the form; result written to `<stem>.result.json` next to the schema (scenario 2) or
+returned via the API (scenario 1, in-memory members not written). Spec/plan:
+`docs/superpowers/specs/2026-06-27-form-editor-design.md`.
+
 ### 3. `dunders.app` — top-level shell
 
 `DundersApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and
@@ -356,6 +378,12 @@ mounts the initial window set based on `launch_mode`
 
 ### Important conventions / gotchas
 
+- **Theming/laying out a Textual dialog?** Read
+  [docs/textual-ui-cookbook.md](docs/textual-ui-cookbook.md) FIRST — it captures
+  the recurring fixes (palette `apply_theme` idiom, `Input`/`Select`/`Checkbox`/
+  `TextArea` border & focus quirks, `SelectOverlay` z-order in modals, bracket
+  checkbox, field spacing, `ShadowButton`, and headless verification) so dialog
+  polish isn't rediscovered each time.
 - **NC F-keys are panel-scoped, not app-bindings.** F3/F4/F5/F6/F7/F8 are
   registered by `FilePanel.get_commands()` and routed via the focused window
   through `CommandRouter`. Editor hotkeys (Save/Find/Split/Fold) come from

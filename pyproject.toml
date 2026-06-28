@@ -61,9 +61,13 @@ db = ["dbset>=0.1", "psycopg2-binary>=2.9", "pymysql>=1.1"]
 # API directly over stdlib HTTP — `pip install dunders` is enough. The extra is
 # kept (empty) so `dunders[ai]` / `dunders[all]` stay valid.
 ai = []
+# Opt-in date recognition for the `date` form-field type. dateparser is BSD;
+# kept out of the default install so the base package stays dependency-light.
+# Absent → a `date` field behaves as a plain string (passthrough).
+forms = ["dateparser>=1.2"]
 # Everything opt-in in one extra (self-referential) — what the quick-install
 # one-liner pulls so a single line installs the full-featured app.
-all = ["dunders[sftp,image,office,db,ai]"]
+all = ["dunders[sftp,image,office,db,ai,forms]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

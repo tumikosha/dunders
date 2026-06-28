@@ -12,6 +12,7 @@ Later phases will: wire commands, file ops, real editor/agent content, etc.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import tempfile
@@ -118,6 +119,9 @@ from dunders.fm.associations import (
     resolve as resolve_association,
 )
 from dunders.windowing.editor import EditorContent
+from dunders.fm.form_dialog import FormDialog
+from dunders.fm.forms_service import FormsService
+from dunders.forms import EXAMPLE_FORM_JSON, SchemaError, looks_form, parse_schema
 
 
 def _theme_label(name: str) -> str:
@@ -296,6 +300,19 @@ class AddBookmarkRequest:
     loc: VfsPath  # the cwd_loc being bookmarked
 
 
+@dataclass
+class FormRequest:
+    """Context payload for a FormDialog: where the result goes."""
+
+    schema_path: "Path | None" = None
+    on_result: "object | None" = None  # callable(result | None) | None
+
+
+@dataclass(frozen=True)
+class FormSchemaPromptRequest:
+    """Marks an InputDialog whose value is a path to a .form.json schema."""
+
+
 LaunchMode = Literal["fm", "editor", "cli", "we", "we-mc"]
 TerminalMode = Literal["relay", "suspend"]
 
@@ -431,6 +448,7 @@ class DundersApp(App):
         from dunders.ai import LlmService
 
         self.ai = LlmService(events=self.events)
+        self.forms = FormsService(self)
         self.plugin_api = PluginApi(
             vfs=self._vfs_registry, events=self.events, ai=self.ai
         )
@@ -908,6 +926,10 @@ class DundersApp(App):
             self._close_modal(event.dialog)
             self._do_open_dunder(ctx.scheme, ctx.spec, password=event.value)
             return
+        if isinstance(ctx, FormSchemaPromptRequest):
+            self._close_modal(event.dialog)
+            self._open_form_source(Path(event.value).expanduser())
+            return
         self._close_modal(event.dialog)
 
     def on_hex_viewer_widget_find_requested(
@@ -1045,6 +1067,7 @@ class DundersApp(App):
             WindowCommand(id="bookmark.open", label="Bookmarks…", handler=self.action_open_bookmarks, hotkey="ctrl+b"),
             WindowCommand(id="cmd.history", label="Command history…", handler=self.action_show_command_history, hotkey="alt+h"),
             WindowCommand(id="ai.settings", label="AI / LLM settings…", handler=self.action_ai_settings),
+            WindowCommand(id="form.open", label="Form editor…", handler=self.action_form_open),
             WindowCommand(id="assoc.edit", label="Edit file associations…", handler=self.action_edit_associations),
             WindowCommand(id="panels.fullscreen", label="Panels Fullscreen", handler=self.action_panels_fullscreen, hotkey="ctrl+p"),
             WindowCommand(
@@ -1370,6 +1393,7 @@ class DundersApp(App):
             ]),
             Menu("File", [
                 MenuItem(command_id="app.open_file"),
+                MenuItem(label="Form editor…", command_id="form.open"),
                 MenuSeparator(),
                 MenuItem(command_id="panel.new"),
                 MenuItem(command_id="panel.view"),
@@ -2674,6 +2698,140 @@ class DundersApp(App):
         if 0 <= index < len(items):
             self._open_bookmark(items[index])
 
+    # --- Form dialog -------------------------------------------------------
+
+    def _active_editor_selection(self) -> str:
+        """Selected text in the focused editor, or "" if none."""
+        win = self.desktop.focused_window if self.desktop else None
+        content = getattr(win, "content", None)
+        editor = getattr(content, "_editor", None)
+        buf = getattr(editor, "buffer", None)
+        if buf is None:
+            return ""
+        try:
+            return buf.get_selected_text() or ""
+        except Exception:
+            return ""
+
+    def _open_form(
+        self,
+        spec,
+        *,
+        schema_path=None,
+        selected_text: str = "",
+        on_result=None,
+    ) -> None:
+        if self.desktop is None:
+            if on_result is not None:
+                on_result(None)
+            return
+        self._remember_active_panel_id()
+        ctx = FormRequest(schema_path=schema_path, on_result=on_result)
+        dialog = FormDialog(spec, selected_text=selected_text, context=ctx)
+        show_modal(
+            self.desktop, dialog, title=spec.title or "Form", size=(76, 22)
+        )
+        self.call_after_refresh(dialog.focus_first)
+
+    def _open_form_from_file(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            spec = parse_schema(data)
+        except (OSError, ValueError, SchemaError) as exc:
+            self.notify(f"Invalid form schema: {exc}", severity="error")
+            return
+        self._open_form(
+            spec,
+            schema_path=path,
+            selected_text=self._active_editor_selection(),
+        )
+
+    def _open_form_source(self, path: Path) -> None:
+        """File ▸ Form editor — open the schema JSON in the text editor to author
+        it; seed an example first when the path does not yet exist."""
+        if not path.exists():
+            self._seed_example_form(path)
+            return
+        self._open_editor_window(path, read_only=False, bypass_form=True)
+
+    def _seed_example_form(self, path: Path) -> None:
+        if not looks_form(path.name):
+            stem = path.name
+            if stem.lower().endswith(".json"):
+                stem = stem[: -len(".json")]
+            path = path.parent / f"{stem}.form.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(EXAMPLE_FORM_JSON, encoding="utf-8")
+        except OSError as exc:
+            self.notify(f"Could not create {path.name}: {exc}", severity="error")
+            return
+        self.notify(f"Created example {path.name}")
+        self._open_editor_window(path, read_only=False, bypass_form=True)
+
+    def _write_form_result(self, schema_path: Path, result: dict) -> None:
+        name = schema_path.name
+        suffix = ".form.json"
+        base = name[: -len(suffix)] if name.lower().endswith(suffix) else schema_path.stem
+        out = schema_path.with_name(base + ".result.json")
+        try:
+            tmp = out.with_name(out.name + ".tmp")
+            tmp.write_text(
+                json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp, out)
+            self.notify(f"Saved {out.name}")
+        except (OSError, ValueError) as exc:
+            self.notify(f"Could not save result: {exc}", severity="error")
+
+    def on_form_dialog_submitted(self, event: "FormDialog.Submitted") -> None:
+        dialog = event.dialog
+        ctx = getattr(dialog, "context", None)
+        result = event.result
+        self._close_modal(dialog)
+        cb = getattr(ctx, "on_result", None)
+        if cb is not None:
+            cb(result)
+            return
+        path = getattr(ctx, "schema_path", None)
+        if path is not None:
+            self._write_form_result(path, result)
+
+    def on_form_dialog_cancelled(self, event: "FormDialog.Cancelled") -> None:
+        dialog = event.dialog
+        ctx = getattr(dialog, "context", None)
+        self._close_modal(dialog)
+        cb = getattr(ctx, "on_result", None)
+        if cb is not None:
+            cb(None)
+
+    # --- Form editor -------------------------------------------------------
+
+    def action_form_open(self) -> None:
+        """File ▸ Form editor… — hybrid: use a .form.json under the cursor,
+        else prompt for a schema path."""
+        if self._has_active_modal():
+            return
+        panel = self._active_panel()
+        if panel is None or self.desktop is None:
+            return
+        # If the cursor sits on a .form.json, open it directly.
+        if 0 <= panel.cursor < len(panel.entries):
+            entry = panel.entries[panel.cursor]
+            path = getattr(entry, "path", None)
+            if path is not None and looks_form(path.name):
+                self._open_form_source(path)
+                return
+        self._remember_active_panel_id()
+        dialog = InputDialog(
+            "Schema path (.form.json):",
+            initial=str(panel.cwd) + "/",
+            context=FormSchemaPromptRequest(),
+        )
+        show_modal(self.desktop, dialog, title="Form editor", size=(60, 5))
+        self.call_after_refresh(dialog.focus_input)
+
     # --- Find file ---------------------------------------------------------
 
     def action_find_file(self) -> None:
@@ -3481,6 +3639,15 @@ class DundersApp(App):
             return
         self._remember_active_panel_id()
         self._editor_seq += 1
+        # A .form.json member opens the form editor in-memory (no schema_path).
+        if looks_form(entry.name):
+            try:
+                spec = parse_schema(json.loads(bytes(data).decode("utf-8")))
+            except (ValueError, SchemaError) as exc:
+                self.notify(f"Invalid form schema: {exc}", severity="error")
+                return
+            self._open_form(spec, selected_text=self._active_editor_selection())
+            return
         # Image bytes → ASCII-art viewer (Pillow opt-in). Without the extra,
         # fall through to the hex view below like any other binary.
         if PILLOW_AVAILABLE and sniff_image(data[:16]):
@@ -3813,7 +3980,7 @@ class DundersApp(App):
         # Unknown handler → safe fallback.
         self._open_editor_window(path, read_only=read_only)
 
-    def _open_editor_window(self, path: Path, *, read_only: bool = False) -> None:
+    def _open_editor_window(self, path: Path, *, read_only: bool = False, bypass_form: bool = False) -> None:
         if self.desktop is None:
             return
         self._remember_active_panel_id()
@@ -3821,6 +3988,10 @@ class DundersApp(App):
         # can coexist (including ones currently minimized in the IconTray).
         self._editor_seq += 1
         seq = self._editor_seq
+        # A .form.json schema opens the form editor, not the text/hex viewer.
+        if not bypass_form and read_only and looks_form(path.name):
+            self._open_form_from_file(path)
+            return
         # F3 on an image → ASCII-art viewer (Pillow opt-in extra). When the
         # extra isn't installed, notify and fall through to the hex/text
         # branch below instead of opening the viewer.
