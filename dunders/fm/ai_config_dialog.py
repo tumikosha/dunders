@@ -249,6 +249,10 @@ class AiConfigDialog(VerticalScroll, WindowContent):
             placeholder = "stored — leave blank to keep" if spec.kind == "secret" else ""
             inp = Input(value=value, password=spec.kind == "secret",
                         placeholder=placeholder)
+            # Solid (non-blinking) cursor: a URL value gets underlined by many
+            # terminals, and a blinking block is then hard to spot inside it —
+            # keep the cursor always visible so the field stays editable.
+            inp.cursor_blink = False
             self._inputs[spec.name] = inp
             label = spec.label + ("" if spec.required else " (optional)")
             widgets.append(Static(label, classes="ai-field-label"))
