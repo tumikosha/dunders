@@ -435,9 +435,11 @@ class ModelPickerDialog(Container, WindowContent):
     can_focus = False
 
     DEFAULT_CSS = """
-    ModelPickerDialog { layout: vertical; width: 60; height: auto; max-height: 22;
-                        padding: 1 1; }
-    ModelPickerDialog DataTable { height: auto; max-height: 18; }
+    ModelPickerDialog { layout: vertical; width: 100%; height: 100%; padding: 1 1; }
+    /* 1fr (not a fixed max-height) so the list fills the modal and scrolls
+       inside it — otherwise a tall list overflows the window on a short
+       terminal and the row cursor runs off-screen with no scrollback. */
+    ModelPickerDialog DataTable { height: 1fr; }
     ModelPickerDialog #mp-buttons { height: 1; align: center middle; margin-top: 1; }
     """
 
