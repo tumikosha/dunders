@@ -23,6 +23,14 @@ from pygments.token import (
 )
 from pygments.util import ClassNotFound
 
+# guess_lexer always returns *some* lexer, ranking by Lexer.analyse_text. On
+# prose / URL-heavy text the winner is noise (e.g. "Tera Term macro", ~0.01,
+# tie-breaking over the plain-text lexer) that fragments every word and URL
+# component into its own token — dozens of syntax spans per line, one Rich
+# segment each on every scroll. Real code clears this floor by a wide margin
+# (Python/Bash score ~1.0), so reject any content guess at or below it.
+_MIN_GUESS_CONFIDENCE = 0.1
+
 
 @dataclass(frozen=True)
 class Span:
@@ -92,9 +100,18 @@ class SyntaxHighlighter:
                 lexer = None
         if lexer is None and sample_text.strip():
             try:
-                lexer = guess_lexer(sample_text)
+                guessed = guess_lexer(sample_text)
             except ClassNotFound:
-                lexer = None
+                guessed = None
+            # Only trust a content guess that scores above the noise floor;
+            # otherwise prose gets a bogus lexer that fragments every line.
+            if guessed is not None:
+                try:
+                    confidence = guessed.analyse_text(sample_text) or 0.0
+                except Exception:
+                    confidence = 0.0
+                if confidence >= _MIN_GUESS_CONFIDENCE:
+                    lexer = guessed
         self._auto_lexer = self._configure(lexer)
 
     def set_language(self, name: str | None) -> None:

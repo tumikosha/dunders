@@ -15,6 +15,27 @@ def test_unknown_language_is_noop():
     assert h.tokenize(["anything", "here"]) == [[], []]
 
 
+def test_guess_lexer_rejects_low_confidence_prose():
+    # Prose / URL-heavy text has no real lexer. guess_lexer would otherwise
+    # pick a noise-floor lexer (e.g. "Tera Term macro", confidence ~0.01) that
+    # fragments every URL into dozens of syntax spans, making render_line emit
+    # ~one Rich segment per URL component on every scroll.
+    h = SyntaxHighlighter()
+    prose = "see https://example.com/path?q=1 and http://foo.bar/baz for details\n" * 30
+    h.detect(None, prose)
+    assert not h.enabled
+    lines = prose.splitlines()
+    assert h.tokenize(lines) == [[] for _ in lines]
+
+
+def test_guess_lexer_accepts_confident_code():
+    h = SyntaxHighlighter()
+    code = "import os\n\ndef main(x):\n    for i in range(x):\n        print(i)\n"
+    h.detect(None, code)  # no filename → content guess
+    assert h.enabled
+    assert "Python" in h.language_name
+
+
 def test_tokenize_python_keyword_and_string():
     h = SyntaxHighlighter()
     h.detect("foo.py", "")
