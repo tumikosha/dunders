@@ -136,6 +136,25 @@ class TestCsvViewerContent:
             assert content.widget.mode == "raw"
             assert "RAW" in content.window_subtitle
 
+    async def test_mode_toolbar_button_toggles_and_relabels(self, tmp_path):
+        from textual.app import App
+
+        class _Host(App):
+            def compose(self):
+                yield CsvViewerContent("a,b,c\n1,2,3\n", display_name="data.csv")
+
+        app = _Host()
+        async with app.run_test():
+            content = app.query_one(CsvViewerContent)
+            # Button shows the mode it switches TO: "[ Raw ]" while in table.
+            assert content._mode_btn.label.plain == "[ Raw ]"
+            content._mode_btn._on_press()  # same path as a click
+            assert content.widget.mode == "raw"
+            assert content._mode_btn.label.plain == "[ Table ]"
+            content._mode_btn._on_press()
+            assert content.widget.mode == "table"
+            assert content._mode_btn.label.plain == "[ Raw ]"
+
     async def test_cycle_delimiter_reparses(self, tmp_path):
         from textual.app import App
 

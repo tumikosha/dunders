@@ -28,11 +28,13 @@ from rich.style import Style as RichStyle
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.geometry import Size
 from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 
+from dunders.fm.image_viewer import _ToolbarButton
 from dunders.windowing.content import WindowContent, WindowCommand
 from dunders.windowing.palette import Palette
 from dunders.fm.line_source import (
@@ -488,11 +490,12 @@ class CsvViewerContent(WindowContent):
     """WindowContent wrapping :class:`CsvViewerWidget` with mode/delimiter toggles."""
 
     DEFAULT_CSS = """
-    CsvViewerContent { background: transparent; }
+    CsvViewerContent { background: transparent; layout: vertical; }
     CsvViewerContent CsvViewerWidget {
         height: 1fr;
         width: 1fr;
     }
+    CsvViewerContent .csv-toolbar { height: 1; background: $panel; padding: 0 1; }
     """
 
     class FilterRequested(Message):
@@ -515,6 +518,9 @@ class CsvViewerContent(WindowContent):
         self.window_title = f"CSV: {name}"
         self._source = source if source is not None else _TextSource(initial_text)
         self._widget = CsvViewerWidget(self._source)
+        # Visible Table⇄Raw toggle (mirrors the Ctrl+T command). Label shows the
+        # mode it switches TO.
+        self._mode_btn = _ToolbarButton(self._mode_label(), on_press=self._toggle_mode)
         self._fill_timer = None
         # Set when the source is a throwaway temp file (a downloaded remote/
         # archive member): unlinked on unmount.
@@ -553,8 +559,14 @@ class CsvViewerContent(WindowContent):
                 inst._cleanup_path = None
         return inst
 
+    def _mode_label(self) -> str:
+        # Show the mode the button switches TO.
+        return "[ Raw ]" if self._widget._mode == "table" else "[ Table ]"
+
     def compose(self) -> ComposeResult:
         yield self._widget
+        with Horizontal(classes="csv-toolbar"):
+            yield self._mode_btn
 
     def on_mount(self) -> None:
         self._widget.focus()
@@ -624,6 +636,7 @@ class CsvViewerContent(WindowContent):
 
     def _toggle_mode(self) -> None:
         self._widget.toggle_mode()
+        self._mode_btn.set_label(self._mode_label())
         self._update_subtitle()
 
     def _cycle_delimiter(self) -> None:
