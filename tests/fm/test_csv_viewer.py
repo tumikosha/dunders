@@ -1,4 +1,5 @@
 from dunders.fm.csv_viewer import (
+    CsvCellDialog,
     CsvViewerContent,
     CsvViewerWidget,
     column_widths,
@@ -355,6 +356,321 @@ class TestFilter:
             await pilot.pause()
             assert content.widget.match_count == 2
             assert isinstance(app.focused, CsvViewerWidget)
+
+
+class TestCellCursor:
+    async def _mount(self, text, size=(40, 12)):
+        from textual.app import App
+
+        content = CsvViewerContent(text, display_name="d.csv")
+
+        class _Host(App):
+            def compose(self):
+                yield content
+
+        return _Host(), content, size
+
+    async def test_arrows_move_cursor_and_clamp(self):
+        text = "name,age,city\n" + "".join(f"p{i},{i},c{i}\n" for i in range(60))
+        app, content, size = await self._mount(text)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            assert w._cursor_disp == 0 and w._cursor_col == 0
+            w.action_scroll_lines(1)
+            assert w._cursor_disp == 1
+            w.action_scroll_cols(1)
+            assert w._cursor_col == 1
+            # Clamp low.
+            w.action_scroll_lines(-9)
+            assert w._cursor_disp == 0
+            w.action_scroll_cols(-9)
+            assert w._cursor_col == 0
+            # Clamp high (3 columns → max col index 2).
+            for _ in range(10):
+                w.action_scroll_cols(1)
+            assert w._cursor_col == 2
+            for _ in range(200):
+                w.action_scroll_lines(1)
+            assert w._cursor_disp == w._body_count() - 1
+            # home/end set the column to first/last.
+            w.action_scroll_home()
+            assert w._cursor_col == 0
+            w.action_scroll_end()
+            assert w._cursor_col == 2
+
+    async def test_scroll_to_cursor_keeps_far_cell_visible(self):
+        text = "name,age,city\n" + "".join(f"p{i},{i},c{i}\n" for i in range(80))
+        app, content, size = await self._mount(text, size=(40, 12))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w.scroll_to(0, 0, animate=False)
+            await pilot.pause()
+            for _ in range(60):
+                w.action_scroll_lines(1)
+            await pilot.pause()
+            sy = int(w.scroll_offset.y)
+            # Cursor renders at y = 1 + (disp - scroll_y); must be on-screen.
+            ry = 1 + (w._cursor_disp - sy)
+            assert 1 <= ry <= w.size.height - 1
+
+    async def test_scroll_to_cursor_keeps_far_right_cell_visible(self):
+        header = ",".join(f"column_{i:02d}" for i in range(20))
+        row = ",".join(f"val{i:02d}" for i in range(20))
+        app, content, size = await self._mount(f"{header}\n{row}\n", size=(30, 10))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w._cursor_disp = 0
+            w.action_scroll_end()  # jump to the last column
+            await pilot.pause()
+            col = w._cursor_col
+            x0 = sum(w._widths[:col]) + 3 * col
+            x1 = x0 + w._widths[col]
+            sx = int(w.scroll_offset.x)
+            body_w = w.size.width - w._gutter_width()
+            assert x0 >= sx and x1 <= sx + body_w
+
+    async def test_cursor_stays_above_horizontal_scrollbar(self):
+        # A WIDE + tall table shows a horizontal scrollbar, which steals the
+        # bottom row. The cursor must stay within the scrollable content region
+        # (not land one line below, hidden under the scrollbar).
+        header = ",".join(f"col{i:02d}" for i in range(20))
+        rows = "".join(
+            ",".join(f"v{i}{r}" for i in range(20)) + "\n" for r in range(60)
+        )
+        app, content, size = await self._mount(f"{header}\n{rows}", size=(40, 12))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w.scroll_to(0, 0, animate=False)
+            await pilot.pause()
+            for _ in range(55):
+                w.action_scroll_lines(1)
+            await pilot.pause()
+            ch = w.scrollable_content_region.height
+            assert ch < w.size.height  # the h-scrollbar really stole a row
+            ry = 1 + (w._cursor_disp - int(w.scroll_offset.y))
+            assert 1 <= ry <= ch - 1  # within content, above the scrollbar
+
+    async def test_cursor_row_renders_highlighted_cell(self):
+        text = "name,age,city\n" + "".join(f"p{i},{i},c{i}\n" for i in range(20))
+        app, content, size = await self._mount(text)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w._cursor_disp = 2
+            w._cursor_col = 1
+            w.scroll_to(0, 0, animate=False)
+            w.refresh()
+            await pilot.pause()
+            # disp=2 renders at y = 1 + (2 - 0) = 3. The cursor cell is drawn
+            # reverse-video (theme-independent), so a reversed segment must exist.
+            strip = w.render_line(3)
+            styles = [seg.style for seg in strip if seg.style is not None]
+            assert any(getattr(s, "reverse", False) for s in styles)
+
+    async def test_enter_opens_dialog_with_full_value(self, tmp_path):
+        from dunders.app import DundersApp
+
+        long_val = "x" * 100  # longer than the table's _MAX_COL_WIDTH cap (48)
+        f = tmp_path / "d.csv"
+        f.write_text(f"name,note\nAlice,{long_val}\nBob,short\n")
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            app._open_editor_window(f, read_only=True)
+            await pilot.pause()
+            content = next(
+                w.content for w in app.desktop.windows
+                if isinstance(w.content, CsvViewerContent)
+            )
+            w = content.widget
+            w._cursor_disp = 0  # source line 1 (Alice)
+            w._cursor_col = 1   # the note column
+            assert w._cursor_cell_value() == long_val
+            w.action_activate()
+            await pilot.pause()
+            await pilot.pause()
+            dialogs = app.query(CsvCellDialog)
+            assert len(dialogs) == 1
+            area = dialogs.first()._area
+            assert area.text == long_val          # un-truncated
+            assert area.read_only is True
+
+    async def test_esc_returns_focus_to_widget_for_cursor_nav(self, tmp_path):
+        from dunders.app import DundersApp
+
+        f = tmp_path / "d.csv"
+        f.write_text("a,b\n1,2\n3,4\n")
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test(size=(60, 12)) as pilot:
+            await pilot.pause()
+            app._open_editor_window(f, read_only=True)
+            await pilot.pause()
+            content = next(
+                w.content for w in app.desktop.windows
+                if isinstance(w.content, CsvViewerContent)
+            )
+            w = content.widget
+            await pilot.press("enter")          # open the cell dialog
+            await pilot.pause()
+            await pilot.pause()
+            assert len(app.query(CsvCellDialog)) == 1
+            await pilot.press("escape")         # close it
+            await pilot.pause()
+            await pilot.pause()
+            assert not app.query(CsvCellDialog)
+            assert w.has_focus                  # focus returned to the table
+            before = (w._cursor_disp, w._cursor_col)
+            await pilot.press("down")           # cursor navigation resumes
+            assert (w._cursor_disp, w._cursor_col) != before
+
+    async def test_click_opens_dialog_on_cell(self, tmp_path):
+        from textual import events
+
+        from dunders.app import DundersApp
+
+        f = tmp_path / "d.csv"
+        f.write_text("name,age,city\n" + "".join(f"p{i},{i},c{i}\n" for i in range(20)))
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            app._open_editor_window(f, read_only=True)
+            await pilot.pause()
+            content = next(
+                w.content for w in app.desktop.windows
+                if isinstance(w.content, CsvViewerContent)
+            )
+            w = content.widget
+            w.scroll_to(0, 0, animate=False)
+            await pilot.pause()
+            gutter = w._gutter_width()
+            # Click on y=2 (display row 1 → source line 2 → "p1"), first column.
+            ev = events.Click(
+                w, x=gutter + 1, y=2, delta_x=0, delta_y=0, button=1,
+                shift=False, meta=False, ctrl=False,
+            )
+            w.on_click(ev)
+            await pilot.pause()
+            await pilot.pause()
+            assert w._cursor_disp == 1 and w._cursor_col == 0
+            dialogs = app.query(CsvCellDialog)
+            assert len(dialogs) == 1
+            assert dialogs.first()._area.text == "p1"
+
+    async def test_click_on_gutter_is_guarded(self):
+        from textual import events
+
+        # A click inside the line-number gutter is out of range: the cursor must
+        # not move (the guard returns before any cell mapping).
+        text = "name,age\n" + "".join(f"p{i},{i}\n" for i in range(10))
+        app, content, size = await self._mount(text)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w._cursor_disp = 0
+            w._cursor_col = 0
+            ev = events.Click(
+                w, x=0, y=2, delta_x=0, delta_y=0, button=1,
+                shift=False, meta=False, ctrl=False,
+            )
+            w.on_click(ev)
+            await pilot.pause()
+            assert w._cursor_disp == 0 and w._cursor_col == 0
+
+    async def test_cell_dialog_preserves_newlines(self):
+        # The read-only TextArea keeps embedded newlines verbatim.
+        dialog = CsvCellDialog("line1\nline2\nline3")
+        assert dialog._area.text == "line1\nline2\nline3"
+        assert dialog._area.read_only is True
+
+    async def test_cell_dialog_unescapes_literal_newlines(self):
+        # A cell parsed from one physical line carries the literal escape "\n"
+        # (backslash + n); the dialog renders those as real line breaks.
+        dialog = CsvCellDialog("a\\nb\\r\\nc")
+        assert dialog._area.text == "a\nb\nc"
+
+    async def test_cell_dialog_painted_from_palette(self, tmp_path):
+        # Per docs/textual-ui-cookbook.md the dialog must paint its surface from
+        # the palette (not keep Textual's stock $surface), and survive a theme
+        # switch.
+        from dunders.app import DundersApp
+        from dunders.windowing.helpers import show_modal
+
+        app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            dialog = CsvCellDialog("hello")
+            show_modal(app.desktop, dialog, title="Cell", size=(60, 12))
+            await pilot.pause()
+            await pilot.pause()
+            assert dialog.styles.background is not None       # surface painted
+            assert dialog._area.styles.background is not None  # text area painted
+            assert dialog._area.highlight_cursor_line is False
+            app.action_cycle_theme()
+            dialog.apply_theme()
+            await pilot.pause()
+            assert app.query_one(CsvCellDialog) is dialog      # survived
+
+    async def test_horizontal_wheel_does_not_scroll_x(self):
+        from textual import events
+
+        header = ",".join(f"column_{i:02d}" for i in range(20))
+        row = ",".join(f"val{i:02d}" for i in range(20))
+        app, content, size = await self._mount(f"{header}\n{row}\n", size=(30, 10))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w.scroll_to(10, 0, animate=False)
+            await pilot.pause()
+            x_before = int(w.scroll_offset.x)
+            ev = events.MouseScrollLeft(
+                w, x=5, y=5, delta_x=-1, delta_y=0, button=0,
+                shift=False, meta=False, ctrl=False,
+            )
+            w._on_mouse_scroll_left(ev)
+            await pilot.pause()
+            assert int(w.scroll_offset.x) == x_before
+            ev2 = events.MouseScrollRight(
+                w, x=5, y=5, delta_x=1, delta_y=0, button=0,
+                shift=False, meta=False, ctrl=False,
+            )
+            w._on_mouse_scroll_right(ev2)
+            await pilot.pause()
+            assert int(w.scroll_offset.x) == x_before
+
+    async def test_vertical_scroll_still_works(self):
+        text = "name,age\n" + "".join(f"p{i},{i}\n" for i in range(60))
+        app, content, size = await self._mount(text)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            w.scroll_to(0, 0, animate=False)
+            await pilot.pause()
+            w.scroll_to(0, 5, animate=False)
+            await pilot.pause()
+            assert int(w.scroll_offset.y) == 5
+
+    async def test_raw_mode_arrows_still_scroll(self):
+        text = "name,age\n" + "".join(f"p{i},{i}\n" for i in range(60))
+        app, content, size = await self._mount(text)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            w = content.widget
+            content._toggle_mode()
+            assert w.mode == "raw"
+            w.scroll_to(0, 0, animate=False)
+            await pilot.pause()
+            y0 = int(w.scroll_offset.y)
+            w.action_scroll_lines(3)
+            await pilot.pause()
+            assert int(w.scroll_offset.y) == y0 + 3
+            # Raw mode never opens the cell dialog.
+            w.action_activate()
+            await pilot.pause()
+            assert len(app.query(CsvCellDialog)) == 0
 
 
 class TestRemoteMember:

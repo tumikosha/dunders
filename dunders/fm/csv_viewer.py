@@ -26,17 +26,23 @@ from rich.cells import cell_len, set_cell_size
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.color import Color
+from textual.containers import Container, Horizontal
 from textual.geometry import Size
 from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
+from textual.widgets import TextArea
 
+from dunders.fm.dialogs import ShadowButton
 from dunders.fm.image_viewer import _ToolbarButton
 from dunders.windowing.content import WindowContent, WindowCommand
+from dunders.windowing.helpers import ModalWindow, show_modal
 from dunders.windowing.palette import Palette
+from dunders.windowing.window import Window
 from dunders.fm.line_source import (
     LineSource as _LineSource,
     TextSource as _TextSource,
@@ -53,6 +59,7 @@ __all__ = [
     "fit_cell",
     "CsvViewerContent",
     "CsvViewerWidget",
+    "CsvCellDialog",
 ]
 
 # How many leading rows to sample for column widths / delimiter. The whole
@@ -209,6 +216,14 @@ def _split_line(line: str, delimiter: str) -> list[str]:
 class CsvViewerWidget(ScrollView):
     """Renders parsed CSV as an aligned table (or the raw text)."""
 
+    class CellActivated(Message):
+        """Posted (Enter/click in table mode) with the full, un-truncated value
+        of the cursor cell so the wrapper can open the view dialog."""
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
     DEFAULT_CSS = """
     CsvViewerWidget {
         background: $surface;
@@ -227,6 +242,7 @@ class CsvViewerWidget(ScrollView):
         Binding("pagedown", "scroll_page(1)",   show=False),
         Binding("home",     "scroll_home",      show=False),
         Binding("end",      "scroll_end",       show=False),
+        Binding("enter",    "activate",         show=False),
     ]
 
     def __init__(self, source: _LineSource) -> None:
@@ -242,6 +258,11 @@ class CsvViewerWidget(ScrollView):
         self._filter: str | None = None
         self._matches: list[int] | None = None
         self._table_body: list[int] = []
+        # Cell cursor (table mode only): position over the body display rows and
+        # the current column. Arrows move the cursor (not the viewport); Enter /
+        # click opens the full-cell dialog.
+        self._cursor_disp: int = 0
+        self._cursor_col: int = 0
         self._reparse()
 
     # --- state ----------------------------------------------------------
@@ -399,6 +420,7 @@ class CsvViewerWidget(ScrollView):
         gutter_w = self._gutter_width()
         body_w = max(1, self.size.width - gutter_w)
 
+        cursor_col: int | None = None
         if self._mode == "table":
             # Row 0 is the column-name header — freeze it at the top so it stays
             # visible while the (possibly filtered) data rows scroll under it.
@@ -406,8 +428,12 @@ class CsvViewerWidget(ScrollView):
                 idx = 0 if self._source.line_count() > 0 else -1
                 number = None
             else:
-                idx = self._body_idx(scroll_y + y - 1)
+                disp = scroll_y + y - 1
+                idx = self._body_idx(disp)
                 number = idx if idx >= 0 else None
+                # Highlight the cursor's cell on its row (never the header).
+                if idx >= 0 and disp == self._cursor_disp:
+                    cursor_col = self._cursor_col
         else:
             idx = self._body_idx(scroll_y + y)
             number = idx + 1 if idx >= 0 else None
@@ -416,7 +442,7 @@ class CsvViewerWidget(ScrollView):
             body = (
                 self._render_raw_line(idx)
                 if self._mode == "raw"
-                else self._render_table_line(idx)
+                else self._render_table_line(idx, cursor_col=cursor_col)
             )
         else:
             body = Strip([])
@@ -440,10 +466,13 @@ class CsvViewerWidget(ScrollView):
         text = Text(self._source.line(idx), style=self._rich_style("editor.text"))
         return Strip(text.render(self.app.console))
 
-    def _render_table_line(self, idx: int) -> Strip:
+    def _render_table_line(self, idx: int, *, cursor_col: int | None = None) -> Strip:
         is_header = idx == 0
         cell_style = self._rich_style("editor.text")
-        header_style = self._rich_style("menu.item.active") if is_header else cell_style
+        base_style = self._rich_style("menu.item.active") if is_header else cell_style
+        # Reverse-video so the cursor cell is unmistakable in ANY theme (a palette
+        # role like menu.item.active can be too low-contrast to read as a cursor).
+        cursor_style = cell_style + RichStyle(reverse=True, bold=True)
         sep_style = self._rich_style("editor.line_numbers")
         text = Text(style=self.rich_style)
         # Parse just this one visible line (lazy — never the whole file).
@@ -455,35 +484,283 @@ class CsvViewerWidget(ScrollView):
         for i in range(ncols):
             width = self._widths[i] if i < len(self._widths) else _MAX_COL_WIDTH
             value = row[i] if i < len(row) else ""
-            text.append(fit_cell(value, width), style=header_style)
+            style = cursor_style if i == cursor_col else base_style
+            text.append(fit_cell(value, width), style=style)
             if i != last:
                 text.append(_COL_SEP, style=sep_style)
         return Strip(text.render(self.app.console))
 
-    # --- scroll actions -------------------------------------------------
+    # --- cursor (table mode) --------------------------------------------
+
+    def _ncols_at_cursor(self) -> int:
+        """Column count = sampled widths, falling back to the cursor row's own
+        field count (ragged rows) so the cursor can reach every field."""
+        n = len(self._widths)
+        idx = self._body_idx(self._cursor_disp)
+        if idx >= 0:
+            n = max(n, len(_split_line(self._source.line(idx), self._delimiter)))
+        return max(1, n)
+
+    def _clamp_cursor(self) -> None:
+        body = self._body_count()
+        if body <= 0:
+            self._cursor_disp = 0
+        else:
+            self._cursor_disp = max(0, min(self._cursor_disp, body - 1))
+        ncols = self._ncols_at_cursor()
+        self._cursor_col = max(0, min(self._cursor_col, ncols - 1))
+
+    def _move_cursor(self, *, drow: int = 0, dcol: int = 0,
+                     to_col: int | None = None) -> None:
+        self._cursor_disp += drow
+        if to_col is not None:
+            self._cursor_col = to_col
+        else:
+            self._cursor_col += dcol
+        self._clamp_cursor()
+        self._scroll_to_cursor()
+        self.refresh()
+
+    def _scroll_to_cursor(self) -> None:
+        """Adjust scroll_offset so the cursor cell is visible.
+
+        Vertically: the cursor's display row renders at ``y = 1 + (disp -
+        scroll_y)`` (y==0 is the frozen header), so keep that y within
+        ``[1, height-1]``. Horizontally: keep the cursor column's body x-range
+        within ``[scroll_x, scroll_x + body_w]``."""
+        scroll_x = int(self.scroll_offset.x)
+        scroll_y = int(self.scroll_offset.y)
+        # Use the scrollable content region (excludes the scrollbars) — using
+        # self.size would let the cursor land on the row hidden under a
+        # horizontal scrollbar (one line below the visible area).
+        region = self.scrollable_content_region
+        height = max(1, region.height)
+        # Vertical: y = 1 + (disp - scroll_y) must be in [1, height-1].
+        if self._cursor_disp < scroll_y:
+            scroll_y = self._cursor_disp
+        elif self._cursor_disp > scroll_y + (height - 2):
+            scroll_y = self._cursor_disp - (height - 2)
+        scroll_y = max(0, scroll_y)
+        # Horizontal: the cursor column's body x-range within the body viewport.
+        col = self._cursor_col
+        x0 = sum(self._widths[:col]) + len(_COL_SEP) * col
+        w = self._widths[col] if col < len(self._widths) else _MAX_COL_WIDTH
+        x1 = x0 + w
+        body_w = max(1, region.width - self._gutter_width())
+        if x0 < scroll_x:
+            scroll_x = x0
+        elif x1 > scroll_x + body_w:
+            scroll_x = x1 - body_w
+        scroll_x = max(0, scroll_x)
+        if scroll_x != int(self.scroll_offset.x) or scroll_y != int(self.scroll_offset.y):
+            self.scroll_to(scroll_x, scroll_y, animate=False)
+
+    def _cursor_cell_value(self) -> str:
+        """The full (un-truncated) value of the cursor cell, with ``\\n`` kept."""
+        idx = self._body_idx(self._cursor_disp)
+        if idx < 0:
+            return ""
+        fields = _split_line(self._source.line(idx), self._delimiter)
+        col = self._cursor_col
+        return fields[col] if 0 <= col < len(fields) else ""
+
+    def _activate_cursor(self) -> None:
+        if self._mode != "table" or self._body_count() <= 0:
+            return
+        self.post_message(self.CellActivated(self._cursor_cell_value()))
+
+    # --- mouse ----------------------------------------------------------
+
+    def on_click(self, event: events.Click) -> None:
+        """Table mode: map the click to a cell, move the cursor there, open the
+        dialog. Out-of-range clicks (gutter, past last row/col) are ignored."""
+        if self._mode != "table" or self._body_count() <= 0:
+            return
+        gutter_w = self._gutter_width()
+        if event.x < gutter_w:
+            return  # gutter — no cell
+        scroll_x = int(self.scroll_offset.x)
+        scroll_y = int(self.scroll_offset.y)
+        # y==0 is the frozen header; data rows start at y==1.
+        disp = scroll_y if event.y == 0 else scroll_y + (event.y - 1)
+        if disp < 0 or disp >= self._body_count():
+            return
+        bx = event.x - gutter_w + scroll_x
+        if bx < 0:
+            return
+        # Walk columns accumulating width + separator until bx lands in one.
+        ncols = len(self._widths)
+        col = None
+        acc = 0
+        for i in range(ncols):
+            w = self._widths[i]
+            if bx < acc + w:
+                col = i
+                break
+            acc += w + len(_COL_SEP)
+            if bx < acc:  # landed on the separator — treat as this column
+                col = i
+                break
+        if col is None:
+            return  # past the last column
+        self._cursor_disp = disp
+        self._cursor_col = col
+        self._clamp_cursor()
+        self.refresh()
+        self._activate_cursor()
+
+    def _on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
+        # Disable horizontal wheel scrolling (trackpads/tilt wheels) — it made
+        # the table drift sideways unexpectedly. Vertical wheel is untouched.
+        event.stop()
+        event.prevent_default()
+
+    def _on_mouse_scroll_right(self, event: events.MouseScrollRight) -> None:
+        event.stop()
+        event.prevent_default()
+
+    # --- scroll / navigation actions ------------------------------------
 
     def action_scroll_lines(self, delta: int) -> None:
+        if self._mode == "table":
+            self._move_cursor(drow=delta)
+            return
         self.scroll_to(
             self.scroll_offset.x, self.scroll_offset.y + delta, animate=False
         )
 
     def action_scroll_cols(self, delta: int) -> None:
+        if self._mode == "table":
+            # Cursor moves one column per arrow (the binding passes ±4 for the
+            # raw-mode scroll step, but a cell cursor steps by one).
+            self._move_cursor(dcol=1 if delta > 0 else -1)
+            return
         self.scroll_to(
             self.scroll_offset.x + delta, self.scroll_offset.y, animate=False
         )
 
     def action_scroll_page(self, sign: int) -> None:
         page = max(1, self.size.height - 2)
+        if self._mode == "table":
+            self._move_cursor(drow=sign * page)
+            return
         self.scroll_to(
             self.scroll_offset.x, self.scroll_offset.y + sign * page, animate=False
         )
 
     def action_scroll_home(self) -> None:
+        if self._mode == "table":
+            self._move_cursor(to_col=0)
+            return
         self.scroll_to(0, 0, animate=False)
 
     def action_scroll_end(self) -> None:
+        if self._mode == "table":
+            self._move_cursor(to_col=self._ncols_at_cursor() - 1)
+            return
         rows = self.virtual_size.height  # respects the active filter
         self.scroll_to(0, max(0, rows - max(1, self.size.height)), animate=False)
+
+    def action_activate(self) -> None:
+        self._activate_cursor()
+
+
+class CsvCellDialog(Container, WindowContent):
+    """A read-only modal showing one CSV cell's full (un-truncated) value.
+
+    Mirrors ``db_console.CellEditDialog`` but view-only: the value is shown in a
+    read-only, scrollable ``TextArea`` (newlines preserved); ``Close``/Esc
+    dismiss. Like ``SqlHistoryDialog`` the dialog posts ``Window.Closed`` up to
+    the enclosing ``ModalWindow`` itself (its ``Dismissed`` message has no
+    handler)."""
+
+    DEFAULT_CSS = """
+    CsvCellDialog { layout: vertical; width: 80; height: 1fr; padding: 1 1; }
+    CsvCellDialog #cc-edit { height: 1fr; border: none; }
+    CsvCellDialog #cc-edit:focus { border: none; }
+    CsvCellDialog #cc-buttons { height: 1; align: center middle; margin-top: 1; }
+    """
+
+    BINDINGS = [Binding("escape", "close", show=False)]
+
+    def __init__(self, value: str) -> None:
+        super().__init__()
+        self.window_title = "Cell"
+        self._value = value
+        # A cell parsed from one physical line can't hold a real newline, so
+        # exported data carries the literal escape ``\n`` (backslash + n). Show
+        # those as actual line breaks so multi-line content reads naturally.
+        self._area = TextArea(self._unescape(value), read_only=True, id="cc-edit")
+
+    @staticmethod
+    def _unescape(text: str) -> str:
+        """Turn literal ``\\r\\n`` / ``\\n`` / ``\\r`` escapes into real line
+        breaks (real newlines already in the text are left untouched)."""
+        return (
+            text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+        )
+
+    def compose(self) -> ComposeResult:
+        yield self._area
+        with Horizontal(id="cc-buttons"):
+            yield ShadowButton("Close", id="cc-close",
+                               face_bg="rgb(80,80,90)", hotkey="c")
+
+    def on_mount(self) -> None:
+        # Read-only: no clashing current-line highlight block (see UI cookbook).
+        self._area.highlight_cursor_line = False
+        self.apply_theme()
+        self.call_after_refresh(self._area.focus)
+
+    def apply_theme(self) -> None:
+        """Paint the surface + read-only editor from the active palette so the
+        dialog matches the skin instead of Textual's stock $surface look (see
+        docs/textual-ui-cookbook.md). CSS stays layout-only."""
+        pal = self._get_palette()
+        if pal is None:
+            self.refresh()
+            return
+        content = pal.get("window.content")
+        sunken = pal.get("desktop.background")
+        area_bg = sunken.bg or content.bg
+        # Dialog surface.
+        if content.bg is not None:
+            self.styles.background = content.bg
+        if content.fg is not None:
+            self.styles.color = content.fg
+        # The read-only text area: sunken palette background, no Textual tint,
+        # so the field reads as a themed panel (border removed via CSS).
+        with suppress(Exception):
+            if area_bg is not None:
+                self._area.styles.background = area_bg
+            if content.fg is not None:
+                self._area.styles.color = content.fg
+            self._area.styles.background_tint = Color(0, 0, 0, 0)
+        self.refresh()
+
+    def _get_palette(self) -> Palette | None:
+        with suppress(Exception):
+            for ancestor in self.ancestors_with_self:
+                pal = getattr(ancestor, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        return None
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        if event.button.id == "cc-close":
+            self._dismiss_modal()
+
+    def action_close(self) -> None:
+        self._dismiss_modal()
+
+    def _dismiss_modal(self) -> None:
+        node = self
+        while node is not None:
+            if isinstance(node, ModalWindow):
+                node.post_message(Window.Closed(node))
+                return
+            node = getattr(node, "parent", None)
 
 
 class CsvViewerContent(WindowContent):
@@ -576,6 +853,12 @@ class CsvViewerContent(WindowContent):
         if not self._source.is_complete():
             self._fill_timer = self.set_interval(0.05, self._fill_tick)
 
+    def on_window_focus(self) -> None:
+        # Called by Desktop.focus_window when this window (re)gains focus — e.g.
+        # after the cell dialog closes. Route focus into the scrollable widget so
+        # cell-cursor navigation resumes instead of dying on the content wrapper.
+        self._widget.focus()
+
     def _fill_tick(self) -> None:
         more = self._source.index_batch(_FILL_BATCH_LINES)
         self._widget._resize_canvas()
@@ -645,6 +928,20 @@ class CsvViewerContent(WindowContent):
 
     def _request_filter(self) -> None:
         self.post_message(CsvViewerContent.FilterRequested(self))
+
+    def on_csv_viewer_widget_cell_activated(
+        self, event: "CsvViewerWidget.CellActivated"
+    ) -> None:
+        """Open the read-only full-cell dialog for the activated cell."""
+        event.stop()
+        desktop = getattr(self.app, "desktop", None)
+        if desktop is None:
+            from dunders.windowing import Desktop
+            with suppress(Exception):
+                desktop = self.app.query_one(Desktop)
+        if desktop is None:
+            return
+        show_modal(desktop, CsvCellDialog(event.value), title="Cell", size=(80, 20))
 
     def get_commands(self) -> list[WindowCommand]:
         return [
