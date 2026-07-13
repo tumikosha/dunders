@@ -1067,20 +1067,108 @@ async def test_docker_index_header_replaces_size_date_with_actions(monkeypatch, 
     async with app.run_test():
         panel = app._active_panel()
         panel.view_mode = PanelViewMode.FULL
-        # Container index → header shows "Actions", not Size/Date.
-        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
-        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)),
+        # Container index (v2 loc) → header shows "Actions", not Size/Date.
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("containers", "container:web")),
                                    name="web", size=0, mtime=0.0, is_dir=True,
                                    extra={"docker.state": "running"})]
         head = "".join(seg.text for seg in panel._render_header(80))
-        assert "Actions" in head
+        # "Actions" label may be truncated to "Action" when the cluster is
+        # narrow (max_applicable × _ACTION_CELL < 7 chars).
+        assert "Action" in head
         assert "Size" not in head and "Date" not in head
-        # Inside a container (real files) → normal Size/Date header.
-        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("web",))
-        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web","etc")),
+        # Inside a container's FS (v2 loc, cfs level) → normal Size/Date header.
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers", "container:web"))
+        panel.entries = [FileEntry(loc=VfsPath(scheme="docker", root="", parts=("containers", "container:web", "etc")),
                                    name="etc", size=4096, mtime=1.0, is_dir=True)]
         head2 = "".join(seg.text for seg in panel._render_header(80))
         assert "Size" in head2 and "Date" in head2 and "Actions" not in head2
+
+
+async def test_docker_volume_usedby_column_left_aligned(monkeypatch, tmp_path):
+    # The "Used by" column value renders left-aligned (not centred like the
+    # numeric/enum columns), so short container names hug the left edge.
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        panel._panel_size = (100, 25)
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("volumes",))
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="",
+                                  parts=("volumes", "volume:data")),
+                      name="data", size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.size": "1MB", "docker.driver": "local",
+                             "docker.usedby": "web"}),
+        ]
+        layout = panel._provider_layout(100)
+        assert layout is not None
+        # Locate the "Used by" column's x-range and slice it out of the row.
+        cols, _name_w, ranges, _bx = layout
+        (x0, x1, _col) = next(r for r in ranges if r[2].key == "docker.usedby")
+        row = "".join(s.text for s in panel._render_entry_row(0, 100))
+        cell = row[x0:x1]
+        assert cell.startswith("web")           # left-aligned, not "   web   "
+        assert cell.strip() == "web"
+
+
+async def test_docker_action_icons_highlight_on_hover(monkeypatch, tmp_path):
+    # Hovering an action icon marks it and repaints that cell with the highlight
+    # style; leaving the panel clears it.
+    from types import SimpleNamespace
+
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        panel._panel_size = (80, 25)
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="",
+                                  parts=("containers", "container:web")),
+                      name="web", size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "running"}),
+        ]
+        spans = panel._action_spans(0, 80)
+        assert spans
+        start = spans[0][0]
+
+        # Hit-test: viewport row 1 is entry 0 (header is row 0). On the icon →
+        # (idx, start); off the cluster (Name field) → None.
+        assert panel._action_at(start, 1) == (0, start)
+        assert panel._action_at(0, 1) is None
+        # Header row and footer are not hoverable.
+        assert panel._action_at(start, 0) is None
+
+        # A mouse move over the icon sets the hover; leaving clears it.
+        panel._hover_action = None
+        panel.on_mouse_move(SimpleNamespace(x=start, y=1))
+        assert panel._hover_action == (0, start)
+
+        # The hovered cell repaints differently from the un-hovered render.
+        panel._hover_action = None
+        plain = [(s.text, s.style) for s in panel._render_entry_row(0, 80)]
+        panel._hover_action = (0, start)
+        hot = [(s.text, s.style) for s in panel._render_entry_row(0, 80)]
+        assert plain != hot
+        # The highlight carries a real style (menu.item.active → has a bg).
+        hstyle = panel._action_hover_style(panel._base_style())
+        assert hstyle.bgcolor is not None
+
+        panel.on_leave(SimpleNamespace())
+        assert panel._hover_action is None
 
 
 async def test_docker_status_column_layout_header_and_sort(monkeypatch, tmp_path):
@@ -1093,42 +1181,42 @@ async def test_docker_status_column_layout_header_and_sort(monkeypatch, tmp_path
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test():
         panel = app._active_panel()
-        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
         panel.view_mode = PanelViewMode.FULL
         panel._panel_size = (80, 25)
 
-        # The provider contributes a single "S" column at the index.
+        db = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("db",)), name="db",
+                       size=0, mtime=0.0, is_dir=True,
+                       extra={"docker.state": "exited", "glyph": "■", "glyph_role": "muted"})
+        web = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
+                        size=0, mtime=0.0, is_dir=True,
+                        extra={"docker.state": "running", "glyph": "▶", "glyph_role": "success"})
+        panel.entries = [web, db]
+
+        # The provider contributes Image + Status columns; the "S" state column
+        # was merged into the right-side Actions cluster.
         layout = panel._provider_layout(80)
         assert layout is not None
         cols = layout[0]
-        assert [c.label for c in cols] == ["S"]
+        assert [c.label for c in cols] == ["Image", "Status"]
 
-        # Header shows Name + S + Actions, no Size/Date.
+        # Header shows Name + Image + Status + Actions, no Size/Date and no
+        # standalone S column header.
         head = "".join(s.text for s in panel._render_header(80))
-        assert "Name" in head and "S" in head and "Actions" in head
+        assert "Name" in head and "Image" in head and "Status" in head
+        assert "Action" in head
         assert "Size" not in head and "Date" not in head
 
-        # Clicking the S header maps to the column; sorting orders running first.
-        s_col = cols[0]
-        s_x = layout[2][0][0]
-        assert panel._provider_header_col_at(s_x, layout) is s_col
-
-        db = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("db",)), name="db",
-                       size=0, mtime=0.0, is_dir=True,
-                       extra={"docker.state": "exited", "glyph": "■"})
-        web = FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
-                        size=0, mtime=0.0, is_dir=True,
-                        extra={"docker.state": "running", "glyph": "▶"})
-
-        # _apply_rows honours the active sort key. By S: running first (containers
-        # are all dirs, so this only works via the key path that bypasses the
-        # dirs-alphabetical rule).
-        panel._sort_key_id, panel._sort_key = s_col.key, s_col.sort_key
+        # Running-first order now comes from the provider default sort (there is
+        # no clickable state header anymore).
+        ds = panel._provider_default_sort(panel.cwd_loc)
+        assert ds is not None and ds[0] == "docker.state"
+        panel._sort_key_id, panel._sort_key = ds[0], ds[1]
         panel.sort_descending = False
         panel._apply_rows([db, web])
         assert [e.name for e in panel.entries] == ["web", "db"]
 
-        # By name, honouring direction (also bypasses the dirs rule).
+        # By name, honouring direction (bypasses the dirs-alphabetical rule).
         panel._sort_key_id, panel._sort_key = "name", lambda e: e.name.lower()
         panel.sort_descending = False
         panel._apply_rows([db, web])
@@ -1145,7 +1233,7 @@ async def test_docker_status_column_layout_header_and_sort(monkeypatch, tmp_path
         panel._sort_active("name", lambda e: e.name.lower())
         assert panel.sort_descending is True
 
-        # The S column cells render the state glyphs.
+        # The state glyphs now render in the Actions cluster area (not a column).
         panel._sort_key_id, panel._sort_key = None, None
         panel._apply_rows([web, db])
         rows_text = "".join(
@@ -1154,6 +1242,323 @@ async def test_docker_status_column_layout_header_and_sort(monkeypatch, tmp_path
             for s in panel._render_entry_row(i, 80)
         )
         assert "▶" in rows_text and "■" in rows_text
+
+        # The glyph sits at the head of the cluster, one cell left of the first
+        # action icon, and is PASSIVE: a click on it runs no action, while a
+        # click on the first action icon still resolves to that action.
+        spans = panel._action_spans(0, 80)
+        assert spans
+        glyph_x = spans[0][0] - panel._ACTION_CELL
+        assert glyph_x >= layout[3]  # within the reserved cluster area
+        runs = []
+        monkeypatch.setattr(app, "_run_provider_action",
+                            lambda action, targets: runs.append(action.id))
+        assert panel._maybe_run_action_click(spans[0][0], 0) is True
+        assert panel._maybe_run_action_click(glyph_x, 0) is False
+        assert len(runs) == 1
+
+
+async def test_docker_grouping_levels_hide_epoch_date_column(monkeypatch, tmp_path):
+    # Regression: at pure grouping levels (top: sections; a compose project's
+    # services) Docker entries carry mtime=0, so the default "Date" column would
+    # only ever show the epoch (1970-01-01). Those levels render Name-only.
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        panel._panel_size = (80, 25)
+
+        # Top level: the four section directories carry mtime=0. The header must
+        # never show the epoch "Date" column (images/networks/volumes contribute
+        # prune/pull actions, so the top index uses the Actions cluster; either
+        # way no Size/Date leaks in).
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=())
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=(s,)),
+                      name=s, size=0, mtime=0.0, is_dir=True)
+            for s in ("containers", "images", "networks", "volumes")
+        ]
+        assert panel._hide_default_columns() is True
+        head = "".join(seg.text for seg in panel._render_header(80))
+        assert "Size" not in head and "Date" not in head
+        rows = "".join(
+            s.text
+            for i in range(len(panel.entries))
+            for s in panel._render_entry_row(i, 80)
+        )
+        assert "containers" in rows and "volumes" in rows
+        assert "1970" not in rows
+
+        # A compose project's services list is a pure grouping level (no columns,
+        # no applicable actions) → Name-only, so no epoch Date anywhere.
+        panel.cwd_loc = VfsPath(scheme="docker", root="",
+                                parts=("compose:myproj",))
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="",
+                                  parts=("compose:myproj", "service:web")),
+                      name="web", size=0, mtime=0.0, is_dir=True),
+        ]
+        assert panel._hide_default_columns() is True
+        assert panel._shows_action_column(80) is False
+        head2 = "".join(seg.text for seg in panel._render_header(80))
+        assert "Name" in head2 and "Date" not in head2 and "Size" not in head2
+        srows = "".join(s.text for s in panel._render_entry_row(0, 80))
+        assert "web" in srows and "1970" not in srows
+        # A blank row below the listing is plain (no stray Size/Date bars).
+        blank = "".join(s.text for s in panel._render_entry_row(99, 80))
+        assert blank.strip() == ""
+
+        # Inside a container's filesystem (real files, real dates) the default
+        # Size/Date columns stay.
+        panel.cwd_loc = VfsPath(scheme="docker", root="",
+                                parts=("containers", "container:web"))
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="",
+                                  parts=("containers", "container:web", "etc")),
+                      name="etc", size=4096, mtime=1.0, is_dir=True),
+        ]
+        assert panel._hide_default_columns() is False
+        head3 = "".join(seg.text for seg in panel._render_header(80))
+        assert "Size" in head3 and "Date" in head3
+
+
+async def test_docker_wide_panel_action_cluster_no_overflow(monkeypatch, tmp_path):
+    # Regression: the Actions cluster (incl. the merged state glyph) must stay
+    # within the panel width — rows and header fill exactly `width`, no spill.
+    # Width is measured in terminal CELLS (not chars): a 2-cell emoji icon such
+    # as 🧹 (Prune) is one char but two columns, and only the cell count reflects
+    # what actually reaches the panel edge / window border.
+    from rich.cells import cell_len
+
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+        panel.view_mode = PanelViewMode.FULL
+        WIDTH = 120
+        panel._panel_size = (WIDTH, 25)
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
+                      size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "running", "glyph": "▶", "glyph_role": "success"}),
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=("db",)), name="db",
+                      size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "exited", "glyph": "■", "glyph_role": "muted"}),
+        ]
+        layout = panel._provider_layout(WIDTH)
+        assert layout is not None
+        assert layout[1] >= 1  # name_w stays positive
+        for i in range(len(panel.entries)):
+            row_len = sum(cell_len(s.text) for s in panel._render_entry_row(i, WIDTH))
+            assert row_len == WIDTH, f"row {i} width {row_len} != {WIDTH}"
+            for start, end, _a in panel._action_spans(i, WIDTH):
+                assert 0 <= start < end <= WIDTH
+        head_len = sum(cell_len(s.text) for s in panel._render_header(WIDTH))
+        assert head_len == WIDTH
+
+
+async def test_docker_wide_image_row_cell_width_no_doubled_border(monkeypatch, tmp_path):
+    """Regression: an image row exposes the Prune action whose icon is the
+    2-CELL emoji 🧹.  The action cell was sized by *characters* (`icon + " "`,
+    2 chars) but rendered as 3 terminal cells, making the whole strip one cell
+    wider than the panel.  On a wide (maximized) panel that overflow spilled
+    onto the window's right border, drawing a second full-height vertical line
+    (a doubled frame).
+
+    The row's rendered strip must be exactly WIDTH *cells* (not chars), so no
+    row overruns the panel edge regardless of emoji icon widths.
+    """
+    from rich.cells import cell_len
+
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        WIDTH = 120
+        panel._panel_size = (WIDTH, 25)
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("images",))
+        panel.entries = [
+            FileEntry(
+                loc=VfsPath(scheme="docker", root="", parts=("images", "image:abc")),
+                name="nginx:latest", size=0, mtime=0.0, is_dir=False,
+                extra={"docker.kind": "image", "docker.size": "142MB",
+                       "docker.created": "2 days ago"},
+            ),
+            FileEntry(
+                loc=VfsPath(scheme="docker", root="", parts=("images", "image:def")),
+                name="python:3.12", size=0, mtime=0.0, is_dir=False,
+                extra={"docker.kind": "image", "docker.size": "1.02GB",
+                       "docker.created": "5 days ago"},
+            ),
+        ]
+
+        # Sanity: all action icons on these rows are single-cell (the emoji 🧹
+        # Prune icon was the original culprit and has been replaced with ∷).
+        provider = panel._registry.resolve(panel.cwd_loc)
+        icons = [a.icon for a in provider.actions()
+                 if a.applies_to(panel.entries[0])]
+        assert all(cell_len(i or "") <= 1 for i in icons), (
+            "expected all action icons to be single-cell after emoji-icon fix"
+        )
+
+        for i in range(len(panel.entries)):
+            strip = panel._render_entry_row(i, WIDTH)
+            cells = sum(cell_len(s.text) for s in strip)
+            assert cells == WIDTH, (
+                f"row {i} rendered {cells} cells != panel width {WIDTH} "
+                "— a too-wide icon overruns the right border (doubled frame)"
+            )
+            # Belt-and-braces: Strip's own cell accounting must agree.
+            assert strip.cell_length == WIDTH
+
+
+async def test_synthetic_wide_glyph_action_icon_absorbed_by_set_cell_size(monkeypatch, tmp_path):
+    """Revert-proof guard for the action-cell sizing.
+
+    A SYNTHETIC ProviderAction whose icon is the 2-CELL emoji 🧹 is injected
+    into the provider's action set.  When it renders in the right-side cluster
+    the row must stay exactly the panel width in *cells*: ``set_cell_size``
+    absorbs the extra column.  If the action cell were reverted to plain
+    character-slicing (``(icon + " ")[:2]`` = 2 chars but 3 cells) the strip
+    would be WIDTH+1 cells and overrun the window's right border (doubled frame),
+    so this assertion FAILS on that regression.
+    """
+    from rich.cells import cell_len
+
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.core.vfs.provider import ProviderAction
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        WIDTH = 120
+        panel._panel_size = (WIDTH, 25)
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+        panel.entries = [
+            FileEntry(loc=VfsPath(scheme="docker", root="", parts=("web",)), name="web",
+                      size=0, mtime=0.0, is_dir=True,
+                      extra={"docker.state": "running", "glyph": "▶", "glyph_role": "success"}),
+        ]
+
+        wide = ProviderAction(id="test.wide", label="W", icon="🧹",
+                              run=lambda locs: None, applies_to=lambda e: True)
+        provider = panel._registry.resolve(panel.cwd_loc)
+        monkeypatch.setattr(provider, "actions", lambda: [wide])
+        assert cell_len(wide.icon) == 2  # sanity: the glyph really is 2 cells
+
+        strip = panel._render_entry_row(0, WIDTH)
+        row_text = "".join(s.text for s in strip)
+        assert "🧹" in row_text, "the injected wide glyph must render in the cluster"
+        # The 2-cell glyph is absorbed: the strip is exactly WIDTH cells, no spill.
+        assert sum(cell_len(s.text) for s in strip) == WIDTH
+        assert strip.cell_length == WIDTH
+        # Header stays width-exact too.
+        assert sum(cell_len(s.text) for s in panel._render_header(WIDTH)) == WIDTH
+
+
+async def test_docker_name_column_not_collapsed_by_large_action_set(monkeypatch, tmp_path):
+    """Regression: when a provider has many total actions but only a few apply
+    per entry, _provider_layout must reserve width for the *applicable* cluster
+    (max across entries), not len(acts()).  The old code caused name_w == 1.
+
+    Arithmetic (images listing, width=55):
+      COL_SEP = "│" (len 1); images columns: Size(10), Created(16)
+      block_w = (1+10) + (1+16) = 28
+      total actions = 16  →  old buttons_w = 32  →  old name_w = max(1, 55-28-32) = 1
+      applicable per image entry: image.remove + prune + pull + run = 4
+                                   new buttons_w = 8  →  new name_w = max(1, 55-28-8) = 19
+    """
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+
+    _WIDTH = 55  # narrow enough that old formula collapses name_w to 1
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        panel._panel_size = (_WIDTH, 25)
+
+        # Realistic image entries: parts use the "image:" token as produced by
+        # DockerProvider._scan_images, NOT bare "nginx:latest".
+        panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("images",))
+        panel.entries = [
+            FileEntry(
+                loc=VfsPath(scheme="docker", root="", parts=("images", "image:abc123")),
+                name="nginx:latest", size=0, mtime=0.0, is_dir=False,
+                extra={"docker.kind": "image"},
+            ),
+            FileEntry(
+                loc=VfsPath(scheme="docker", root="", parts=("images", "image:def456")),
+                name="python:3.12", size=0, mtime=0.0, is_dir=False,
+                extra={"docker.kind": "image"},
+            ),
+        ]
+
+        layout = panel._provider_layout(_WIDTH)
+        assert layout is not None, "images listing must produce a provider layout"
+
+        _cols, name_w, _ranges, buttons_x0 = layout
+
+        # Primary guard: name_w must be comfortably large.
+        # Old formula: max(1, 55-28-32) = 1.  New formula: max(1, 55-28-8) = 19.
+        assert name_w >= 15, (
+            f"name_w={name_w} — Name column collapsed. "
+            "The total action count must not be used to reserve button width; "
+            "only the max applicable count per entry should."
+        )
+
+        # Precision guard: actual reserved button area == max_applicable * _ACTION_CELL.
+        # No try/except — a failure here IS the regression and must propagate.
+        provider = panel._registry.resolve(panel.cwd_loc)
+        acts_list = provider.actions()
+        total_actions = len(acts_list)
+        max_applicable = max(
+            sum(1 for a in acts_list if a.applies_to(e))
+            for e in panel.entries
+            if not getattr(e, "is_parent", False)
+        )
+        assert total_actions != max_applicable, (
+            "Test setup error: total action count equals max applicable count — "
+            "old and new formula are indistinguishable at these params."
+        )
+        # buttons_x0 = name_w + block_w; actual button area = width - buttons_x0.
+        actual_buttons_w = _WIDTH - buttons_x0
+        new_buttons_w = max_applicable * panel._ACTION_CELL
+        old_buttons_w = total_actions * panel._ACTION_CELL
+        assert actual_buttons_w == new_buttons_w, (
+            f"Button area {actual_buttons_w} != max_applicable*cell ({new_buttons_w}). "
+            f"Looks like total*cell ({old_buttons_w}) was used instead."
+        )
 
 
 async def test_failed_entry_reverts_to_previous_location(monkeypatch, tmp_path):
@@ -1211,12 +1616,13 @@ async def test_sort_remembered_across_container_roundtrip(monkeypatch, tmp_path)
         await pilot.pause()
         panel = app._active_panel()
         monkeypatch.setattr(panel, "refresh_listing", lambda *, focus_loc=None: None)
-        index = VfsPath(scheme="docker", root="", parts=())
-        container = VfsPath(scheme="docker", root="", parts=("web",))
+        index = VfsPath(scheme="docker", root="", parts=("containers",))
+        container = VfsPath(scheme="docker", root="", parts=("containers", "container:web"))
         panel.cwd_loc = index
-        s_col = panel._provider_columns()[0]
+        ds = panel._provider_default_sort(index)             # state sort (no header)
+        assert ds is not None and ds[0] == "docker.state"
 
-        panel._sort_active(s_col.key, s_col.sort_key)        # sort index by S
+        panel._sort_active(ds[0], ds[1])                     # sort index by state
         assert panel._sort_key_id == "docker.state"
         panel._change_cwd_loc(container)                     # dive in → reset
         assert panel._sort_key_id is None
@@ -1274,3 +1680,288 @@ async def test_ascend_from_virtual_dunder_root_goes_home(monkeypatch, tmp_path):
         panel.cwd_loc = VfsPath(scheme="zip", root=str(zip_path), parts=())
         panel.ascend()
         assert recorded[-1] == VfsPath.local(tmp_path)
+
+
+async def test_docker_toplevel_consistent_rendering(monkeypatch, tmp_path):
+    """Regression: at the Docker top level, every row must render consistently.
+
+    Entries that HAVE applicable actions (compose groups, /Images, /Networks,
+    /Volumes) get an action cluster.  Entries with NO applicable actions
+    (/Containers section) must render a blank right area — NOT the default
+    Size/Date/epoch text.  Empty rows below the listing must also be fully
+    blank (no │ separators from the default empty_row_text geometry).
+
+    Without the fix this test fails because:
+    - /Containers row: _action_spans returns [] → falls through to
+      row_text_single → renders "<DIR>│1970-…" (epoch date, stray column bars).
+    - empty rows: empty_row_text with │ separators appear below the listing.
+    """
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.panel_view import PanelViewMode
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test():
+        panel = app._active_panel()
+        panel.view_mode = PanelViewMode.FULL
+        WIDTH = 80
+        panel._panel_size = (WIDTH, 25)
+
+        top = VfsPath(scheme="docker", root="", parts=())
+        panel.cwd_loc = top
+
+        # Mirror what _scan_top produces: compose group + all four section dirs.
+        panel.entries = [
+            FileEntry(
+                loc=top.child("compose:evf-bot"), name="evf-bot",
+                size=0, mtime=0.0, is_dir=True,
+                extra={"docker.compose": "1"},
+            ),
+            FileEntry(
+                loc=top.child("containers"), name="Containers",
+                size=0, mtime=0.0, is_dir=True,
+            ),
+            FileEntry(
+                loc=top.child("images"), name="Images",
+                size=0, mtime=0.0, is_dir=True,
+            ),
+            FileEntry(
+                loc=top.child("networks"), name="Networks",
+                size=0, mtime=0.0, is_dir=True,
+            ),
+            FileEntry(
+                loc=top.child("volumes"), name="Volumes",
+                size=0, mtime=0.0, is_dir=True,
+            ),
+        ]
+
+        # (a) No data row may contain the default epoch/Size/Date text.
+        for i, entry in enumerate(panel.entries):
+            row_text = "".join(s.text for s in panel._render_entry_row(i, WIDTH))
+            assert "<DIR>" not in row_text, (
+                f"row {i} ({entry.name!r}) contains '<DIR>' — "
+                "default Size/Date rendering leaked into an action-index row"
+            )
+            # Epoch date strings start with "1970"; check no epoch date present.
+            assert "1970" not in row_text, (
+                f"row {i} ({entry.name!r}) contains epoch date — "
+                "default mtime rendering leaked into an action-index row"
+            )
+
+        # (b) Empty rows below the listing carry ONLY the full-height Actions `│`
+        # at the same sep_x as the data rows (the border runs unbroken to the
+        # bottom) — but no stray Size/Date column bars.
+        sep_x = panel._action_sep_x(WIDTH)
+        for empty_idx in (len(panel.entries), len(panel.entries) + 1):
+            empty_text = "".join(
+                s.text for s in panel._render_entry_row(empty_idx, WIDTH)
+            )
+            assert empty_text.count("│") == 1, (
+                f"empty row {empty_idx} must carry exactly one Actions separator "
+                "(no stray Size/Date bars, but the border continues)"
+            )
+            assert empty_text[sep_x] == "│", (
+                f"empty row {empty_idx} separator not at the Actions sep_x={sep_x}"
+            )
+            assert empty_text[:sep_x] == " " * sep_x, (
+                f"empty row {empty_idx} Name area is not blank"
+            )
+            assert set(empty_text[sep_x + 1:]) <= {" "}, (
+                f"empty row {empty_idx} Actions area is not blank"
+            )
+            assert len(empty_text) == WIDTH
+
+        # (c) Action-bearing rows still expose their cluster (hit-testing works).
+        compose_spans = panel._action_spans(0, WIDTH)   # evf-bot compose group
+        assert compose_spans, "compose group row must have an action cluster"
+        compose_ids = {a.id for *_, a in compose_spans}
+        assert "docker.compose.up" in compose_ids
+
+        images_spans = panel._action_spans(2, WIDTH)    # Images section
+        assert images_spans, "/Images row must have an action cluster (prune)"
+        images_ids = {a.id for *_, a in images_spans}
+        assert "docker.prune" in images_ids
+
+        # /Containers row explicitly has no action cluster (it's the no-action case).
+        containers_spans = panel._action_spans(1, WIDTH)
+        assert containers_spans == [], (
+            "/Containers section must have no action spans at the top level"
+        )
+
+
+def test_docker_empty_containers_section_name_col_not_collapsed(monkeypatch, tmp_path):
+    """Regression: when the Containers section has only '..' (no standalone
+    containers), _provider_layout must NOT reserve the full action-button width.
+    With n_actions=len(acts_list)=16 and _ACTION_CELL=2, buttons_w=32 would
+    collapse name_w to max(1, 40-40-32-1)=1 on a 40-col half-panel, making
+    the '/.. ' parent row invisible.  The fix: use n_actions=0 when not loading."""
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.vfs_local import default_registry
+
+    panel = FilePanel(cwd=tmp_path, registry=default_registry())
+    panel.cwd_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+    panel._loading = False  # genuinely empty, not mid-scan
+
+    # Only the parent entry — no standalone containers (the failing scenario).
+    parent_loc = VfsPath(scheme="docker", root="", parts=())
+    panel.entries = [FileEntry(loc=parent_loc, name="..", size=0, mtime=0.0, is_dir=True)]
+
+    # When genuinely empty (not loading), _provider_layout must return None so
+    # the normal Name|Size|Date path is used — name_w is never starved by
+    # provider columns (Image=20, Status=18) or the full button reservation (32).
+    layout_narrow = panel._provider_layout(40)
+    assert layout_narrow is None, (
+        f"Empty containers section at width=40: expected None (bypass provider "
+        f"layout so '/.. ' is visible), got {layout_narrow!r}.  "
+        "Bug: n_actions=len(acts) when not loading collapses name_w to 1."
+    )
+    layout_80 = panel._provider_layout(80)
+    assert layout_80 is None, (
+        "Empty containers section at width=80: should also bypass provider layout"
+    )
+
+    # During loading the provider layout IS returned (header stays stable).
+    panel._loading = True
+    layout_loading = panel._provider_layout(40)
+    assert layout_loading is not None, (
+        "While loading, _provider_layout must return a layout (not None) so "
+        "the header shows Image|Status|Actions and doesn't flicker."
+    )
+
+    # Once loading completes with no real entries, back to None.
+    panel._loading = False
+    assert panel._provider_layout(40) is None
+
+
+def test_docker_entering_containers_parent_row_visible(monkeypatch, tmp_path):
+    """Navigating into the Containers section and then trying (and failing) to
+    enter a stopped container must leave '..' visible in the viewport.
+
+    The bug: _maybe_revert called refresh_listing(focus_loc=failed_container).
+    When the failed container was at index >= visible_rows, _ensure_cursor_visible
+    pushed row_offset > 0, hiding '..' at index 0.
+
+    Steps mirrored from the real use-case:
+    1. Build the panel at the Docker top level via the real navigation path.
+    2. Scroll down at the top level (cursor / row_offset non-zero).
+    3. Enter the Containers section.
+    4. Try to enter the LAST container (index 10, beyond the 8-row viewport) —
+       it fails because every container reports stopped via inspect.
+    5. _maybe_revert reverts to Containers; assert '..' is visible (row_offset==0).
+    """
+    import json as _json
+    import dunders.fm.providers.docker_provider as dp
+    from dunders.fm.providers.docker_provider import DockerProvider
+    from dunders.fm.vfs_local import default_registry
+
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+
+    # 10 standalone running containers — so the last one (index 10 after '..')
+    # lies beyond the 8-row visible window (panel height 10 → visible_rows = 8).
+    canned_ps = "\n".join(
+        _json.dumps({
+            "ID": f"id{i:02d}", "Names": f"c{i:02d}",
+            "State": "running", "Status": "Up 1h",
+            "Image": "nginx", "Labels": "",
+        })
+        for i in range(10)
+    )
+
+    def _mock_run(self, args, *, endpoint="", input=None):
+        if args and args[0] == "ps":
+            return canned_ps.encode()
+        if args and args[0] == "inspect":
+            # All containers appear stopped; _scan_fs will raise OSError.
+            return b"false"
+        raise OSError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(DockerProvider, "_run", _mock_run)
+
+    registry = default_registry()
+    top_loc = VfsPath(scheme="docker", root="", parts=())
+    containers_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+
+    panel = FilePanel(cwd=tmp_path, registry=registry)
+    panel._panel_size = (80, 10)  # visible_rows = 10 - 2 = 8
+
+    # ── Step 1-2: build at docker top level, scroll cursor down ──────────────
+    panel._change_cwd_loc(top_loc)
+    assert panel.cwd_loc == top_loc, "should be at docker top level"
+    panel.cursor = 5       # simulate user having scrolled
+    panel.row_offset = 3   # (top level has only 4 entries but we set this directly)
+
+    # ── Step 3: enter the Containers section ─────────────────────────────────
+    panel._change_cwd_loc(containers_loc)
+    assert panel.cwd_loc == containers_loc
+    assert panel.entries[0].is_parent, "Containers must start with '..'"
+
+    # The pre-navigation scroll must have been wiped by _change_cwd_loc.
+    assert panel.row_offset == 0, (
+        f"row_offset={panel.row_offset} after entering Containers "
+        "(expected 0 — _change_cwd_loc must reset scroll)"
+    )
+
+    n_entries = len(panel.entries)
+    assert n_entries == 11, f"Expected '..' + 10 containers = 11 entries, got {n_entries}"
+
+    # ── Step 4: try to enter the last container (index 10, beyond viewport) ──
+    last_entry = panel.entries[-1]
+    assert not last_entry.is_parent
+    panel._change_cwd_loc(last_entry.loc)
+
+    # The scan fails; _maybe_revert brings us back to containers_loc.
+    # ── Step 5: assert '..' is visible ───────────────────────────────────────
+    assert panel.cwd_loc == containers_loc, (
+        "Panel should have reverted to Containers after the failed entry"
+    )
+    assert panel.entries[0].is_parent, "entries[0] must be '..' after revert"
+    assert panel.row_offset == 0, (
+        f"'..' is hidden after revert: row_offset={panel.row_offset}, "
+        f"cursor={panel.cursor}  (last container was at index {n_entries - 1}, "
+        f"visible_rows=8 — _maybe_revert must reset row_offset)"
+    )
+
+
+def test_docker_entering_empty_containers_parent_row_visible(monkeypatch, tmp_path):
+    """When the Containers section has no containers (only '..'), the parent row
+    must be visible after entering the section, regardless of any prior scroll
+    state at the top level."""
+    import dunders.fm.providers.docker_provider as dp
+    from dunders.fm.providers.docker_provider import DockerProvider
+    from dunders.fm.vfs_local import default_registry
+
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+
+    def _mock_run(self, args, *, endpoint="", input=None):
+        if args and args[0] == "ps":
+            return b""  # no containers
+        raise OSError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(DockerProvider, "_run", _mock_run)
+
+    registry = default_registry()
+    top_loc = VfsPath(scheme="docker", root="", parts=())
+    containers_loc = VfsPath(scheme="docker", root="", parts=("containers",))
+
+    panel = FilePanel(cwd=tmp_path, registry=registry)
+    panel._panel_size = (80, 10)
+
+    panel._change_cwd_loc(top_loc)
+    panel.cursor = 2
+    panel.row_offset = 1
+
+    panel._change_cwd_loc(containers_loc)
+
+    assert panel.cwd_loc == containers_loc
+    assert len(panel.entries) == 1, f"Expected only '..', got {len(panel.entries)} entries"
+    assert panel.entries[0].is_parent, "entries[0] must be '..'"
+    assert panel.row_offset == 0, (
+        f"row_offset={panel.row_offset} after entering empty Containers (expected 0)"
+    )

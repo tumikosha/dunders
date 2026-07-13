@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.cells import set_cell_size
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from textual import events
@@ -123,6 +124,9 @@ class FilePanel(WindowContent):
         self.entries: RowSource = MaterializedRowSource()
         self.cursor: int = 0
         self.row_offset: int = 0
+        # Action icon the mouse is hovering, as ``(row_idx, span_start)`` or None.
+        # Drives the hover highlight painted by the two action-cluster renderers.
+        self._hover_action: tuple[int, int] | None = None
         self.sort_order: SortOrder = SortOrder.NAME
         self.sort_descending: bool = default_descending(SortOrder.NAME)
         # Active provider-layout sort: a (id, key) pair used instead of
@@ -327,6 +331,12 @@ class FilePanel(WindowContent):
             self._sort_key_id, self._sort_key, self.sort_descending = self._return_sort
             self._return_sort = None
         self.refresh_listing(focus_loc=failed)
+        # After a failed navigation the focus_loc restore can push row_offset > 0,
+        # hiding '..' when the failed entry is beyond the visible window.  Reset
+        # scroll here so '..' is always the first visible row.  In the async path
+        # _scan_async already sets row_offset=0; in the sync path we do it after
+        # the listing is fully applied.
+        self.row_offset = 0
         return True
 
     def _apply_rows(
@@ -450,8 +460,14 @@ class FilePanel(WindowContent):
             self._sort_key = self._resolve_sort_key(sort_id)
             self._sort_key_id = sort_id if self._sort_key is not None else None
         else:
-            self._sort_key_id = None
-            self._sort_key = None
+            # No remembered sort — offer the provider a default (e.g. Docker
+            # containers running-first). Falls back to unsorted (name-ascending).
+            default = self._provider_default_sort(new_loc)
+            if default is not None:
+                self._sort_key_id, self._sort_key, self.sort_descending = default
+            else:
+                self._sort_key_id = None
+                self._sort_key = None
         # Cursor placement after a cwd change: if the prior location is visible
         # in the new listing — i.e. we ascended (the parent dir is now showing
         # the child we left) — land the cursor on it. Covers Backspace and Enter
@@ -918,6 +934,11 @@ class FilePanel(WindowContent):
         # A provider with actions but no columns: "Name" + an "Actions" label.
         if self._shows_action_column(width):
             return self._render_header_actions(width)
+        # A provider grouping level (no columns, no actions) that suppresses the
+        # default Size/Date columns: a single full-width "Name" header.
+        if self._hide_default_columns():
+            base = self._base_style() + RichStyle(bold=True)
+            return Strip([Segment("Name".center(width)[:width], base)])
         if mode is PanelViewMode.DETAILED:
             return self._render_header_detailed(width)
         if mode is PanelViewMode.DESCRIPTION:
@@ -935,16 +956,47 @@ class FilePanel(WindowContent):
             return False
         return any(self._action_spans(i, width) for i in range(len(self.entries)))
 
+    def _action_buttons_width(self, width: int) -> int:
+        """Cells reserved for the right-aligned action cluster in the action-index
+        layout (no provider columns). The widest cluster across all rows —
+        max applicable actions × ``_ACTION_CELL`` — plus one ``_ACTION_CELL`` for a
+        passive state glyph when any entry carries one. Drives the x of the
+        full-height Actions separator drawn by :meth:`_render_header_actions`,
+        :meth:`_render_entry_row` and the action-index empty-row path, so header,
+        data and empty rows all land the ``│`` in the same column."""
+        max_spans = max(
+            (len(self._action_spans(i, width)) for i in range(len(self.entries))),
+            default=0,
+        )
+        if max_spans == 0:
+            return 0
+        buttons_w = max_spans * self._ACTION_CELL
+        if self._layout_has_glyph():
+            buttons_w += self._ACTION_CELL
+        return buttons_w
+
+    def _action_sep_x(self, width: int) -> int:
+        """Column of the full-height Actions separator (``│``) in the action-index
+        layout: the Name field is ``[0, sep_x)``, the ``│`` sits at ``sep_x`` and
+        the cluster area is ``[sep_x + 1, width)``. Clamped to a sane range so a
+        very narrow panel still renders."""
+        buttons_w = self._action_buttons_width(width)
+        return max(1, min(width - 1, width - buttons_w - 1))
+
     def _render_header_actions(self, width: int) -> Strip:
-        """Header for an action index: "Name" plus a right-aligned "Actions"
-        label over the button area (mirrors `_render_entry_row`'s cluster)."""
-        from dunders.fm.panel_view import name_col_width
+        """Header for an action index: "Name" then a full-height ``│`` separator
+        and a right-aligned "Actions" label over the button area (mirrors
+        `_render_entry_row`'s cluster)."""
         base = self._base_style() + RichStyle(bold=True)
-        ncol = name_col_width(self.view_mode, width)
-        name = "Name".center(ncol)
-        rest = max(0, width - len(name))
-        text = (name + "Actions ".rjust(rest))[:width].ljust(width)
-        return Strip([Segment(text, base)])
+        sep_x = self._action_sep_x(width)
+        name = "Name".center(sep_x)[:sep_x]
+        rest = max(0, width - sep_x - 1)
+        actions = "Actions ".rjust(rest)[:rest] if rest else ""
+        return Strip([
+            Segment(name, base),
+            Segment(COL_SEP, base),
+            Segment(actions, base),
+        ])
 
     def _render_header_provider(self, width: int, layout) -> Strip:
         """Header for the provider-columns layout: "Name" + each column label,
@@ -969,8 +1021,11 @@ class FilePanel(WindowContent):
             ("Name" + arrow("name")).center(name_w)[:name_w], styled("name"))]
         for _x0, _x1, col in ranges:
             segs.append(Segment(COL_SEP, base))
-            label = (col.label + arrow(col.key)).center(col.width)[:col.width]
+            label = self._align_cell(col.label + arrow(col.key), col.width,
+                                     getattr(col, "align", "center"))
             segs.append(Segment(label, styled(col.key)))
+        # Full-height Actions separator, then the right-aligned "Actions" label.
+        segs.append(Segment(COL_SEP, base))
         rest = max(0, width - buttons_x0)
         if rest:
             segs.append(Segment("Actions ".rjust(rest)[:rest], base))
@@ -1091,6 +1146,39 @@ class FilePanel(WindowContent):
         except Exception:
             return []
 
+    def _hide_default_columns(self) -> bool:
+        """Whether the current provider location wants a Name-only listing.
+
+        True when the resolved provider exposes ``hide_default_columns(loc)`` and
+        it returns True (a pure grouping level whose entries carry no meaningful
+        size/mtime, e.g. Docker's compose/section index) — so the panel drops the
+        default Size/Date columns rather than showing a useless epoch date. Only
+        consulted on the fallback path (no provider columns, no action cluster)."""
+        if is_multicolumn(self.view_mode):
+            return False
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+        except Exception:
+            return False
+        fn = getattr(provider, "hide_default_columns", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(self.cwd_loc))
+        except Exception:
+            return False
+
+    def _layout_has_glyph(self) -> bool:
+        """Whether any real (non-parent) entry carries a state glyph, so the
+        provider layout must reserve a leading cell for it in the action cluster."""
+        for e in self.entries:
+            if getattr(e, "is_parent", False):
+                continue
+            extra = getattr(e, "extra", None)
+            if isinstance(extra, dict) and extra.get("glyph"):
+                return True
+        return False
+
     def _provider_layout(self, width: int):
         """Geometry for the "Name | provider columns | action buttons" layout.
 
@@ -1108,20 +1196,52 @@ class FilePanel(WindowContent):
             provider = self._registry.resolve(self.cwd_loc)
             acts = getattr(provider, "actions", None)
             if callable(acts):
-                n_actions = len(acts())
+                acts_list = acts()
+                # Reserve width for the widest *rendered* cluster (applicable
+                # actions per entry), not the full action set.  The old
+                # ``len(acts())`` ballooned when many actions were declared but
+                # only a few apply per row, collapsing the Name column to 1 char.
+                real = [e for e in self.entries
+                        if not getattr(e, "is_parent", False)]
+                if real:
+                    for e in real:
+                        k = sum(1 for a in acts_list if a.applies_to(e))
+                        if k > n_actions:
+                            n_actions = k
+                else:
+                    # No real entries. If a scan is still in flight, use the
+                    # full count so the header stays stable while loading.
+                    # If genuinely empty (section has only ".."), bail out so
+                    # name_w is never collapsed — "/.. " must stay visible even
+                    # on a narrow half-panel where block_w alone exceeds width.
+                    if self._loading:
+                        n_actions = len(acts_list)
+                    else:
+                        return None
         except Exception:
             n_actions = 0
         buttons_w = n_actions * self._ACTION_CELL
+        # Reserve one extra leading cell for a passive state glyph (e.g. a Docker
+        # container's ▶/■/↻) that renders at the head of the action cluster. Only
+        # when some real entry actually carries one, so images/networks/volumes
+        # (glyph-free) don't lose a column of Name width for nothing.
+        if self._layout_has_glyph():
+            buttons_w += self._ACTION_CELL
         sep = len(COL_SEP)
         block_w = sum(sep + c.width for c in cols)
-        name_w = max(1, width - block_w - buttons_w)
+        # Reserve one extra cell for the full-height Actions separator (`│`) that
+        # sits between the last provider column and the button cluster, so
+        # ``name_w``/column geometry stay consistent with where the bar lands.
+        name_w = max(1, width - block_w - buttons_w - 1)
         x = name_w
         ranges = []
         for c in cols:
             x += sep
             ranges.append((x, x + c.width, c))
             x += c.width
-        return cols, name_w, ranges, x
+        # ``x`` is now name_w + block_w = the separator column. The button cluster
+        # starts one cell past it, so ``buttons_x0 - 1`` is where callers draw `│`.
+        return cols, name_w, ranges, x + 1
 
     @staticmethod
     def _provider_header_col_at(x: int, layout):
@@ -1146,6 +1266,25 @@ class FilePanel(WindowContent):
         self._sort_memory[self.cwd_loc] = (sort_id, self.sort_descending)
         self.refresh_listing(focus_loc=focused)
 
+    def _provider_default_sort(self, loc: VfsPath):
+        """The provider's preferred initial sort for ``loc`` as
+        ``(sort_id, sort_key, descending)``, or ``None``. Lets a provider order a
+        listing that has no clickable sort header (e.g. Docker's running-first
+        state, whose glyph now lives in the passive Actions cluster)."""
+        if is_multicolumn(self.view_mode):
+            return None
+        try:
+            provider = self._registry.resolve(loc)
+        except Exception:
+            return None
+        fn = getattr(provider, "default_sort", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(loc)
+        except Exception:
+            return None
+
     def _resolve_sort_key(self, sort_id: str):
         """Reconstruct a sort key from a remembered id, against the CURRENT
         location's columns (a provider column may not exist elsewhere)."""
@@ -1154,6 +1293,11 @@ class FilePanel(WindowContent):
         for col in self._provider_columns():
             if col.key == sort_id:
                 return col.sort_key
+        # Not a visible column — it may be a provider default sort (e.g. Docker's
+        # "docker.state", which has no header now that the glyph is in the cluster).
+        default = self._provider_default_sort(self.cwd_loc)
+        if default is not None and default[0] == sort_id:
+            return default[1]
         return None
 
     # Each action icon occupies this many cells in the row cluster (glyph + pad).
@@ -1196,6 +1340,45 @@ class FilePanel(WindowContent):
             start = x0 + i * cell
             spans.append((start, start + cell, a))
         return spans
+
+    def _row_at_y(self, y: int) -> int | None:
+        """Entry index under viewport row ``y`` (0 == header), or None when it
+        falls on the header, the footer/quick-search bar, or past the listing.
+        Single-column layouts only (callers guard multi-column separately)."""
+        if y <= 0:
+            return None
+        h = self._panel_size[1] if self._panel_size else self.size.height
+        if y == h - 1:  # footer
+            return None
+        if self._qs_active and y == h - 2:  # quick-search bar
+            return None
+        idx = y - 1 + self.row_offset
+        return idx if 0 <= idx < len(self.entries) else None
+
+    def _action_at(self, x: int, y: int) -> tuple[int, int] | None:
+        """The action icon under mouse ``(x, y)`` as ``(row_idx, span_start)``,
+        or None. Used to drive the hover highlight and hit-testing."""
+        if is_multicolumn(self.view_mode):
+            return None
+        idx = self._row_at_y(y)
+        if idx is None:
+            return None
+        width = self._panel_size[0] if self._panel_size else self.size.width
+        for start, end, _action in self._action_spans(idx, width):
+            if start <= x < end:
+                return (idx, start)
+        return None
+
+    def _action_hover_style(self, base: RichStyle) -> RichStyle:
+        """Highlight style for the action icon under the mouse: the theme's
+        ``menu.item.active`` (inverted fg/bg, bold — the same look as a selected
+        menu item), falling back to reverse-video when the role is undefined."""
+        pal = self._get_palette()
+        if pal is not None:
+            role = pal.get("menu.item.active")
+            if role.fg is not None or role.bg is not None:
+                return role.to_rich() + RichStyle(bold=True)
+        return base + RichStyle(reverse=True, bold=True)
 
     def _maybe_run_action_click(self, x: int, idx: int) -> bool:
         """If x falls on an action icon for row idx, run it. Returns True if handled."""
@@ -1271,6 +1454,21 @@ class FilePanel(WindowContent):
 
         event.stop()
 
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        """Track which action icon the mouse is over so its cell can highlight.
+        Only repaints when the hovered icon actually changes (per-pixel moves
+        within the same icon are cheap no-ops)."""
+        hover = self._action_at(event.x, event.y)
+        if hover != self._hover_action:
+            self._hover_action = hover
+            self.refresh()
+
+    def on_leave(self, event: events.Leave) -> None:
+        """Clear the action hover highlight when the pointer leaves the panel."""
+        if self._hover_action is not None:
+            self._hover_action = None
+            self.refresh()
+
     def _render_entry_row(self, idx: int, width: int) -> Strip:
         if not (0 <= idx < len(self.entries)):
             # Blank row below the listing, but keep the column separators so
@@ -1282,6 +1480,22 @@ class FilePanel(WindowContent):
             layout = self._provider_layout(width)
             if layout is not None:
                 return self._empty_provider_row(width, layout)
+            # In action-index mode (e.g. Docker top level) there are no provider
+            # columns, so Size/Date separators would land at wrong x coords. Keep
+            # the Name area blank but still draw the full-height Actions `│` at the
+            # same sep_x as the data rows, so the border runs unbroken to the
+            # bottom of the panel (no default Size/Date bars leak in).
+            if self._shows_action_column(width):
+                style = self._base_style()
+                sep_x = self._action_sep_x(width)
+                segs = [Segment(" " * sep_x, style), Segment(COL_SEP, style)]
+                if width > sep_x + 1:
+                    segs.append(Segment(" " * (width - sep_x - 1), style))
+                return Strip(segs)
+            # Name-only grouping level: no Size/Date bars to carry down, so a
+            # blank row is just blank (mirrors the full-width Name header).
+            if self._hide_default_columns():
+                return Strip([Segment(" " * width, self._base_style())])
             return Strip([Segment(empty_row_text(self.view_mode, width), self._base_style())])
         entry = self.entries[idx]
         is_cursor = idx == self.cursor
@@ -1305,24 +1519,60 @@ class FilePanel(WindowContent):
             return self._render_provider_row(idx, width, entry, style, layout)
         spans = self._action_spans(idx, width)
         if spans:
+            # Name field is `[0, sep_x)`, then a full-height `│` separator, then
+            # the right-aligned action cluster where the Size/Date columns would
+            # be (those are meaningless for a container). Everything between the
+            # separator and the cluster is blanked so no stray "0"/epoch date
+            # peeks through. `text[:name_col]` is the padded name field (no size/
+            # date); we then clip/pad it to the separator column.
+            sep_x = self._action_sep_x(width)
+            name_field = text[:name_col][:sep_x]
+            segs = [Segment(name_field, style)]
+            if len(name_field) < sep_x:
+                segs.append(Segment(" " * (sep_x - len(name_field)), style))
+            segs.append(Segment(COL_SEP, style))
+            cur = sep_x + 1
             x0 = spans[0][0]
-            # Show the name only, then the action cluster where the Size/Date
-            # columns would be (those are meaningless for a container). The
-            # name field is `text[:name_col]`; everything right of it up to the
-            # cluster is blanked so no stray "0"/epoch date peeks through.
-            head_end = min(name_col, x0)
-            segs = [Segment(text[:head_end], style)]
-            if x0 > head_end:
-                segs.append(Segment(" " * (x0 - head_end), style))
+            if x0 > cur:
+                segs.append(Segment(" " * (x0 - cur), style))
+                cur = x0
             for start, end, action in spans:
                 glyph = (action.icon or "·")[:1]
-                cell = (glyph + " ")[: end - start].ljust(end - start)
-                segs.append(Segment(cell, style + RichStyle(bold=True)))
-            # pad any trailing gap so the row fills width
-            used = x0 + sum(e - s for s, e, _a in spans)
-            if used < width:
-                segs.append(Segment(" " * (width - used), style))
+                # Cell-sized (not char-sliced) so a 2-cell emoji icon can't
+                # overrun the row width — see _render_provider_row.
+                cell = set_cell_size(glyph + " ", end - start)
+                hovered = self._hover_action == (idx, start)
+                icon_style = (self._action_hover_style(style) if hovered
+                              else style + RichStyle(bold=True))
+                segs.append(Segment(cell, icon_style))
+                cur = end
+            if cur < width:
+                segs.append(Segment(" " * (width - cur), style))
             return Strip(segs)
+        # Action-index mode (e.g. Docker top level) but this row has no
+        # applicable actions (e.g. /Containers section entry). Blank the right
+        # area so no epoch date or Size column seeps through, but still draw the
+        # full-height `│` separator so the Actions column border runs unbroken;
+        # the header already labels it "Actions" instead of "Size/Date".
+        if self._shows_action_column(width):
+            sep_x = self._action_sep_x(width)
+            name_field = text[:name_col][:sep_x]
+            segs = [Segment(name_field, style)]
+            if len(name_field) < sep_x:
+                segs.append(Segment(" " * (sep_x - len(name_field)), style))
+            segs.append(Segment(COL_SEP, style))
+            if width > sep_x + 1:
+                segs.append(Segment(" " * (width - sep_x - 1), style))
+            return Strip(segs)
+        # Name-only grouping level: replace the Name|Size|Date row with a
+        # full-width Name cell so no meaningless epoch date shows. Recompute
+        # ``text``/``name_col`` so the quick-search highlighter below still
+        # aligns against the full-width name field.
+        if self._hide_default_columns():
+            from dunders.fm.panel_view import _fit_name, format_cell
+            name_col = width
+            name = _fit_name(entry.name, width)
+            text = format_cell(entry, width)
         if self._qs_active and self._qs_query and not entry.is_parent:
             hi = self._qs_highlight_segments(
                 text=text,
@@ -1346,9 +1596,22 @@ class FilePanel(WindowContent):
             segs.append(Segment(COL_SEP, style))
             segs.append(Segment(" " * col.width, style))
             used += len(COL_SEP) + col.width
+        # Full-height Actions separator so the `│` runs unbroken below the listing.
+        segs.append(Segment(COL_SEP, style))
+        used += len(COL_SEP)
         if used < width:
             segs.append(Segment(" " * (width - used), style))
         return Strip(segs)
+
+    @staticmethod
+    def _align_cell(text: str, width: int, align: str) -> str:
+        """Fit ``text`` into a ``width``-cell provider column per ``align``
+        ("left"/"right"/"center", default center). Clipped to width."""
+        if align == "left":
+            return text.ljust(width)[:width]
+        if align == "right":
+            return text.rjust(width)[:width]
+        return text.center(width)[:width]
 
     def _render_provider_row(self, idx, width, entry, style, layout) -> Strip:
         """Render "Name | provider columns | action buttons" (e.g. Docker)."""
@@ -1358,19 +1621,56 @@ class FilePanel(WindowContent):
         segs = [Segment(name_field.ljust(name_w)[:name_w], style)]
         for _x0, _x1, col in ranges:
             segs.append(Segment(COL_SEP, style))
-            segs.append(Segment(col.value(entry).center(col.width)[:col.width], style))
+            segs.append(Segment(
+                self._align_cell(col.value(entry), col.width,
+                                 getattr(col, "align", "center")), style))
+        # Full-height Actions separator (`│`) at buttons_x0 - 1, before the cluster.
+        segs.append(Segment(COL_SEP, style))
         cur = buttons_x0
-        for start, end, action in self._action_spans(idx, width):
+        spans = self._action_spans(idx, width)
+        cell = self._ACTION_CELL
+        # Passive state glyph: leading element of the cluster, immediately before
+        # the first action icon (or flush-right if the row shows no actions). Its
+        # reserved cell was accounted for by ``_layout_has_glyph`` in the layout,
+        # so ``glyph_start`` never precedes ``buttons_x0`` and nothing overflows.
+        extra = getattr(entry, "extra", None)
+        glyph = extra.get("glyph") if isinstance(extra, dict) else None
+        if glyph:
+            glyph_start = (spans[0][0] if spans else width) - cell
+            if glyph_start > cur:
+                segs.append(Segment(" " * (glyph_start - cur), style))
+            gcell = set_cell_size(glyph + " ", cell)
+            segs.append(Segment(gcell, self._glyph_style(extra, style)))
+            cur = glyph_start + cell
+        for start, end, action in spans:
             if start > cur:
                 segs.append(Segment(" " * (start - cur), style))
                 cur = start
-            glyph = (action.icon or "·")[:1]
-            cell = (glyph + " ")[: end - start].ljust(end - start)
-            segs.append(Segment(cell, style + RichStyle(bold=True)))
+            icon = (action.icon or "·")[:1]
+            # Size the cell by terminal CELLS, not chars: a 2-cell emoji icon
+            # (e.g. 🧹) would otherwise render one column too wide and push the
+            # row past the panel edge, doubling the window's right border.
+            acell = set_cell_size(icon + " ", end - start)
+            hovered = self._hover_action == (idx, start)
+            icon_style = (self._action_hover_style(style) if hovered
+                          else style + RichStyle(bold=True))
+            segs.append(Segment(acell, icon_style))
             cur = end
         if cur < width:
             segs.append(Segment(" " * (width - cur), style))
         return Strip(segs)
+
+    @staticmethod
+    def _glyph_style(extra, base: RichStyle) -> RichStyle:
+        """Colour a passive state glyph by its ``glyph_role`` (success/warning/
+        muted → green/yellow/grey), falling back to ``base`` when unknown."""
+        role = extra.get("glyph_role") if isinstance(extra, dict) else None
+        if role:
+            from dunders.fm.file_colors import glyph_role_color
+            colour = glyph_role_color(role)
+            if colour:
+                return base + RichStyle(color=colour)
+        return base
 
     def _multicol_index_at(self, x: int, y: int, width: int) -> int:
         """Entry index for a click at (x, y) in a multi-column layout.

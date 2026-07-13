@@ -100,6 +100,109 @@ def test_run_sql_blank_not_recorded(tmp_path):
     assert sql_history.load_history("conn-key") == []
 
 
+def test_split_statements_respects_quotes_and_comments():
+    # ';' inside string literals or comments must not split; trailing ';' and
+    # blank statements are dropped; doubled-quote escapes are honoured.
+    split = da.split_statements
+    assert split("SELECT 1; DELETE FROM t;") == ["SELECT 1", "DELETE FROM t"]
+    assert split("SELECT ';' ; DELETE FROM t WHERE x='a;b'") == [
+        "SELECT ';'", "DELETE FROM t WHERE x='a;b'"]
+    assert split("SELECT 1 -- a ; b\n; SELECT 2") == ["SELECT 1 -- a ; b", "SELECT 2"]
+    assert split("SELECT '' 'don''t' ; SELECT 2") == ["SELECT '' 'don''t'", "SELECT 2"]
+    assert split("   ;  ; ") == []
+    assert split("DELETE FROM t WHERE id=1 ;") == ["DELETE FROM t WHERE id=1"]
+
+
+def test_multi_statement_script_runs_all(tmp_path):
+    # Regression: a "SELECT …; DELETE …" script starting with SELECT used to be
+    # wrapped for pagination (SELECT * FROM (…)) → "syntax error at or near
+    # DELETE". It must now run every statement and actually delete the row.
+    conn = da.DbConn.open(f"sqlite:///{tmp_path/'t.db'}")
+    conn.insert("vacancies", {"id": 1, "name": "a"})
+    conn.insert("vacancies", {"id": 2, "name": "b"})
+    content = DbConsoleContent(conn, title_db="t.db")
+    content.run_sql("SELECT * FROM vacancies ;\nDELETE FROM vacancies WHERE id = 1 ;")
+    assert not content.last_status.lower().startswith("error")
+    assert "2 statements run" in content.last_status
+    remaining = conn.query("SELECT id FROM vacancies")[1]
+    assert [r["id"] for r in remaining] == [2]  # row 1 deleted, row 2 kept
+    # A trailing SELECT's rows populate the grid (last-statement result shown).
+    content.run_sql("DELETE FROM vacancies WHERE id = 99 ; SELECT * FROM vacancies ;")
+    assert content.last_columns and [r["id"] for r in content.last_rows] == [2]
+    assert content._edit_table is None  # a script result isn't cell-editable
+
+
+@pytest.mark.asyncio
+async def test_status_error_with_brackets_does_not_crash(tmp_path):
+    # A DB error string carries SQLAlchemy's "[SQL: …]" / "[parameters: …]" echo
+    # of the query; a stray bracket (e.g. "[SQL= …]" or "[/DELETE]") is invalid
+    # Textual markup and used to crash the app with MarkupError when the status
+    # rendered. The status now renders text literally (markup=False).
+    from textual.app import App
+    from dunders.windowing import Desktop, make_window
+    conn = da.DbConn.open(f"sqlite:///{tmp_path/'t.db'}")
+    content = DbConsoleContent(conn, title_db="t.db")
+
+    class _Host(App):
+        def compose(self):
+            yield Desktop()
+
+    app = _Host()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Desktop).add_window(
+            make_window(content, title="SQL", size=(110, 26)))
+        await pilot.pause()
+        assert content._status._render_markup is False  # markup parsing disabled
+        bad = ('Error: syntax error at or near "DELETE"\n'
+               '[SQL= --SELECT * FROM vacancies\nDELETE FROM vacancies where id = ?]\n'
+               '[parameters: (201, 0)]')
+        content._set_status(bad)
+        await pilot.pause()   # forces a render — raised MarkupError before the fix
+        assert content.last_status == bad
+
+
+@pytest.mark.asyncio
+async def test_grid_column_fits_value_wider_than_header(tmp_path):
+    # Regression: `count(*) AS n` yields a 1-char header but a multi-digit value.
+    # DataTable auto-width didn't grow the column synchronously, so the last
+    # digit(s) stayed clipped until a mouse hover recomputed widths. Columns are
+    # now sized to the widest rendered cell up front.
+    from textual.app import App
+    from dunders.windowing import Desktop, make_window
+    conn = da.DbConn.open(f"sqlite:///{tmp_path/'t.db'}")
+    for i in range(12):  # count == 12 → 2 chars, header "n" is 1
+        conn.insert("t", {"id": i})
+    content = DbConsoleContent(conn, title_db="t.db")
+
+    class _Host(App):
+        def compose(self):
+            yield Desktop()
+
+    app = _Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Desktop).add_window(
+            make_window(content, title="SQL", size=(90, 26)))
+        await pilot.pause()
+        content.run_sql("SELECT count(*) AS n FROM t")
+        await pilot.pause()
+        col = next(iter(content._table.columns.values()))
+        value = str(content.last_rows[0]["n"])
+        assert value == "12"
+        assert col.width >= len(value)  # column wide enough to show every digit
+
+
+def test_multi_statement_script_not_paginated(tmp_path):
+    from dunders.fm.db_console import _is_pageable
+    conn = da.DbConn.open(f"sqlite:///{tmp_path/'t.db'}")
+    content = DbConsoleContent(conn, title_db="t.db")
+    # A multi-statement script (even one starting with SELECT) is never pageable.
+    assert _is_pageable("SELECT * FROM t; DELETE FROM t WHERE id=1;") is False
+    content.run_sql("SELECT 1; SELECT 2;")
+    assert content._page_sql is None  # not in pagination mode
+
+
 def test_history_dialog_preview_marks_status_and_flattens():
     from dunders.fm.db_console import SqlHistoryDialog, _CELL_MAX
     ok_marker, text = SqlHistoryDialog._preview(
@@ -694,6 +797,42 @@ async def test_cell_dialog_format_json(tmp_path):
         await pilot.pause()
         assert dialog._editor_text() == '{\n  "role": "admin",\n  "ok": true\n}'
         assert "normalised from a python literal" in dialog._last_status.lower()
+
+
+@pytest.mark.asyncio
+async def test_cell_dialog_copy(tmp_path, monkeypatch):
+    # The "Copy" button copies the cell's full text to the system clipboard
+    # and reports how many chars were copied.
+    from textual.app import App
+    from dunders.windowing import Desktop, make_window
+    from dunders.windowing.core import clipboard
+    from dunders.fm.db_console import CellEditDialog
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy",
+                        lambda text, app=None: captured.update(text=text))
+
+    conn = da.DbConn.open(f"sqlite:///{tmp_path/'t.db'}")
+    conn.insert("docs", {"body": "hello world"})
+    content = DbConsoleContent(conn, title_db="k")
+
+    class _Host(App):
+        def compose(self):
+            yield Desktop()
+
+    app = _Host()
+    async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
+        app.query_one(Desktop).add_window(make_window(content, title="SQL", size=(90, 30)))
+        await pilot.pause()
+        content.run_sql("SELECT * FROM docs")
+        await pilot.pause()
+        content._open_cell_dialog(0, content.last_columns.index("body"))
+        await pilot.pause()
+        dialog = app.query_one(CellEditDialog)
+        dialog._do_copy()
+        assert captured["text"] == "hello world"
+        assert "copied 11 chars" in dialog._last_status.lower()
 
 
 @pytest.mark.asyncio

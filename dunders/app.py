@@ -30,6 +30,7 @@ from textual.strip import Strip
 
 from dunders.core.plugins import EventBus, PluginApi, load_plugins
 from dunders.core.vfs import VfsPath
+from dunders.core.vfs.provider import ProviderPreview
 from dunders.fm.actions import (
     CopyStatus,
     OpResult,
@@ -50,11 +51,13 @@ from dunders.fm.console.runner import CommandRunner
 from dunders.fm.console.window import ConsoleContent
 from dunders.config.bookmarks import add_bookmark, list_bookmarks, remove_bookmark
 from dunders.fm.dialogs import (
+    AboutDialog,
     AddBookmarkDialog,
     BookmarksDialog,
     ChangeAttributesDialog,
     ConfirmDialog,
     CopyMoveDialog,
+    DockerRunDialog,
     FindFileDialog,
     InputDialog,
     NewFileDialog,
@@ -309,12 +312,44 @@ class FormRequest:
 
 
 @dataclass(frozen=True)
+class DockerPullRequest:
+    """Context for the InputDialog that prompts for an image ref to pull."""
+
+    endpoint: str
+
+
+@dataclass(frozen=True)
+class DockerRunRequest:
+    """Context for the DockerRunDialog that prompts for run parameters."""
+
+    endpoint: str
+
+
+@dataclass(frozen=True)
+class ProviderActionConfirm:
+    """Confirm context for destructive provider actions (docker.remove, etc.)."""
+
+    action: object
+    targets: tuple  # VfsPath sequence; tuple to allow frozen dataclass
+
+
+@dataclass(frozen=True)
 class FormSchemaPromptRequest:
     """Marks an InputDialog whose value is a path to a .form.json schema."""
 
 
 LaunchMode = Literal["fm", "editor", "cli", "we", "we-mc"]
 TerminalMode = Literal["relay", "suspend"]
+
+# Provider action ids that must be confirmed before running.
+_DESTRUCTIVE: frozenset[str] = frozenset({
+    "docker.remove",
+    "docker.image.remove",
+    "docker.network.remove",
+    "docker.volume.remove",
+    "docker.compose.down",
+    "docker.prune",
+})
 
 # Files with one of these extensions are treated as runnable scripts even when
 # they lack the executable bit and a shebang; the value is the interpreter we
@@ -649,6 +684,8 @@ class DundersApp(App):
             ctx.content.cancel_event.set()
         elif isinstance(ctx, QuitRequest):
             self.exit()
+        elif isinstance(ctx, ProviderActionConfirm):
+            self._do_provider_action(ctx.action, list(ctx.targets))
 
     def on_copy_move_dialog_submitted(
         self, event: CopyMoveDialog.Submitted
@@ -930,6 +967,18 @@ class DundersApp(App):
             self._close_modal(event.dialog)
             self._open_form_source(Path(event.value).expanduser())
             return
+        if isinstance(ctx, DockerPullRequest):
+            self._close_modal(event.dialog)
+            ref = event.value.strip()
+            if not ref:
+                return
+            provider = self._vfs_registry.for_scheme("docker")
+            def _work():
+                result = provider.pull(ref, ctx.endpoint)
+                self.call_from_thread(self._after_provider_action,
+                                      self._active_panel(), result, None)
+            self.run_worker(_work, thread=True, exclusive=False, group="docker-pull")
+            return
         self._close_modal(event.dialog)
 
     def on_hex_viewer_widget_find_requested(
@@ -1088,6 +1137,11 @@ class DundersApp(App):
                 id="help.show",
                 label="Help (keys & AI)…",
                 handler=self.action_help_show,
+            ),
+            WindowCommand(
+                id="help.about",
+                label="About…",
+                handler=self.action_about,
             ),
         ]
         # Per-panel sort commands. Side-suffixed labels are what the command
@@ -1337,6 +1391,29 @@ class DundersApp(App):
             win_id=f"help-{self._editor_seq}",
         )
 
+    def action_about(self) -> None:
+        """Help ▸ About… — a small modal with the app name and version."""
+        if self.desktop is None or self._has_active_modal():
+            return
+        import platform
+        from importlib.metadata import PackageNotFoundError, version
+
+        import textual
+
+        try:
+            ver = version("dunders")
+        except PackageNotFoundError:
+            ver = "0.1.0"
+        text = (
+            "dunders\n\n"
+            f"Version {ver}\n\n"
+            "Terminal editor + Norton Commander-style\n"
+            "file manager, built on Textual.\n\n"
+            f"Python {platform.python_version()} · Textual {textual.__version__}"
+        )
+        show_modal(self.desktop, AboutDialog(text),
+                   title="About dunders", size=(52, 14))
+
     def action_open_file(self) -> None:
         if self.desktop is None:
             return
@@ -1493,6 +1570,7 @@ class DundersApp(App):
             Menu("Help", [
                 MenuItem(command_id="help.show"),
                 MenuItem(command_id="help.key_probe"),
+                MenuItem(command_id="help.about"),
             ]),
             # Items are rebuilt on every menu activation by
             # ``_refresh_windows_menu``; the empty list here is a placeholder.
@@ -2411,6 +2489,12 @@ class DundersApp(App):
         if getattr(action, "id", None) == "db.history":
             self._open_db_console(open_history=True)
             return
+        if getattr(action, "id", None) == "docker.pull":
+            self._prompt_docker_pull()
+            return
+        if getattr(action, "id", None) == "docker.run":
+            self._prompt_docker_run()
+            return
         if self._has_active_modal():
             return
         panel = self._active_panel()
@@ -2421,6 +2505,28 @@ class DundersApp(App):
             targets = [e.loc for e in panel.entries
                        if e.loc in locs and action.applies_to(e)]
         if not targets:
+            return
+        if getattr(action, "id", None) in _DESTRUCTIVE:
+            self._confirm_provider_action(action, targets)
+            return
+        self._do_provider_action(action, targets)
+
+    def _confirm_provider_action(self, action, targets: list) -> None:
+        """Show a ConfirmDialog before running a destructive provider action."""
+        if self.desktop is None:
+            return
+        prompt = f"{action.label} {len(targets)} item(s)?"
+        dialog = ConfirmDialog(
+            prompt=prompt,
+            context=ProviderActionConfirm(action=action, targets=tuple(targets)),
+        )
+        show_modal(self.desktop, dialog, title=action.label, size=(56, 9))
+        self.call_after_refresh(dialog.focus)
+
+    def _do_provider_action(self, action, targets: list) -> None:
+        """Execute a provider action off the UI thread (post-confirm path)."""
+        panel = self._active_panel()
+        if panel is None:
             return
         self.notify(f"{action.label}…", severity="information", timeout=2)
 
@@ -2477,12 +2583,85 @@ class DundersApp(App):
         show_modal(self.desktop, dialog, title="Password", size=(50, 5))
         self.call_after_refresh(dialog.focus_input)
 
+    def _prompt_docker_pull(self) -> None:
+        if self.desktop is None:
+            return
+        panel = self._active_panel()
+        if panel is None:
+            return
+        self._remember_active_panel_id()
+        dialog = InputDialog(
+            "Image to pull (e.g. nginx:1.27):",
+            context=DockerPullRequest(endpoint=panel.cwd_loc.root),
+        )
+        show_modal(self.desktop, dialog, title="Docker pull", size=(60, 5))
+        self.call_after_refresh(dialog.focus_input)
+
+    def _prompt_docker_run(self) -> None:
+        if self.desktop is None:
+            return
+        panel = self._active_panel()
+        if panel is None:
+            return
+        # Determine the image name from the cursor entry (an image: token).
+        image = ""
+        if 0 <= panel.cursor < len(panel.entries):
+            image = panel.entries[panel.cursor].name
+        self._remember_active_panel_id()
+        dialog = DockerRunDialog(
+            image,
+            context=DockerRunRequest(endpoint=panel.cwd_loc.root),
+        )
+        show_modal(self.desktop, dialog, title="Docker run", size=(70, 14))
+        self.call_after_refresh(dialog.focus_input)
+
     def _scheme_is_slow(self, scheme: str) -> bool:
         try:
             provider = self._vfs_registry.for_scheme(scheme)
         except KeyError:
             return False
         return "slow" in getattr(provider, "capabilities", frozenset())
+
+    def _provider_for_entry(self, entry):
+        """Return the VFS provider for *entry*'s scheme, or None if not registered."""
+        try:
+            return self._vfs_registry.for_scheme(entry.loc.scheme)
+        except KeyError:
+            return None
+
+    def _open_preview(self, provider, entry) -> None:
+        """Kick off a worker that calls provider.preview() then opens a viewer."""
+        loc = entry.loc
+
+        def _work() -> None:
+            try:
+                result = provider.preview(loc, entry)
+            except Exception as exc:
+                result = exc
+            try:
+                self.call_from_thread(self._show_preview, result)
+            except Exception:
+                pass  # app went away
+
+        self.run_worker(_work, thread=True, exclusive=False, group="docker-preview")
+
+    def _show_preview(self, result) -> None:
+        """UI-thread callback: open a viewer window for a preview result."""
+        if isinstance(result, Exception):
+            self.notify(str(result) or "preview failed", severity="error")
+            return
+        if result is None:
+            # Intentional no-op: a docker FS-file whose provider.preview() returns None
+            # shows nothing on F3 by design; do not fall through to _open_member_view.
+            return
+        self._remember_active_panel_id()
+        self._editor_seq += 1
+        content = ViewerContent(initial_text=result.text, file_path=None)
+        self._mount_maximized_content(
+            content,
+            title=result.title,
+            win_id=f"preview-{self._editor_seq}",
+        )
 
     def _scheme_accepts_empty_open(self, scheme: str) -> bool:
         """Whether opening this provider with an empty spec is meaningful
@@ -2582,6 +2761,32 @@ class DundersApp(App):
         self._refresh_bookmarks_menu()
 
     def on_add_bookmark_dialog_cancelled(self, event: AddBookmarkDialog.Cancelled) -> None:
+        self._close_modal(event.dialog)
+
+    def on_docker_run_dialog_submitted(self, event: DockerRunDialog.Submitted) -> None:
+        ctx = event.context
+        self._close_modal(event.dialog)
+        if not isinstance(ctx, DockerRunRequest):
+            return
+        try:
+            provider = self._vfs_registry.for_scheme("docker")
+        except KeyError:
+            return
+        spec = event.spec
+        panel = self._active_panel()
+
+        def _work() -> None:
+            result = provider.run_image(spec, ctx.endpoint)
+            try:
+                self.call_from_thread(
+                    self._after_provider_action, panel, result, None
+                )
+            except Exception:
+                pass  # app went away
+
+        self.run_worker(_work, thread=True, exclusive=False, group="docker-run")
+
+    def on_docker_run_dialog_cancelled(self, event: DockerRunDialog.Cancelled) -> None:
         self._close_modal(event.dialog)
 
     def action_open_bookmarks(self) -> None:
@@ -3257,6 +3462,10 @@ class DundersApp(App):
         if entry.loc.scheme == "db" and entry.extra.get("db.kind") == "table":
             # F3 on a table -> SQL console prefilled with SELECT * FROM <table>.
             self._open_db_table_query([entry.loc], mode="select")
+            return
+        prov = self._provider_for_entry(entry)
+        if prov is not None and isinstance(prov, ProviderPreview):
+            self._open_preview(prov, entry)
             return
         if entry.is_dir:
             return  # F3 on a dir is a no-op

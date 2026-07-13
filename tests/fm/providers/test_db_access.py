@@ -83,6 +83,78 @@ def test_query_non_select_returns_four_tuple(conn):
     assert rowcount == 1 and truncated is False
 
 
+def test_leading_keyword_skips_comments():
+    lk = da._leading_keyword
+    assert lk("DELETE FROM t WHERE id=1") == "delete"
+    assert lk("--SELECT * FROM t\nDELETE FROM t WHERE id='x'") == "delete"
+    assert lk("  /* hi */ select 1") == "select"
+    assert lk("\n\nWITH x AS (select 1) select * from x") == "with"
+    assert lk("delete from t returning id") == "delete"  # RETURNING still a write
+    assert lk("") == ""
+
+
+def test_query_streams_only_row_returning(conn, monkeypatch):
+    # Regression (Postgres): a write must NOT run under stream_results — psycopg2
+    # opens a server-side cursor via "DECLARE … CURSOR FOR <sql>", and a DELETE/
+    # UPDATE there is a syntax error ('at or near "DELETE"'). SQLite can't
+    # reproduce that, so guard the intent: streaming is requested for a SELECT
+    # and never for a write, even with a limit.
+    import sqlalchemy as sa
+
+    calls = []
+    orig = sa.Connection.execution_options
+
+    def spy(self, **kw):
+        calls.append(kw)
+        return orig(self, **kw)
+
+    monkeypatch.setattr(sa.Connection, "execution_options", spy)
+
+    conn.query("DELETE FROM users WHERE name='Bob'", limit=1000)
+    assert not any(c.get("stream_results") for c in calls)  # no cursor for DELETE
+
+    calls.clear()
+    conn.query("--SELECT ...\nUPDATE users SET age=9 WHERE name='Ann'", limit=1000)
+    assert not any(c.get("stream_results") for c in calls)  # comment-led write either
+
+    calls.clear()
+    conn.query("SELECT * FROM users", limit=1000)
+    assert any(c.get("stream_results") for c in calls)  # SELECT streams
+
+
+def test_query_insert_returning_shows_rows_without_stream(conn, monkeypatch):
+    # A row-returning write (INSERT/UPDATE/DELETE … RETURNING) must NOT open a
+    # server-side cursor (Postgres syntax error) yet must still surface the
+    # returned rows via the non-streaming cap path — and the write must commit.
+    import sqlalchemy as sa
+
+    calls = []
+    orig = sa.Connection.execution_options
+    monkeypatch.setattr(sa.Connection, "execution_options",
+                        lambda self, **kw: (calls.append(kw), orig(self, **kw))[1])
+    cols, rows, rowcount, truncated = conn.query(
+        "INSERT INTO users(name, age) VALUES ('Cara', 40) RETURNING name, age",
+        limit=1000)
+    assert not any(c.get("stream_results") for c in calls)  # no server-side cursor
+    assert cols == ["name", "age"] and rows == [{"name": "Cara", "age": 40}]
+    assert conn.count("users") == 3  # the INSERT actually committed
+
+
+def test_execute_script_write_last_no_stream(conn, monkeypatch):
+    # The multi-statement path has the same server-side-cursor hazard on its
+    # final statement — a trailing DELETE must not stream either.
+    import sqlalchemy as sa
+
+    calls = []
+    orig = sa.Connection.execution_options
+    monkeypatch.setattr(sa.Connection, "execution_options",
+                        lambda self, **kw: (calls.append(kw), orig(self, **kw))[1])
+    cols, rows, rowcount, truncated = conn.execute_script(
+        ["SELECT * FROM users", "DELETE FROM users WHERE name='Ann'"], limit=1000)
+    assert not any(c.get("stream_results") for c in calls)  # last stmt is a write
+    assert cols == [] and rowcount == 1
+
+
 def test_read_only_blocks_mutation(tmp_path):
     url = f"sqlite:///{tmp_path/'r.db'}"
     da.DbConn.open(url).close()  # create the file/schema

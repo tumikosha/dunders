@@ -26,6 +26,9 @@ from textual.widgets import DataTable, Input, Static
 from dunders.fm.actions import CopyStatus
 from dunders.fm.file_entry import format_size
 from dunders.windowing.content import WindowContent
+from dunders.windowing.helpers import ModalWindow
+from dunders.windowing.palette import Palette
+from dunders.windowing.window import Window
 
 if TYPE_CHECKING:
     from dunders.fm.find_file import FindOptions
@@ -37,6 +40,7 @@ __all__ = [
     "ChangeAttributesDialog",
     "ConfirmDialog",
     "CopyMoveDialog",
+    "DockerRunDialog",
     "FindFileDialog",
     "InputDialog",
     "NewFileDialog",
@@ -327,6 +331,70 @@ class ConfirmDialog(FocusChainMixin, Container, WindowContent):
 
     def action_cancel(self) -> None:
         self.post_message(ConfirmDialog.Result(self, False))
+
+
+class AboutDialog(Container, WindowContent):
+    """Informational About modal: app name, version, and an OK button.
+
+    Purely informational — Enter / Esc / OK all dismiss. Like
+    ``SqlHistoryDialog`` it dismisses itself by posting ``Window.Closed`` up to
+    the enclosing ``ModalWindow`` (``show_modal`` also closes it on Esc /
+    click-outside)."""
+
+    can_focus = False  # the OK button takes focus; the dialog is a host
+
+    BINDINGS = [
+        Binding("escape", "close", show=False),
+        Binding("enter", "close", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    AboutDialog { layout: vertical; }
+    AboutDialog #about-body {
+        margin: 1 2 0 2;
+        width: 1fr;
+        text-align: center;
+    }
+    AboutDialog #about-buttons {
+        height: 1;
+        align: center middle;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+        self.window_title = "About"
+
+    def compose(self) -> ComposeResult:
+        # markup=False: the body is plain text (version strings etc.) and must
+        # render literally — never parsed as Textual markup.
+        yield Static(self._text, id="about-body", markup=False)
+        with Horizontal(id="about-buttons"):
+            yield ShadowButton("OK", id="about-ok",
+                               face_bg="rgb(60,90,140)", hotkey="o")
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_ok)
+
+    def _focus_ok(self) -> None:
+        try:
+            self.query_one("#about-ok", ShadowButton).focus()
+        except Exception:
+            pass
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        self.action_close()
+
+    def action_close(self) -> None:
+        node = self
+        while node is not None:
+            if isinstance(node, ModalWindow):
+                node.post_message(Window.Closed(node))
+                break
+            node = getattr(node, "parent", None)
 
 
 class InputDialog(Container, WindowContent):
@@ -1694,3 +1762,203 @@ class BookmarksDialog(Container, WindowContent):
 
     def _remove_index(self, index: int) -> None:
         self.post_message(BookmarksDialog.Remove(self, index))
+
+
+class DockerRunDialog(FocusChainMixin, Container, WindowContent):
+    """Modal dialog for ``docker run``.
+
+    Shows the image name (read-only), then accepts an optional container name,
+    comma-separated port mappings (``-p`` values) and comma-separated volume
+    mappings (``-v`` values). Posts ``Submitted(context=..., spec={...})`` on
+    GO and ``Cancelled`` on Cancel/Escape.  Mirrors the :class:`CopyMoveDialog`
+    structure (palette ``apply_theme``, :class:`ShadowButton`, focus chain).
+    """
+
+    can_focus = False  # inner Inputs take focus
+
+    DEFAULT_CSS = """
+    DockerRunDialog {
+        layout: vertical;
+    }
+    DockerRunDialog .dr-label {
+        margin: 1 1 0 1;
+    }
+    DockerRunDialog .dr-image {
+        margin: 0 1;
+        padding: 0 1;
+    }
+    DockerRunDialog .dr-field {
+        margin: 0 1;
+        height: 1;
+        padding: 0 1;
+        border: none;
+    }
+    DockerRunDialog #dr-buttons {
+        height: 1;
+        align: center middle;
+        margin-top: 1;
+    }
+    """
+
+    class Submitted(Message):
+        def __init__(
+            self,
+            dialog: "DockerRunDialog",
+            context: object,
+            spec: dict,
+        ) -> None:
+            self.dialog = dialog
+            self.context = context
+            self.spec = spec
+            super().__init__()
+
+    class Cancelled(Message):
+        def __init__(self, dialog: "DockerRunDialog") -> None:
+            self.dialog = dialog
+            super().__init__()
+
+    def __init__(
+        self,
+        image: str,
+        *,
+        context: object | None = None,
+        title: str = "Docker run",
+    ) -> None:
+        super().__init__()
+        self.image = image
+        self.context = context
+        self.window_title = title
+        self._name_input = Input(id="dr-name", classes="dr-field")
+        self._ports_input = Input(
+            id="dr-ports", classes="dr-field",
+            placeholder="8080:80, 443:443",
+        )
+        self._vols_input = Input(
+            id="dr-vols", classes="dr-field",
+            placeholder="/host/path:/container/path",
+        )
+
+    def compose(self) -> ComposeResult:
+        yield Static("Image:", classes="dr-label")
+        yield Static(self.image, classes="dr-image")
+        yield Static("Container name (optional):", classes="dr-label")
+        yield self._name_input
+        yield Static("Ports  (-p, comma-separated):", classes="dr-label")
+        yield self._ports_input
+        yield Static("Volumes  (-v, comma-separated):", classes="dr-label")
+        yield self._vols_input
+        with Horizontal(id="dr-buttons"):
+            yield ShadowButton("Run", id="dr-run", face_bg="rgb(0,160,90)", hotkey="r")
+            yield ShadowButton(
+                "Cancel", id="dr-cancel", face_bg="rgb(160,40,40)", hotkey="c",
+            )
+
+    def on_mount(self) -> None:
+        self.apply_theme()
+        self._name_input.focus()
+
+    # --- theming -----------------------------------------------------------
+
+    def _get_palette(self) -> Palette | None:
+        try:
+            for anc in self.ancestors_with_self:
+                pal = getattr(anc, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        except Exception:
+            return None
+        return None
+
+    def apply_theme(self) -> None:
+        """Paint the surface and inputs from the palette so theme switches
+        (Options menu / Ctrl+T) restyle the dialog automatically.
+
+        CSS here is layout-only; colors are applied inline via this method,
+        mirroring the ``AiConfigDialog`` / ``ModelPickerDialog`` pattern."""
+        palette = self._get_palette()
+        if palette is None:
+            self.refresh()
+            return
+        content = palette.get("window.content")
+        sunken = palette.get("desktop.background")
+        border_idle = palette.get("menu.dropdown.border")
+        border_focus = palette.get("window.border.focused")
+        field_bg = sunken.bg or content.bg
+        field_fg = content.fg
+        focus_bg = content.bg or sunken.bg
+        border_idle_c = border_idle.fg or content.fg
+        border_focus_c = border_focus.fg or content.fg
+        if content.bg is not None:
+            self.styles.background = content.bg
+        if content.fg is not None:
+            self.styles.color = content.fg
+        for inp in (self._name_input, self._ports_input, self._vols_input):
+            focused = inp.has_focus
+            bg = focus_bg if focused else field_bg
+            border = border_focus_c if focused else border_idle_c
+            if bg is not None:
+                inp.styles.background = bg
+            if field_fg is not None:
+                inp.styles.color = field_fg
+            if border is not None:
+                inp.styles.border = ("round", border)
+        self.refresh()
+
+    def on_descendant_focus(self, event) -> None:  # noqa: ANN001
+        if isinstance(getattr(event, "widget", None), Input):
+            self.apply_theme()
+
+    def on_descendant_blur(self, event) -> None:  # noqa: ANN001
+        if isinstance(getattr(event, "widget", None), Input):
+            self.apply_theme()
+
+    def focus_input(self) -> None:
+        """Focus the first editable field (container name)."""
+        self._name_input.focus()
+
+    def _focusables(self) -> list[Widget]:
+        try:
+            return [
+                self._name_input,
+                self._ports_input,
+                self._vols_input,
+                self.query_one("#dr-run", ShadowButton),
+                self.query_one("#dr-cancel", ShadowButton),
+            ]
+        except Exception:
+            return [self._name_input]
+
+    def _build_spec(self) -> dict:
+        ports = [p.strip() for p in self._ports_input.value.split(",") if p.strip()]
+        vols = [v.strip() for v in self._vols_input.value.split(",") if v.strip()]
+        return {
+            "image": self.image,
+            "name": self._name_input.value.strip(),
+            "ports": ports,
+            "volumes": vols,
+            "detach": True,
+        }
+
+    def action_submit(self) -> None:
+        self.post_message(
+            DockerRunDialog.Submitted(self, self.context, self._build_spec())
+        )
+
+    def action_cancel(self) -> None:
+        self.post_message(DockerRunDialog.Cancelled(self))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_submit()
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        if event.button.id == "dr-run":
+            self.action_submit()
+        elif event.button.id == "dr-cancel":
+            self.action_cancel()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.action_cancel()

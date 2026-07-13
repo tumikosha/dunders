@@ -26,6 +26,7 @@ from dunders.fm.dialogs import ShadowButton, _BookmarkTable
 from dunders.fm.image_viewer import _ToolbarButton
 from dunders.fm.providers import db_access as da
 from dunders.windowing.content import WindowCommand, WindowContent
+from dunders.windowing.core import clipboard
 from dunders.windowing.core.buffer import TextBuffer
 from dunders.windowing.editor.splitter import Splitter
 from dunders.windowing.editor.widget import EditorWidget
@@ -42,11 +43,15 @@ _CELL_MAX = 60  # clip a cell's display text to this many chars (… elides the 
 def _is_pageable(sql: str) -> bool:
     """True if ``sql`` is a row-returning statement we can wrap for paging.
 
-    Only SELECT/WITH/VALUES results are paginated (LIMIT/OFFSET over a
-    sub-query); everything else (INSERT/UPDATE/DDL/PRAGMA) runs un-paged and
-    just reports a row count."""
-    s = sql.strip().lower()
-    return s.startswith(("select", "with", "values"))
+    Only a *single* SELECT/WITH/VALUES statement is paginated (LIMIT/OFFSET over
+    a sub-query); everything else (INSERT/UPDATE/DDL/PRAGMA) runs un-paged and
+    just reports a row count. A multi-statement script is never pageable —
+    wrapping ``SELECT …; DELETE …`` in ``SELECT * FROM (…)`` is a syntax error;
+    such scripts run via :meth:`DbConsoleContent._run_script` instead."""
+    stmts = da.split_statements(sql)
+    if len(stmts) != 1:
+        return False
+    return stmts[0].lower().startswith(("select", "with", "values"))
 
 # A resolved result-grid cell: its column, raw value, full (untruncated) text,
 # whether it can be written back, and the human reason when it cannot.
@@ -232,7 +237,9 @@ class CellEditDialog(Container, WindowContent):
             show_line_numbers=False, id="ce-edit",
         )
         self._preview = VerticalScroll(Static("", id="ce-pv-body"), id="ce-preview")
-        self._status = Static(reason, id="ce-status")
+        # markup=False — the status shows save-error strings verbatim (see the
+        # db-status rationale); a stray bracket must not be parsed as markup.
+        self._status = Static(reason, id="ce-status", markup=False)
 
     def compose(self):
         with Horizontal(id="ce-toolbar"):
@@ -247,6 +254,8 @@ class CellEditDialog(Container, WindowContent):
                                face_bg="rgb(60,90,140)", hotkey="r")
             yield ShadowButton("Format JSON", id="ce-json",
                                face_bg="rgb(60,90,140)", hotkey="j")
+            yield ShadowButton("Copy", id="ce-copy",
+                               face_bg="rgb(60,90,140)", hotkey="y")
             yield ShadowButton("Close", id="ce-close",
                                face_bg="rgb(80,80,90)", hotkey="c")
 
@@ -310,6 +319,16 @@ class CellEditDialog(Container, WindowContent):
         self.call_after_refresh(self._editor.focus)
         self._set_status("Formatted as JSON." + note)
 
+    def _do_copy(self) -> None:
+        """Copy the full cell text to the system clipboard (OSC 52 fallback)."""
+        text = self._editor_text()
+        try:
+            clipboard.copy(text, app=self.app)
+        except Exception as exc:  # noqa: BLE001 — surface copy errors in-dialog
+            self._set_status(f"Copy failed: {exc}")
+            return
+        self._set_status(f"Copied {len(text)} chars to clipboard.")
+
     def _do_save(self) -> None:
         if self._on_save is None:
             return
@@ -329,6 +348,8 @@ class CellEditDialog(Container, WindowContent):
             self._toggle_render()
         elif bid == "ce-json":
             self._format_json()
+        elif bid == "ce-copy":
+            self._do_copy()
         elif bid == "ce-close":
             self._dismiss_modal()
 
@@ -416,8 +437,12 @@ class DbConsoleContent(WindowContent):
             show_line_numbers=False, id="db-sql",
         )
         self._table = DataTable(id="db-grid", zebra_stripes=True)
+        # markup=False: status text is arbitrary (SQL echoes, DB error strings
+        # like SQLAlchemy's "[SQL: …]" / "[parameters: …]") and must render
+        # literally — parsing it as Rich markup raises MarkupError on any stray
+        # bracket and crashes the app.
         self._status = Static("Ctrl+R or [ Run ] to execute · Esc to close",
-                              id="db-status")
+                              id="db-status", markup=False)
         run_btn = _ToolbarButton("[ Run (Ctrl+R) ]", on_press=self._run_current)
         hist_btn = _ToolbarButton("[ History (Alt+H) ]", on_press=self._open_history)
         self._prev_btn = _ToolbarButton("[ ◀ Prev ]", on_press=self._prev_page)
@@ -481,9 +506,18 @@ class DbConsoleContent(WindowContent):
         event.stop()
 
     def run_sql(self, sql: str) -> None:
-        """Execute a fresh query. A row-returning statement is paginated (page 0
-        shown, Prev/Next navigate); everything else runs un-paged."""
-        if _is_pageable(sql):
+        """Execute a fresh query. A single row-returning statement is paginated
+        (page 0 shown, Prev/Next navigate); a single write/DDL runs un-paged; a
+        multi-statement script runs each statement in one transaction and shows
+        the last result."""
+        stmts = da.split_statements(sql)
+        if not stmts:
+            self._set_status("Nothing to run.")
+            return
+        if len(stmts) > 1:
+            self._page_sql = None
+            self._run_script(sql, stmts)
+        elif _is_pageable(sql):
             self._page_sql = sql
             self._page = 0
             self._load_page(initial=True)
@@ -517,6 +551,36 @@ class DbConsoleContent(WindowContent):
             self.last_columns, self.last_rows = [], []
             self._edit_table = self._edit_pk = None
             self._set_status(f"{rowcount} row(s) affected")
+            self._render_grid([], [])
+        self._record_history(sql, ok=True)
+
+    def _run_script(self, sql: str, statements: list[str]) -> None:
+        """Run a multi-statement (``;``-separated) script in one transaction and
+        show the LAST statement's result. Never paginated (wrapping a script for
+        LIMIT/OFFSET is a syntax error) and never cell-editable (the result
+        isn't a single-table SELECT). Records the whole script in history once."""
+        n = len(statements)
+        try:
+            cols, rows, rowcount, truncated = self._conn.execute_script(
+                statements, limit=_RESULT_CAP)
+        except Exception as exc:  # noqa: BLE001 — surface DB errors in the status line
+            self._set_status(f"Error: {exc}")
+            self.last_columns, self.last_rows = [], []
+            self._edit_table = self._edit_pk = None
+            self._render_grid([], [])
+            self._record_history(sql, ok=False)
+            return
+        self._edit_table = self._edit_pk = None  # script result isn't editable
+        if cols:
+            self.last_columns, self.last_rows = cols, rows
+            extra = (f" (showing first {_RESULT_CAP} — add LIMIT to narrow)"
+                     if truncated else "")
+            self._set_status(f"{n} statements run; last returned {len(rows)} "
+                             f"row(s){extra}")
+            self._render_grid(cols, rows)
+        else:
+            self.last_columns, self.last_rows = [], []
+            self._set_status(f"{n} statements run; {rowcount} row(s) affected")
             self._render_grid([], [])
         self._record_history(sql, ok=True)
 
@@ -612,10 +676,20 @@ class DbConsoleContent(WindowContent):
         if self._table is None:  # headless (tests): grid not mounted
             return
         self._table.clear(columns=True)
-        if cols:
-            self._table.add_columns(*cols)
-            for r in rows:
-                self._table.add_row(*[_clip(str(r.get(c, ""))) for c in cols])
+        if not cols:
+            return
+        # Pre-clip every cell so each column can be sized to its widest value
+        # up front. DataTable's auto-width does NOT grow a column synchronously
+        # when a cell is wider than its header (e.g. `count(*) AS n` → header 1
+        # char, value "1500"): the extra chars stay clipped until a hover /
+        # refresh recomputes widths. Explicit widths render correctly at once.
+        clipped = [[_clip(str(r.get(c, ""))) for c in cols] for r in rows]
+        for ci, name in enumerate(cols):
+            header = str(name)
+            width = max([len(header)] + [len(row[ci]) for row in clipped])
+            self._table.add_column(header, width=width)
+        for row in clipped:
+            self._table.add_row(*row)
 
     # --- cell view/edit ---------------------------------------------------
 

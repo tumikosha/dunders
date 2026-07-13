@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 
 
 __all__ = ["VfsProvider", "ProgressCallback", "TargetResolver", "ProviderAction",
-           "ProviderActions", "ProviderColumn", "ProviderColumns"]
+           "ProviderActions", "ProviderColumn", "ProviderColumns",
+           "PreviewResult", "ProviderPreview"]
 
 ProgressCallback = Callable[[int, int], None]
 
@@ -71,14 +72,17 @@ class ProviderColumn:
     """An extra panel column a provider contributes for its listings (e.g. a
     Docker "S" state column). Replaces the default Size/Date columns when a
     provider declares any. ``value`` renders the cell text (``width`` cells
-    wide, centred); ``sort_key`` is used when the user sorts by this column
-    (click on its header). ``label`` is the header text."""
+    wide); ``sort_key`` is used when the user sorts by this column (click on its
+    header). ``label`` is the header text. ``align`` controls how both the cell
+    text and the header label sit in the column ("center" — the default —
+    "left", or "right"); use "left" for free-text columns like a name."""
 
     key: str
     label: str
     width: int
     value: Callable[["FileEntry"], str]
     sort_key: Callable[["FileEntry"], object]
+    align: str = "center"
 
 
 @runtime_checkable
@@ -90,6 +94,40 @@ class ProviderColumns(Protocol):
     scheme: str
 
     def columns(self, loc: VfsPath) -> "list[ProviderColumn]": ...
+
+
+@dataclass(frozen=True)
+class PreviewResult:
+    """Provider-computed text shown by F3 for an entry that isn't a plain file
+    (a container's logs, an image/network/volume ``inspect``). ``kind`` picks the
+    viewer flavour ("log"/"json"/"text"); ``title`` is the window title."""
+    text: str
+    kind: str
+    title: str
+
+
+@runtime_checkable
+class ProviderPreview(Protocol):
+    """Optional capability: F3 preview for special entries. Checked structurally."""
+    scheme: str
+    def preview(self, loc: VfsPath, entry: "FileEntry") -> "PreviewResult | None": ...
+
+
+@runtime_checkable
+class ProviderNameOnly(Protocol):
+    """Optional capability: a provider that asks the panel to drop the default
+    Size/Date columns at a given location and render a Name-only listing.
+
+    Meant for pure navigation/grouping levels whose entries carry no meaningful
+    size or mtime (e.g. Docker's compose-project / section index), where the
+    default "Date" column would only ever show the epoch (1970-01-01). Returns
+    ``False`` for locations with real files (so their dates still show), and is
+    ignored when the location already contributes ``columns()``. Checked
+    structurally, like the other optional capabilities."""
+
+    scheme: str
+
+    def hide_default_columns(self, loc: VfsPath) -> bool: ...
 
 
 @runtime_checkable

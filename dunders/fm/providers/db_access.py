@@ -27,8 +27,89 @@ import sqlalchemy as sa
 
 __all__ = [
     "DbConn", "ReadOnlyError", "record_to_json", "json_to_record",
-    "single_table_target",
+    "single_table_target", "split_statements",
 ]
+
+
+def split_statements(sql: str) -> list[str]:
+    """Split ``sql`` into individual statements on top-level ``;``.
+
+    String literals (``'…'`` / ``"…"``, doubled-quote escapes), line comments
+    (``-- …``) and block comments (``/* … */``) are respected so a ``;`` inside
+    them never splits. Returns the non-empty, stripped statements with their
+    trailing ``;`` removed. A single statement (the common case) comes back as a
+    one-element list."""
+    stmts: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    quote: str | None = None  # active string-literal quote char, else None
+    while i < n:
+        ch = sql[i]
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                if i + 1 < n and sql[i + 1] == quote:  # doubled '' / "" escape
+                    buf.append(sql[i + 1])
+                    i += 2
+                    continue
+                quote = None
+            i += 1
+            continue
+        two = sql[i:i + 2]
+        if two == "--":                                # line comment
+            j = sql.find("\n", i)
+            j = n if j == -1 else j
+            buf.append(sql[i:j])
+            i = j
+            continue
+        if two == "/*":                                # block comment
+            j = sql.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            buf.append(sql[i:j])
+            i = j
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            stmts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    stmts.append("".join(buf))
+    return [s.strip() for s in stmts if s.strip()]
+
+
+def _leading_keyword(sql: str) -> str:
+    """First SQL keyword, lower-cased, skipping leading whitespace and
+    ``--`` / ``/* */`` comments (``"" `` if none). Used to tell a row-returning
+    statement (SELECT/WITH/VALUES) from a write/DDL *before* executing it."""
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+        elif sql[i:i + 2] == "--":
+            j = sql.find("\n", i)
+            i = n if j == -1 else j + 1
+        elif sql[i:i + 2] == "/*":
+            j = sql.find("*/", i)
+            i = n if j == -1 else j + 2
+        else:
+            break
+    m = re.match(r"[A-Za-z_]+", sql[i:])
+    return m.group(0).lower() if m else ""
+
+
+# Statements whose result is a cursor-able row set — the only ones a psycopg2
+# server-side cursor (stream_results) can wrap. A DELETE/UPDATE/INSERT put after
+# "DECLARE … CURSOR FOR" is a Postgres syntax error, so streaming must be gated
+# on this even though the row count is unknown until execution.
+_ROW_RETURNING = ("select", "with", "values", "table", "show", "explain")
 
 
 # Stop the FROM-table capture at the next top-level clause keyword (or the end).
@@ -283,14 +364,22 @@ class DbConn:
     ) -> tuple[list[str], list[dict], int, bool]:
         """Run raw ``sql``. Returns ``(columns, rows, rowcount, truncated)``.
 
-        For a row-returning statement, ``limit`` caps how many rows are
-        *fetched* (not just displayed): the result is streamed
-        (``stream_results``) and at most ``limit + 1`` rows are pulled, so a
-        ``SELECT * FROM huge_table`` never materialises the whole table into
-        memory. ``truncated`` is True when more rows exist beyond ``limit``.
-        Non-row statements return ``rowcount`` and ``truncated=False``."""
+        For a SELECT, ``limit`` caps how many rows are *fetched* (not just
+        displayed): the result is streamed (``stream_results``) and at most
+        ``limit + 1`` rows are pulled, so a ``SELECT * FROM huge_table`` never
+        materialises the whole table into memory. ``truncated`` is True when
+        more rows exist beyond ``limit``. Non-row statements return ``rowcount``
+        and ``truncated=False``.
+
+        Streaming is enabled ONLY for a row-returning leading keyword
+        (:data:`_ROW_RETURNING`). On Postgres, ``stream_results`` opens a
+        server-side cursor via ``DECLARE … CURSOR FOR <sql>``; a DELETE/UPDATE/
+        INSERT there is a syntax error (``at or near "DELETE"``). A write with a
+        ``RETURNING`` clause still returns rows — handled by the non-streaming
+        cap below — so no result is lost."""
+        stream = limit is not None and _leading_keyword(sql) in _ROW_RETURNING
         with self._engine.begin() as cx:
-            if limit is not None:
+            if stream:
                 cx = cx.execution_options(stream_results=True, max_row_buffer=limit + 1)
             result = cx.execute(sa.text(sql))
             if result.returns_rows:
@@ -301,7 +390,7 @@ class DbConn:
                 fetched = result.mappings().fetchmany(limit + 1)
                 truncated = len(fetched) > limit
                 rows = [dict(m) for m in fetched[:limit]]
-                # Stop the server-side cursor cleanly without draining the rest.
+                # Stop the (possibly server-side) cursor without draining the rest.
                 result.close()
                 return cols, rows, len(rows), truncated
             return [], [], int(result.rowcount or 0), False
@@ -335,6 +424,51 @@ class DbConn:
         has_next = len(fetched) > limit
         rows = [dict(m) for m in fetched[:limit]]
         return cols, rows, has_next
+
+    def execute_script(
+        self, statements: list[str], *, limit: int | None = None
+    ) -> tuple[list[str], list[dict], int, bool]:
+        """Run ``statements`` in order inside a single transaction; return the
+        LAST statement's result as ``(columns, rows, rowcount, truncated)`` —
+        the same shape as :meth:`query`.
+
+        A SQL console lets the user run several ``;``-separated statements at
+        once (e.g. a ``SELECT`` to eyeball a row followed by a ``DELETE``). The
+        DB-API can only ``execute`` one statement at a time, so we split (via
+        :func:`split_statements`) and run them sequentially, atomically. Only the
+        final row-returning statement is materialised (capped at ``limit`` like
+        :meth:`query`); earlier results are drained and discarded."""
+        last: tuple[list[str], list[dict], int, bool] = ([], [], 0, False)
+        with self._engine.begin() as cx:
+            for idx, stmt in enumerate(statements):
+                is_last = idx == len(statements) - 1
+                run = cx
+                # Stream (server-side cursor) only for a row-returning last
+                # statement — a DELETE/UPDATE after "DECLARE … CURSOR FOR" is a
+                # Postgres syntax error. See :meth:`query`.
+                if (is_last and limit is not None
+                        and _leading_keyword(stmt) in _ROW_RETURNING):
+                    run = cx.execution_options(
+                        stream_results=True, max_row_buffer=limit + 1)
+                result = run.execute(sa.text(stmt))
+                if not result.returns_rows:
+                    if is_last:
+                        last = [], [], int(result.rowcount or 0), False
+                    continue
+                if not is_last:
+                    result.close()   # drain a non-final SELECT so the next runs
+                    continue
+                cols = list(result.keys())
+                if limit is None:
+                    rows = [dict(m) for m in result.mappings()]
+                    last = cols, rows, len(rows), False
+                else:
+                    fetched = result.mappings().fetchmany(limit + 1)
+                    truncated = len(fetched) > limit
+                    rows = [dict(m) for m in fetched[:limit]]
+                    result.close()
+                    last = cols, rows, len(rows), truncated
+        return last
 
     def close(self) -> None:
         try:

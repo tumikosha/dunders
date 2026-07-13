@@ -1865,3 +1865,171 @@ async def test_enter_on_sqlite_routes_to_open_dunder(tmp_path, monkeypatch):
                           mtime=0.0, is_dir=False)
         app.on_file_panel_item_activated(types.SimpleNamespace(entry=entry))
         assert captured == {"scheme": "db", "spec": f"sqlite:///{db}"}
+
+
+@pytest.mark.asyncio
+async def test_f3_docker_preview_opens_viewer(monkeypatch):
+    """F3 on a docker meta-entry (e.g. an image) opens a ViewerContent window."""
+    from dunders.core.vfs import VfsPath
+    from dunders.core.vfs.provider import PreviewResult
+    from dunders.fm.file_entry import FileEntry
+
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test() as pilot:
+        panel = app._active_panel()
+        loc = VfsPath(scheme="docker", root="", parts=("images", "image:aa"))
+        entry = FileEntry(loc=loc, name="nginx:1.27", size=0, mtime=0.0, is_dir=False)
+
+        class _Prov:
+            scheme = "docker"
+            capabilities = frozenset({"read", "slow"})
+
+            def preview(self, loc, entry):
+                return PreviewResult("INSPECT-JSON", "json", "image inspect: nginx")
+
+        monkeypatch.setattr(app._vfs_registry, "for_scheme", lambda s: _Prov())
+        monkeypatch.setattr(panel, "entries", [entry])
+        monkeypatch.setattr(panel, "cursor", 0)
+
+        app.action_view()
+        await pilot.pause()
+        await pilot.pause()  # allow worker thread + call_from_thread to complete
+
+        from dunders.fm.viewer import ViewerContent
+        assert any(
+            isinstance(getattr(w, "content", None), ViewerContent)
+            for w in app.desktop.windows
+        )
+
+
+async def test_f3_docker_fs_file_preview_none_is_intentional_noop(monkeypatch):
+    """F3 on a docker FS-file whose preview() returns None opens no viewer (accepted limitation)."""
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.file_entry import FileEntry
+    from dunders.fm.viewer import ViewerContent
+
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test() as pilot:
+        panel = app._active_panel()
+        loc = VfsPath(
+            scheme="docker",
+            root="",
+            parts=("containers", "container:web", "etc", "nginx.conf"),
+        )
+        entry = FileEntry(loc=loc, name="nginx.conf", size=1024, mtime=0.0, is_dir=False)
+
+        class _Prov:
+            scheme = "docker"
+            capabilities = frozenset({"read", "slow"})
+
+            def preview(self, loc, entry):
+                return None  # ordinary FS file inside container — no preview
+
+        monkeypatch.setattr(app._vfs_registry, "for_scheme", lambda s: _Prov())
+        monkeypatch.setattr(panel, "entries", [entry])
+        monkeypatch.setattr(panel, "cursor", 0)
+
+        before = {
+            w
+            for w in app.desktop.windows
+            if isinstance(getattr(w, "content", None), ViewerContent)
+        }
+
+        app.action_view()
+        await pilot.pause()
+        await pilot.pause()  # allow worker thread + call_from_thread to complete
+
+        after = {
+            w
+            for w in app.desktop.windows
+            if isinstance(getattr(w, "content", None), ViewerContent)
+        }
+        assert after == before, "No new ViewerContent window should open when preview() returns None"
+
+
+@pytest.mark.asyncio
+async def test_docker_pull_prompts_then_runs(monkeypatch):
+    """docker.pull opens an InputDialog rather than running immediately."""
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.fm.dialogs import InputDialog
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test() as pilot:
+        class _Act:
+            id = "docker.pull"
+            label = "Pull"
+            applies_to = staticmethod(lambda e: True)
+        app._run_provider_action(_Act())
+        await pilot.pause()
+        assert any(isinstance(getattr(w, "content", None), InputDialog)
+                   for w in app.desktop.windows)
+
+
+async def test_docker_run_prompts(monkeypatch):
+    """docker.run opens a DockerRunDialog rather than running immediately."""
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.fm.dialogs import DockerRunDialog
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test() as pilot:
+        class _Act:
+            id = "docker.run"
+            label = "Run"
+            applies_to = staticmethod(lambda e: True)
+        app._run_provider_action(_Act())
+        await pilot.pause()
+        assert any(isinstance(getattr(w, "content", None), DockerRunDialog)
+                   for w in app.desktop.windows)
+
+
+@pytest.mark.asyncio
+async def test_docker_remove_confirms(monkeypatch):
+    """docker.image.remove (and other destructive ids) shows a ConfirmDialog
+    instead of running the action immediately."""
+    import dunders.fm.providers.docker_provider as dp
+    monkeypatch.setattr(dp, "docker_available", lambda: True)
+    from dunders.app import DundersApp
+    from dunders.fm.dialogs import ConfirmDialog
+    app = DundersApp(launch_mode="fm")
+    async with app.run_test() as pilot:
+        class _Act:
+            id = "docker.image.remove"
+            label = "Remove image"
+            applies_to = staticmethod(lambda e: True)
+            run = staticmethod(lambda locs: None)
+        from dunders.core.vfs import VfsPath
+        app._run_provider_action(
+            _Act(),
+            targets=[VfsPath(scheme="docker", root="", parts=("images", "image:aa"))],
+        )
+        await pilot.pause()
+        assert any(
+            isinstance(getattr(w, "content", None), ConfirmDialog)
+            for w in app.desktop.windows
+        )
+
+
+@pytest.mark.asyncio
+async def test_help_about_opens_modal_with_version():
+    # Help ▸ About… opens a modal AboutDialog showing the app name and version;
+    # Esc dismisses it and clears the modal stack.
+    from dunders.fm.dialogs import AboutDialog
+
+    app = DundersApp(launch_mode="fm", initial_path="/tmp")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_about()
+        await pilot.pause()
+        dialogs = [w.content for w in app.desktop.windows
+                   if isinstance(getattr(w, "content", None), AboutDialog)]
+        assert len(dialogs) == 1
+        body = dialogs[0]._text
+        assert "dunders" in body and "Version" in body
+        assert app.desktop._has_modal()  # modal stack is active
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not any(isinstance(getattr(w, "content", None), AboutDialog)
+                       for w in app.desktop.windows)
+        assert not app.desktop._has_modal()  # dismiss cleared the modal stack
