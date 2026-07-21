@@ -123,6 +123,27 @@ class TestFileIntoZip:
         assert "dir/top.txt" in names
         assert "dir/sub/deep.txt" in names
 
+    def test_copy_dir_includes_dotfiles(self, tmp_path):
+        # Regression: a directory copy is view-agnostic — hidden entries
+        # (.env, .git, …) must be walked even though the panel filters them
+        # from display. The engine used to scan with the default
+        # show_hidden=False, so cross-scheme copies silently dropped dotfiles.
+        archive = _make_zip(tmp_path / "a.zip")
+        d = tmp_path / "dir"
+        (d / ".hidden").parent.mkdir(parents=True, exist_ok=True)
+        (d / ".hidden").write_text("secret")
+        (d / "visible.txt").write_text("v")
+        (d / ".cfgdir").mkdir()
+        (d / ".cfgdir" / "inner").write_text("i")
+        res = transfer(
+            self._reg(), [VfsPath.local(d)], _root(archive), mode="copy"
+        )
+        assert not res.errors
+        names = _names(archive)
+        assert "dir/.hidden" in names
+        assert "dir/visible.txt" in names
+        assert "dir/.cfgdir/inner" in names
+
     def test_copy_into_subdir_of_archive(self, tmp_path):
         # Append at a sub-path locator (panel browsed into dir/ inside the zip).
         archive = tmp_path / "a.zip"

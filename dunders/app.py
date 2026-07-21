@@ -35,7 +35,6 @@ from dunders.fm.actions import (
     CopyStatus,
     OpResult,
     chmod_paths,
-    mkdir_at,
     pack_paths,
 )
 from dunders.fm.vfs_engine import transfer
@@ -234,7 +233,7 @@ class DunderPasswordRequest:
 
 @dataclass(frozen=True)
 class MkdirRequest:
-    parent: Path
+    parent_loc: VfsPath
 
 
 @dataclass(frozen=True)
@@ -2293,14 +2292,22 @@ class DundersApp(App):
         panel = self._active_panel()
         if panel is None or self.desktop is None:
             return
-        if panel.cwd_loc.scheme != "file":
+        # F7 is VFS-routed: any provider whose scheme supports "write" (local,
+        # sftp, ftp, zip append, …) can create a directory. Only read-only
+        # schemes (7z browse, db) are refused. Previously this was hardwired to
+        # scheme=="file", so mkdir on sftp silently bailed before the dialog.
+        try:
+            provider = self._vfs_registry.resolve(panel.cwd_loc)
+        except KeyError:
+            self._warn_archive_unsupported()
+            return
+        if "write" not in getattr(provider, "capabilities", frozenset()):
             self._warn_archive_unsupported()
             return
         self._remember_active_panel_id()
-        cwd = panel.cwd
         dialog = NewFileDialog(
-            prompt=f"Create directory in {cwd}:",
-            context=MkdirRequest(parent=cwd),
+            prompt=f"Create directory in {panel._cwd_display()}:",
+            context=MkdirRequest(parent_loc=panel.cwd_loc),
             submit_label="Make",
             title="Mkdir",
         )
@@ -3265,7 +3272,15 @@ class DundersApp(App):
             name = event.value.strip()
             if not name:
                 return
-            result = mkdir_at(ctx.parent, name)
+            # VFS-routed: LocalProvider.mkdir wraps mkdir_at; sftp/ftp/zip
+            # providers create the directory over their own protocol. One path
+            # serves every writable scheme.
+            try:
+                provider = self._vfs_registry.resolve(ctx.parent_loc)
+            except KeyError:
+                self._warn_archive_unsupported()
+                return
+            result = provider.mkdir(ctx.parent_loc, name)
             self._report_op_result("mkdir", result)
             self._refresh_panels()
             return

@@ -1,9 +1,13 @@
 """scan_dir — build a list of FileEntry rows for a directory.
 
-Errors are swallowed by design: an unreadable child, a vanishing race,
-or a permission-denied iterdir all yield best-effort partial output
-rather than an exception. The panel uses this directly on every refresh
-and must not blow up on missing/locked filesystem state.
+Per-child errors are swallowed by design: an unreadable child or a vanishing
+race yields best-effort partial output rather than an exception. But a failure
+to open the *directory itself* (``os.scandir`` raising — e.g. a chmod-000 dir,
+or a macOS TCC-protected folder like ~/Downloads when the terminal lacks the
+grant) is re-raised: an empty listing there is not a real result, it is a
+concealed permission error. ``FilePanel.refresh_listing`` catches it and shows a
+"Listing failed: …" toast so the user sees *why* the folder looks empty instead
+of an unexplained blank pane.
 """
 
 from __future__ import annotations
@@ -60,10 +64,11 @@ def scan_dir(
     # come for free without a syscall on regular files. Only the metadata
     # (size/mtime/mode) costs one lstat-equivalent per child — down from the
     # ~3 stats per child the old iterdir + lstat + is_dir + is_symlink did.
-    try:
-        scan = os.scandir(cwd)
-    except OSError:
-        return entries
+    # A failure to open the directory itself (permission denied, vanished,
+    # TCC-blocked on macOS) is NOT best-effort partial output — it is the whole
+    # listing failing. Re-raise so the panel can report it instead of rendering
+    # a misleading empty pane. Per-child errors below stay swallowed.
+    scan = os.scandir(cwd)
 
     with scan:
         for entry in scan:

@@ -356,15 +356,29 @@ class SftpProvider:
         return _SftpWriter(sftp, lock, remote)
 
     def mkdir(self, parent: VfsPath, name: str) -> OpResult:
+        result = OpResult()
         sftp = self._sftp(parent.root)
         lock = self._lock_for(parent.root)
         remote = "/" + "/".join((*parent.parts, name))
+        loc = parent.child(name)
         with lock:
             try:
                 sftp.mkdir(remote)
-            except OSError:
-                pass  # already exists / tolerated, like the other providers
-        return OpResult()
+            except OSError as exc:
+                # Tolerate an already-existing dir (like the other providers),
+                # but surface a genuine failure (permission denied, missing
+                # parent) instead of swallowing it — otherwise F7 silently does
+                # nothing and the user has no idea why.
+                if not self._is_dir_remote(sftp, remote):
+                    result.errors.append(OpError(loc=loc, reason=str(exc)))
+        return result
+
+    @staticmethod
+    def _is_dir_remote(sftp, remote: str) -> bool:
+        try:
+            return stat.S_ISDIR(sftp.stat(remote).st_mode or 0)
+        except OSError:
+            return False
 
     def delete(
         self,

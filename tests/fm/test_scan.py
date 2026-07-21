@@ -2,6 +2,8 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from dunders.fm.scan import scan_dir
 
 
@@ -73,20 +75,20 @@ def test_scan_dir_marks_executable_files(tmp_path: Path):
     assert e.is_dir is False
 
 
-def test_scan_dir_handles_unreadable_dir(tmp_path: Path, monkeypatch):
-    """If os.scandir() raises, return parent-only (or empty) result, don't crash."""
+def test_scan_dir_raises_on_unreadable_dir(tmp_path: Path, monkeypatch):
+    """If os.scandir() itself fails (e.g. macOS TCC-protected Downloads, or a
+    chmod 000 dir), surface the error rather than silently returning an empty
+    listing — the panel turns this into a 'Listing failed' toast so the user
+    sees *why* the folder looks empty instead of an unexplained blank pane."""
     target = tmp_path / "locked"
     target.mkdir()
 
     def _raise(*_a, **_kw):
-        raise PermissionError("denied")
+        raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(os, "scandir", _raise)
-    entries = scan_dir(target, show_hidden=False, include_parent=True)
-    # Parent entry is still reachable through stat() of target.parent
-    # (which does not go through os.scandir). The body of the listing is empty.
-    body = [e for e in entries if e.name != ".."]
-    assert body == []
+    with pytest.raises(PermissionError):
+        scan_dir(target, show_hidden=False, include_parent=True)
 
 
 class _FakeDirEntry:

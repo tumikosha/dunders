@@ -268,8 +268,32 @@ class TestIntegration:
         with p.open_write(loc) as w:
             w.write(b"uploaded")
         assert (root / "up.txt").read_bytes() == b"uploaded"
-        p.mkdir(_root_loc(port), "newdir")
+        res = p.mkdir(_root_loc(port), "newdir")
+        assert not res.errors
         assert (root / "newdir").is_dir()
+
+    def test_mkdir_reports_failure(self, sftp_server):
+        # Regression: sftp.mkdir used to swallow every OSError, so a genuine
+        # failure (here: a missing parent path) looked like success and F7
+        # silently created nothing. The error must now surface in OpResult.
+        _h, port, root = sftp_server
+        p = SftpProvider()
+        _open(p, port)
+        missing_parent = VfsPath(
+            scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=("nope",)
+        )
+        res = p.mkdir(missing_parent, "child")
+        assert res.errors
+        assert not (root / "nope").exists()
+
+    def test_mkdir_tolerates_existing(self, sftp_server):
+        # An already-present directory is not an error (mc/NC parity).
+        _h, port, root = sftp_server
+        p = SftpProvider()
+        _open(p, port)
+        res = p.mkdir(_root_loc(port), "dir")  # "dir" exists in the fixture
+        assert not res.errors
+        assert (root / "dir").is_dir()
 
     def test_no_clobber(self, sftp_server):
         _h, port, _root = sftp_server

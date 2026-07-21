@@ -222,7 +222,12 @@ def _copy_tree(
     dst_p = registry.resolve(dest)
     if src_p.is_dir(src):
         _ensure_dir(dst_p, dest)
-        for child in src_p.scan(src, include_parent=False):
+        # A copy is view-agnostic: walk the FULL tree, hidden entries included.
+        # The panel's show_hidden is a display filter — a directory copy that
+        # honoured it would silently drop dotfiles (.git, .env, …). Most visible
+        # on cross-scheme transfers (sftp/zip) that route through this engine;
+        # local→local goes through actions.copy_paths and was never affected.
+        for child in src_p.scan(src, include_parent=False, show_hidden=True):
             _copy_tree(registry, child.loc, dest.child(child.name),
                        on_chunk=on_chunk, on_file_done=on_file_done,
                        cancel_event=cancel_event)
@@ -281,7 +286,9 @@ def _measure(registry: VfsRegistry, loc: VfsPath) -> tuple[int, int]:
             return 1, est
     files = total = 0
     try:
-        children = provider.scan(loc, include_parent=False)
+        # Match _copy_tree: measure the full tree (dotfiles included) so the
+        # progress bar's denominator equals what actually gets copied.
+        children = provider.scan(loc, include_parent=False, show_hidden=True)
     except OSError:
         return 1, 0
     for child in children:
@@ -301,7 +308,8 @@ def _size_of(provider: VfsProvider, loc: VfsPath) -> int:
     if parent is None:
         return 0
     try:
-        for entry in provider.scan(parent, include_parent=False):
+        # show_hidden so a dotfile's size resolves too (else it reads back 0).
+        for entry in provider.scan(parent, include_parent=False, show_hidden=True):
             if entry.name == loc.name:
                 return max(entry.size, 0)
     except OSError:

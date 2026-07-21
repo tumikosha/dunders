@@ -9,6 +9,7 @@ hook the file-operation actions (F5/F6/F7/F8) into the panel API.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from rich.cells import set_cell_size
@@ -306,8 +307,17 @@ class FilePanel(WindowContent):
         )
 
     def _notify_listing_failed(self, exc: Exception) -> None:
+        msg = f"Listing failed: {exc}"
+        if isinstance(exc, PermissionError) and sys.platform == "darwin":
+            # macOS TCC: ~/Downloads, ~/Desktop, ~/Documents are gated per-app.
+            # POSIX perms are fine (you own them) yet os.scandir still gets
+            # EPERM until the *terminal* running dunders is granted access.
+            msg += (
+                " — macOS may be blocking this folder; grant your terminal "
+                "Full Disk Access in System Settings ▸ Privacy & Security"
+            )
         try:
-            self.app.notify(f"Listing failed: {exc}", severity="warning")
+            self.app.notify(msg, severity="warning")
         except Exception:
             pass  # unmounted (no active app) or notify unavailable
 
