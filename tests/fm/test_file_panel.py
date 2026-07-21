@@ -1965,3 +1965,33 @@ def test_docker_entering_empty_containers_parent_row_visible(monkeypatch, tmp_pa
     assert panel.row_offset == 0, (
         f"row_offset={panel.row_offset} after entering empty Containers (expected 0)"
     )
+
+
+def test_unregistered_scheme_reverts_instead_of_crashing(tmp_path: Path):
+    """A bookmark whose provider isn't registered (e.g. an sftp: loc in an
+    install without paramiko) must warn and bounce back, not raise KeyError."""
+    _make_tree(tmp_path)
+    panel = FilePanel(cwd=tmp_path)
+    panel._panel_size = (80, 10)
+    sftp_loc = VfsPath(scheme="sftp", root="user@host:22", parts=("srv",))
+    panel._registry._by_scheme.pop("sftp", None)  # simulate the missing optional dep
+    assert "sftp" not in panel._registry.schemes()
+    panel._change_cwd_loc(sftp_loc)
+
+    assert panel.cwd_loc == VfsPath.local(tmp_path)  # reverted to where we came from
+    assert panel.entries[0].is_parent
+
+
+def test_unregistered_scheme_at_startup_falls_back_home(tmp_path: Path, monkeypatch):
+    """No previous location to revert to (bookmark opened at launch) → home."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    _make_tree(tmp_path)
+    panel = FilePanel(cwd=tmp_path)
+    panel._panel_size = (80, 10)
+    panel._registry._by_scheme.pop("sftp", None)
+    panel.cwd_loc = VfsPath(scheme="sftp", root="user@host:22", parts=())
+    panel._return_to = None
+
+    panel.refresh_listing()
+
+    assert panel.cwd_loc == VfsPath.local(tmp_path)

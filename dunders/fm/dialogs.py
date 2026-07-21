@@ -818,12 +818,16 @@ class ProgressDialog(WindowContent):
         self.current = 0
         self.label = ""
         self.is_bytes = False
+        # Indeterminate = total unknown (a lazily-measured slow/network copy):
+        # show a count-up + a sliding block instead of a misleading full bar.
+        self.indeterminate = False
         self.cancel_event = threading.Event()
 
     def set_progress(self, current: int, total: int) -> None:
         self.current = current
         self.total = total
         self.is_bytes = False
+        self.indeterminate = total <= 0
         self.refresh()
 
     def set_copy_status(self, status: "CopyStatus") -> None:
@@ -831,6 +835,7 @@ class ProgressDialog(WindowContent):
         self.total = status.total
         self.label = status.label
         self.is_bytes = status.is_bytes
+        self.indeterminate = status.total <= 0
         self.refresh()
 
     # Layout: y0 title, y1 blank, y2 current file, y3 bar, y4 blank,
@@ -870,21 +875,39 @@ class ProgressDialog(WindowContent):
         return 1.0
 
     def _counter_text(self) -> str:
+        if self.indeterminate:
+            # Unknown total: count-up only (bytes streamed, or files done).
+            if self.is_bytes:
+                return f" {format_size(self.current)}"
+            return f" {self.current} files"
         if self.is_bytes:
             return f" {format_size(self.current)} / {format_size(self.total)}"
         return f" {self.current} / {self.total}"
 
     def _render_bar(self, width: int) -> Strip:
         counter = self._counter_text()
-        pct = f" {int(self._ratio() * 100):3d}%"
+        pct = "" if self.indeterminate else f" {int(self._ratio() * 100):3d}%"
         # 4 chars padding (2 each side), 2 chars for "[]" — leave the rest
         # for the bar plus the counter + percentage suffix.
         budget = width - 4 - 2 - len(counter) - len(pct)
         bar_width = max(1, budget)
-        filled = int(self._ratio() * bar_width)
-        bar = self._BAR_FILLED * filled + self._BAR_EMPTY * (bar_width - filled)
+        if self.indeterminate:
+            bar = self._indeterminate_bar(bar_width)
+        else:
+            filled = int(self._ratio() * bar_width)
+            bar = self._BAR_FILLED * filled + self._BAR_EMPTY * (bar_width - filled)
         text = f"  [{bar}]{counter}{pct}".ljust(width)[:width]
         return Strip([Segment(text)])
+
+    def _indeterminate_bar(self, bar_width: int) -> str:
+        """A sliding block whose position advances with ``current`` (files
+        copied), so the bar animates on an unknown-total transfer."""
+        block = max(3, bar_width // 6)
+        cells = [self._BAR_EMPTY] * bar_width
+        head = self.current % bar_width
+        for i in range(block):
+            cells[(head + i) % bar_width] = self._BAR_FILLED
+        return "".join(cells)
 
     def _cancel_x(self, width: int) -> int:
         """Left column of the centred Cancel button."""

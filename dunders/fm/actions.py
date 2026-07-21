@@ -256,7 +256,11 @@ def _copy_recursive(
     if _check_cancelled(cancel_event):
         raise _Cancelled
     if src.is_dir() and not src.is_symlink():
-        dst.mkdir(parents=True, exist_ok=False)
+        # exist_ok=True so re-copying a directory MERGES into an existing target
+        # (files overwritten below), matching the cross-scheme engine's
+        # _ensure_dir. Without it a second copy of `front` onto an existing
+        # `dest/front` raised "File exists" instead of updating it.
+        dst.mkdir(parents=True, exist_ok=True)
         entry_bump()
         for child in src.iterdir():
             _copy_recursive(child, dst / child.name, on_bytes, entry_bump,

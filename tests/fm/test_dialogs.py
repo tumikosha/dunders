@@ -182,6 +182,32 @@ async def test_progress_dialog_copy_status_shows_filename_and_bytes():
 
 
 @pytest.mark.asyncio
+async def test_progress_dialog_indeterminate_counts_up_without_percent():
+    """A total==0 copy status (lazily-measured slow-dir transfer) renders a
+    count-up + sliding bar, not a misleading 0/0 100% bar."""
+    from dunders.fm.actions import CopyStatus
+    dlg = ProgressDialog(title="Copying", total=1)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        dlg.set_copy_status(
+            CopyStatus(done=3 * 1024 * 1024, total=0,
+                       label="node_modules/x.js", is_bytes=True)
+        )
+        await pilot.pause()
+        assert dlg.indeterminate is True
+        bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+        assert "%" not in bar          # no percentage for an unknown total
+        assert "/ 0" not in bar        # never "3.0M / 0"
+        assert "3.0M" in bar           # streamed-bytes count-up is shown
+        assert dlg._BAR_FILLED in bar  # the sliding block is drawn
+
+
+@pytest.mark.asyncio
 async def test_progress_dialog_cancel_sets_event():
     dlg = ProgressDialog(title="Working", total=5)
 

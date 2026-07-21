@@ -36,6 +36,27 @@ class _Cancelled(Exception):
     """Raised mid-walk when the cancel_event is set."""
 
 
+def _resolve_or_none(registry: VfsRegistry, loc: VfsPath) -> VfsProvider | None:
+    """Provider for ``loc``'s scheme, or None if none is registered."""
+    try:
+        return registry.resolve(loc)
+    except KeyError:
+        return None
+
+
+def _is_slow_dir(registry: VfsRegistry, loc: VfsPath) -> bool:
+    """True if ``loc`` is a directory on a slow (network) provider — the case
+    whose recursive pre-measure is expensive enough to skip (see the lazy path
+    in ``_generic_transfer``). A slow *file* is cheap to stat, so returns False."""
+    provider = _resolve_or_none(registry, loc)
+    if provider is None or "slow" not in getattr(provider, "capabilities", frozenset()):
+        return False
+    try:
+        return provider.is_dir(loc)
+    except OSError:
+        return False
+
+
 def transfer(
     registry: VfsRegistry,
     sources: list[VfsPath],
@@ -109,40 +130,67 @@ def _generic_transfer(
     single_rename = rename_to if (rename_to and len(sources) == 1) else None
 
     # Measure once so the bar has a denominator. When sizes are available
-    # (local/zip/sftp listings carry st_size) we drive the bar by BYTES so a
-    # single huge file animates and stays cancellable; otherwise we fall back
-    # to a whole-file counter.
+    # (local/zip listings carry st_size) we drive the bar by BYTES so a single
+    # huge file animates and stays cancellable; otherwise we fall back to a
+    # whole-file counter.
+    #
+    # BUT a slow (network) *directory* is measured LAZILY: pre-walking a deep
+    # sftp tree is one round trip per directory under a serialized connection
+    # lock — for a large tree (node_modules, …) that is a long, formerly
+    # uninterruptible phase that pinned the bar at 0% and doubled the round trips
+    # (measure, then copy). For those we skip the pre-measure and drive an
+    # indeterminate count-up bar from the copy walk itself, so the transfer
+    # starts at once and Cancel responds. A slow *file* is still measured — that
+    # is a single cheap stat and keeps the byte bar exact for a big download.
+    lazy = any(_is_slow_dir(registry, s) for s in sources)
     total_files = 0
     total_bytes = 0
-    for s in sources:
-        f, b = _measure(registry, s)
-        total_files += f
-        total_bytes += b
+    if not lazy:
+        try:
+            for s in sources:
+                f, b = _measure(registry, s, cancel_event=cancel_event)
+                total_files += f
+                total_bytes += b
+        except _Cancelled:
+            result.cancelled = True
+            return result
     total_files = max(total_files, 1)
     use_bytes = total_bytes > 0
+    indeterminate = lazy
 
     done_files = [0]
     done_bytes = [0]
 
     def on_chunk(label: str, n: int) -> None:
         done_bytes[0] += n
-        if use_bytes and on_status is not None:
-            on_status(CopyStatus(done_bytes[0], total_bytes, label, is_bytes=True))
+        # Byte streaming is counted locally (no round trips), so keep animating
+        # by bytes even when the total is unknown (indeterminate): total=0 tells
+        # the dialog to show a count-up + sliding bar. This also keeps a big
+        # single file cancellable mid-transfer.
+        if on_status is not None and (use_bytes or indeterminate):
+            total = total_bytes if use_bytes else 0
+            on_status(CopyStatus(done_bytes[0], total, label, is_bytes=True))
 
     def on_file_done(label: str) -> None:
         done_files[0] += 1
+        if indeterminate:
+            # Byte channel already animates the bar; don't flip it to a
+            # file-count here (that would fight the byte count-up).
+            return
         if on_progress is not None:
             on_progress(done_files[0], total_files)
         if not use_bytes and on_status is not None:
             on_status(CopyStatus(done_files[0], total_files, label, is_bytes=False))
 
-    if on_progress is not None:
-        on_progress(0, total_files)
     if on_status is not None:
         if use_bytes:
             on_status(CopyStatus(0, total_bytes, "", is_bytes=True))
+        elif indeterminate:
+            on_status(CopyStatus(0, 0, "", is_bytes=True))
         else:
             on_status(CopyStatus(0, total_files, "", is_bytes=False))
+    if on_progress is not None and not indeterminate:
+        on_progress(0, total_files)
 
     for src in sources:
         if _cancelled(cancel_event):
@@ -261,14 +309,25 @@ def _ensure_dir(dst_p: VfsProvider, dest: VfsPath) -> None:
     dst_p.mkdir(parent, dest.name)
 
 
-def _measure(registry: VfsRegistry, loc: VfsPath) -> tuple[int, int]:
+def _measure(
+    registry: VfsRegistry,
+    loc: VfsPath,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, int]:
     """``(file_count, total_bytes)`` under ``loc`` from directory listings.
 
     Sizes come from the ``scan`` entries (``st_size``) — no file is opened —
     so a tree is measured with one listdir per directory, the same round trips
     the copy itself makes. ``total_bytes`` is 0 when a provider doesn't report
     sizes; the caller then drives the bar by file count instead.
+
+    Raises ``_Cancelled`` if ``cancel_event`` fires: on a deep tree over a slow
+    (network) provider this walk can take a long time, and it must stay
+    interruptible so the Cancel button works during the measure phase.
     """
+    if _cancelled(cancel_event):
+        raise _Cancelled
     provider = registry.resolve(loc)
     if not provider.is_dir(loc):
         return 1, _size_of(provider, loc)
@@ -292,8 +351,10 @@ def _measure(registry: VfsRegistry, loc: VfsPath) -> tuple[int, int]:
     except OSError:
         return 1, 0
     for child in children:
+        if _cancelled(cancel_event):
+            raise _Cancelled
         if child.is_dir:
-            f, b = _measure(registry, child.loc)
+            f, b = _measure(registry, child.loc, cancel_event=cancel_event)
             files += f
             total += b
         else:

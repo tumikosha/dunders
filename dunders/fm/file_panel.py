@@ -232,7 +232,14 @@ class FilePanel(WindowContent):
         # Any new listing invalidates a pending async scan (its older token is
         # discarded when it returns).
         self._scan_token += 1
-        provider = self._registry.resolve(self.cwd_loc)
+        try:
+            provider = self._registry.resolve(self.cwd_loc)
+        except KeyError:
+            # No provider owns this scheme (optional dep missing, CLI absent) —
+            # e.g. a saved sftp: bookmark opened from an install without
+            # paramiko. Warn and land somewhere listable instead of crashing.
+            self._handle_missing_scheme(self.cwd_loc)
+            return
         if self._should_scan_async(provider):
             self._scan_async(provider, self._scan_token, focus_loc)
             return
@@ -320,6 +327,40 @@ class FilePanel(WindowContent):
             self.app.notify(msg, severity="warning")
         except Exception:
             pass  # unmounted (no active app) or notify unavailable
+
+    # How to make an unregistered scheme available again (shown in the warning).
+    _SCHEME_HINTS = {
+        "sftp": "install the optional dependency: pip install 'dunders[sftp]'",
+        "db": "install the optional dependency: pip install 'dunders[db]'",
+        "7z": "install a 7z CLI (p7zip)",
+        "docker": "install Docker and start the daemon",
+    }
+
+    def _handle_missing_scheme(self, loc: VfsPath) -> None:
+        """No provider is registered for ``loc.scheme``: warn (with a hint on how
+        to enable it) and revert to where we came from, or to the home directory
+        when there is nowhere to go back to (e.g. a bookmark opened at startup).
+        Never leaves the panel stranded in an unlistable, ".."-less location."""
+        hint = self._SCHEME_HINTS.get(loc.scheme)
+        msg = f"Scheme {loc.scheme!r} is not available"
+        if hint:
+            msg = f"{msg} — {hint}"
+        try:
+            self.app.notify(msg, severity="warning")
+        except Exception:
+            pass  # unmounted (tests) or notify unavailable
+        target = self._return_to
+        if target is None or target.scheme == loc.scheme:
+            target = VfsPath.local(Path.home())
+        self._return_to = None
+        if self._return_sort is not None:
+            self._sort_key_id, self._sort_key, self.sort_descending = self._return_sort
+            self._return_sort = None
+        self.cwd_loc = target
+        self.cursor = 0
+        self.row_offset = 0
+        self.selection.clear()
+        self.refresh_listing()
 
     def _maybe_revert(self, exc: Exception) -> bool:
         """If the just-entered location can't be listed, revert to where we came

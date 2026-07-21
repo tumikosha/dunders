@@ -186,6 +186,30 @@ def _table_stem(name: str) -> str:
     return name
 
 
+def _resolve_copy_dest(
+    user_dest: Path, source_name: str | None
+) -> tuple[Path, str | None]:
+    """Split a copy/move destination into ``(dest_dir, rename_to)``.
+
+    ``source_name`` is the single source's basename, or None for a multi-item
+    copy (which always drops into ``user_dest`` as a container).
+
+    The single-item dialog prefills the destination as ``<dir>/<source-name>``
+    so it doubles as copy-with-rename. If that path already exists as a
+    directory, treating it as a container would append the source name AGAIN —
+    copying ``front`` onto an existing ``dest/front`` yielded ``dest/front/front``.
+    So when the target's basename already equals the source name, interpret it
+    as the full target path (overwrite/merge into it, mc-style) instead of
+    nesting. A different existing directory is still a container (copy into it).
+    """
+    if source_name is not None and user_dest.name == source_name:
+        return user_dest.parent, user_dest.name
+    if user_dest.is_dir():
+        return user_dest, None
+    rename_to = user_dest.name if source_name is not None else None
+    return user_dest.parent, rename_to
+
+
 # --- Dialog payload types --------------------------------------------------
 # Each F-key flow attaches a typed request to its dialog so
 # on_confirm_dialog_result / on_input_dialog_submitted can dispatch via
@@ -834,12 +858,8 @@ class DundersApp(App):
     def _run_copy_move(self, req: CopyMoveRequest, user_dest: Path) -> None:
         if self.desktop is None:
             return
-        if user_dest.is_dir():
-            dest_dir = user_dest
-            rename_to: str | None = None
-        else:
-            dest_dir = user_dest.parent
-            rename_to = user_dest.name if len(req.targets) == 1 else None
+        source_name = req.targets[0].name if len(req.targets) == 1 else None
+        dest_dir, rename_to = _resolve_copy_dest(user_dest, source_name)
         op_label = "Copying" if req.op == "copy" else "Moving"
         progress = ProgressDialog(title=op_label, total=len(req.targets))
         show_modal(self.desktop, progress, title=op_label, size=(64, 9))

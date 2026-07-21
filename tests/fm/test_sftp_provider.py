@@ -314,6 +314,67 @@ class TestIntegration:
         assert not p.delete([d]).errors
         assert not (root / "dir").exists()
 
+    def test_download_dir_is_lazy_and_indeterminate(self, sftp_server, tmp_path):
+        """Downloading a *directory* over sftp must NOT pre-walk the tree for a
+        byte total (that serialized round-trip storm is the reported hang). The
+        copy runs immediately, driving an indeterminate (total==0) byte bar, and
+        still lands every file including nested ones."""
+        from dunders.fm.actions import CopyStatus
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        # fixture already has dir/inner.txt; add a nested subdir + a dotfile.
+        (root / "dir" / "sub").mkdir()
+        (root / "dir" / "sub" / "deep.txt").write_text("deep")
+        (root / "dir" / ".hidden").write_text("h")
+
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        src = VfsPath(scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=("dir",))
+        dest_dir = tmp_path / "down"
+        dest_dir.mkdir()
+
+        seen: list[CopyStatus] = []
+        res = transfer(reg, [src], VfsPath.local(dest_dir),
+                       mode="copy", on_status=seen.append)
+        assert res.errors == []
+        # Full tree landed (dotfile included).
+        assert (dest_dir / "dir" / "inner.txt").read_text() == "inner"
+        assert (dest_dir / "dir" / "sub" / "deep.txt").read_text() == "deep"
+        assert (dest_dir / "dir" / ".hidden").read_text() == "h"
+        # Lazy path: every emitted status is indeterminate (total unknown == 0),
+        # proving no up-front byte measure ran.
+        assert seen
+        assert all(s.total == 0 for s in seen)
+
+    def test_download_dir_cancellable(self, sftp_server, tmp_path):
+        """Cancel during a directory download is honoured (the measure phase used
+        to be uninterruptible, so Cancel did nothing)."""
+        from dunders.fm.actions import CopyStatus
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        big = root / "dir" / "big.bin"
+        big.write_bytes(b"Q" * (1024 * 1024 * 3))
+
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        src = VfsPath(scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=("dir",))
+        dest_dir = tmp_path / "down"
+        dest_dir.mkdir()
+
+        cancel = threading.Event()
+
+        def _on_status(status: CopyStatus) -> None:
+            if status.done >= 1024 * 1024:
+                cancel.set()
+
+        res = transfer(reg, [src], VfsPath.local(dest_dir),
+                       mode="copy", on_status=_on_status, cancel_event=cancel)
+        assert res.cancelled is True
+
     def test_wrong_password_raises(self, sftp_server):
         _h, port, _root = sftp_server
         with pytest.raises(OSError) as ei:

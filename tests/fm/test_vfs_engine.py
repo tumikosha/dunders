@@ -28,6 +28,29 @@ class TestIntraProvider:
         assert (dest / "a.txt").read_text() == "payload"
         assert src.exists()  # copy keeps source
 
+    def test_copy_dir_into_existing_same_name_merges(self, tmp_path):
+        # Re-copying a directory when the target already exists must MERGE into
+        # it (overwrite matching files, keep the rest), not raise "File exists"
+        # and not nest as dest/src/src. rename_to names the existing target.
+        src = tmp_path / "src"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.txt").write_text("new")
+        (src / "sub" / "b.txt").write_text("bb")
+        dest = tmp_path / "dest"
+        existing = dest / "src"
+        existing.mkdir(parents=True)
+        (existing / "a.txt").write_text("old")   # will be overwritten
+        (existing / "keep.txt").write_text("keep")  # untouched sibling
+        res = transfer(
+            _reg(), [VfsPath.local(src)], VfsPath.local(dest),
+            mode="copy", rename_to="src",
+        )
+        assert not res.errors
+        assert (dest / "src" / "a.txt").read_text() == "new"      # merged/overwritten
+        assert (dest / "src" / "sub" / "b.txt").read_text() == "bb"
+        assert (dest / "src" / "keep.txt").read_text() == "keep"  # preserved
+        assert not (dest / "src" / "src").exists()                # no nesting
+
     def test_move(self, tmp_path):
         src = tmp_path / "a.txt"
         src.write_text("payload")
