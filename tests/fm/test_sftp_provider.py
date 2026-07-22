@@ -295,6 +295,69 @@ class TestIntegration:
         assert not res.errors
         assert (root / "dir").is_dir()
 
+    def test_upload_dir_tree(self, sftp_server, tmp_path):
+        """Copy a local directory tree UP to sftp: every file lands under the
+        directory's own name on the server, dotfiles included, nested subdirs
+        created, and no self-nesting (front/front)."""
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+
+        localdir = tmp_path / "front"
+        (localdir / "sub").mkdir(parents=True)
+        (localdir / "a.txt").write_text("A")
+        (localdir / ".env").write_text("secret")       # dotfile
+        (localdir / "sub" / "b.txt").write_text("B")
+
+        res = transfer(reg, [VfsPath.local(localdir)], _root_loc(port), mode="copy")
+        assert res.errors == []
+        assert (root / "front" / "a.txt").read_text() == "A"
+        assert (root / "front" / ".env").read_text() == "secret"
+        assert (root / "front" / "sub" / "b.txt").read_text() == "B"
+        assert not (root / "front" / "front").exists()  # no nesting
+
+    def test_upload_dir_with_rename(self, sftp_server, tmp_path):
+        """rename_to names the remote directory (copy-with-rename upload)."""
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+
+        localdir = tmp_path / "src"
+        localdir.mkdir()
+        (localdir / "x.txt").write_text("X")
+
+        res = transfer(reg, [VfsPath.local(localdir)], _root_loc(port),
+                       mode="copy", rename_to="renamed")
+        assert res.errors == []
+        assert (root / "renamed" / "x.txt").read_text() == "X"
+        assert not (root / "src").exists()
+
+    def test_move_dir_uploads_then_removes_local(self, sftp_server, tmp_path):
+        """A cross-scheme move uploads the tree, then deletes the local source."""
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+
+        localdir = tmp_path / "payload"
+        (localdir / "nested").mkdir(parents=True)
+        (localdir / "f.txt").write_text("F")
+        (localdir / "nested" / "g.txt").write_text("G")
+
+        res = transfer(reg, [VfsPath.local(localdir)], _root_loc(port), mode="move")
+        assert res.errors == []
+        assert (root / "payload" / "f.txt").read_text() == "F"
+        assert (root / "payload" / "nested" / "g.txt").read_text() == "G"
+        assert not localdir.exists()  # move removed the local source
+
     def test_no_clobber(self, sftp_server):
         _h, port, _root = sftp_server
         p = SftpProvider()
