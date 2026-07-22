@@ -32,6 +32,7 @@ from dunders.windowing.window import Window
 
 if TYPE_CHECKING:
     from dunders.fm.find_file import FindOptions
+    from dunders.fm.folder_stats import FolderStats
 
 
 __all__ = [
@@ -936,6 +937,141 @@ class ProgressDialog(WindowContent):
 
     def action_cancel(self) -> None:
         self.cancel_event.set()
+
+
+class FolderStatsDialog(WindowContent):
+    """F3-on-a-folder statistics modal, filled by a background worker.
+
+    Shows file/sub-folder counts, total size, the largest file and the max
+    nesting depth, updating live as ``set_stats`` is marshalled in from the
+    scan worker. A single centred button is **[ Cancel ]** while scanning
+    (pressing it sets ``cancel_event`` so the worker stops and returns the
+    partial result) and **[ Close ]** once done — the dialog never auto-closes,
+    the user reads the numbers and dismisses it (like ``ProgressDialog`` for the
+    Cancel plumbing, ``AboutDialog`` for the self-dismiss).
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("space", "primary", show=False),  # the button IS the focus target
+        Binding("c", "primary", show=False),
+        Binding("escape", "primary", show=False),
+        Binding("enter", "primary", show=False),
+    ]
+
+    _TITLE_Y = 0
+    _FILES_Y = 2
+    _FOLDERS_Y = 3
+    _SIZE_Y = 4
+    _LARGEST_Y = 5
+    _DEPTH_Y = 6
+    _STATUS_Y = 8
+
+    @property
+    def _BTN_Y(self) -> int:
+        """The button sits on the LAST content row, computed from the actual
+        inner height (window chrome eats ~2 rows, and show_modal clamps to the
+        terminal), so it can never render off-screen the way a fixed row could."""
+        return max(self._STATUS_Y + 1, self.size.height - 1)
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self._name = name
+        self.window_title = "Folder statistics"
+        self.cancel_event = threading.Event()
+        self._done = False
+        self._stats: "FolderStats | None" = None
+
+    def set_stats(self, stats: "FolderStats", done: bool) -> None:
+        self._stats = stats
+        if done:
+            self._done = True
+        self.refresh()
+
+    @property
+    def _btn_label(self) -> str:
+        return "[ Close ]" if self._done else "[ Cancel ]"
+
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        if width <= 0:
+            return Strip.blank(0)
+        s = self._stats
+        # Button first: on a very short terminal its (dynamic) bottom row may
+        # collide with a field row — the button must win so it stays reachable.
+        if y == self._BTN_Y:
+            return self._render_button(width)
+        if y == self._TITLE_Y:
+            text = (" " + _ellipsize_left(self._name, max(1, width - 2))).ljust(width)[:width]
+            return Strip([Segment(text, RichStyle(bold=True))])
+        if y == self._FILES_Y:
+            return self._kv("Files", "…" if s is None else str(s.files), width)
+        if y == self._FOLDERS_Y:
+            return self._kv("Folders", "…" if s is None else str(s.dirs), width)
+        if y == self._SIZE_Y:
+            val = "…" if s is None else f"{format_size(s.total_bytes)}  ({s.total_bytes} bytes)"
+            return self._kv("Total size", val, width)
+        if y == self._LARGEST_Y:
+            if s is None or not s.largest_name:
+                val = "…" if s is None else "—"
+            else:
+                shown = _ellipsize_left(s.largest_name, max(1, width - 28))
+                val = f"{shown}  ({format_size(s.largest_size)})"
+            return self._kv("Largest", val, width)
+        if y == self._DEPTH_Y:
+            return self._kv("Max depth", "…" if s is None else str(s.max_depth), width)
+        if y == self._STATUS_Y:
+            return self._render_status(width)
+        return Strip([Segment(" " * width)])
+
+    def _kv(self, key: str, value: str, width: int) -> Strip:
+        text = (f"  {key}: " + value).ljust(width)[:width]
+        return Strip([Segment(text)])
+
+    def _render_status(self, width: int) -> Strip:
+        if not self._done:
+            msg, style = "  Scanning…", RichStyle(dim=True)
+        elif self._stats is not None and self._stats.partial:
+            msg, style = "  Cancelled (partial result)", RichStyle(italic=True)
+        else:
+            msg, style = "  Done", RichStyle(bold=True)
+        return Strip([Segment(msg.ljust(width)[:width], style)])
+
+    def _btn_x(self, width: int) -> int:
+        return max(2, (width - len(self._btn_label)) // 2)
+
+    def _render_button(self, width: int) -> Strip:
+        label = self._btn_label
+        start = self._btn_x(width)
+        before = " " * start
+        after = " " * max(0, width - start - len(label))
+        return Strip([
+            Segment(before),
+            Segment(label, RichStyle(bold=True, reverse=True)),
+            Segment(after),
+        ])
+
+    def on_click(self, event) -> None:
+        if getattr(event, "y", -1) != self._BTN_Y:
+            return
+        start = self._btn_x(self.size.width)
+        x = getattr(event, "x", -1)
+        if start <= x < start + len(self._btn_label):
+            event.stop()
+            self.action_primary()
+
+    def action_primary(self) -> None:
+        """Cancel the scan while running; dismiss the modal once done."""
+        if not self._done:
+            self.cancel_event.set()
+            return
+        node = self
+        while node is not None:
+            if isinstance(node, ModalWindow):
+                node.post_message(Window.Closed(node))
+                break
+            node = getattr(node, "parent", None)
 
 
 def _ellipsize_left(text: str, width: int) -> str:

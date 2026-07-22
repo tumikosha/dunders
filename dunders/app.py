@@ -58,11 +58,13 @@ from dunders.fm.dialogs import (
     CopyMoveDialog,
     DockerRunDialog,
     FindFileDialog,
+    FolderStatsDialog,
     InputDialog,
     NewFileDialog,
     ProgressDialog,
 )
 from dunders.fm.file_panel import FilePanel
+from dunders.fm.folder_stats import scan_folder_stats
 from dunders.fm.find_file import FindOptions, walk as find_walk
 from dunders.fm.find_results import SearchResultsContent
 from dunders.fm.keymap import DEFAULT_FKEY_LABELS, EDITOR_FKEY_LABELS
@@ -3503,7 +3505,8 @@ class DundersApp(App):
             self._open_preview(prov, entry)
             return
         if entry.is_dir:
-            return  # F3 on a dir is a no-op
+            self._open_folder_stats(entry.loc)  # F3 on a dir -> statistics modal
+            return
         if not self._is_local_entry(entry):
             self._open_member_view(entry)  # read through the VFS provider
             return
@@ -3512,6 +3515,30 @@ class DundersApp(App):
             self._do_open_dunder(*match)  # navigate the panel into the dunder (e.g. a SQLite DB)
             return
         self._dispatch_association(entry, "view")
+
+    def _open_folder_stats(self, loc: VfsPath) -> None:
+        """F3 on a directory: open a modal and total its statistics on a worker
+        thread so the Cancel button stays responsive (crucial on sftp, where the
+        walk is many round trips). Works for every scheme via provider.scan."""
+        if self.desktop is None:
+            return
+        dialog = FolderStatsDialog(name=loc.name or str(loc))
+        show_modal(self.desktop, dialog, title="Folder statistics", size=(64, 13))
+        self.call_after_refresh(dialog.focus)
+        registry = self._vfs_registry
+
+        def _worker() -> None:
+            def _on_progress(stats) -> None:
+                self.call_from_thread(dialog.set_stats, stats, False)
+
+            stats = scan_folder_stats(
+                registry, loc,
+                cancel_event=dialog.cancel_event,
+                on_progress=_on_progress,
+            )
+            self.call_from_thread(dialog.set_stats, stats, True)
+
+        self.run_worker(_worker, thread=True, exclusive=False, group="folderstats")
 
     def action_toggle_hidden(self) -> None:
         """Alt+H / View menu: show or hide dot-files in the active panel."""

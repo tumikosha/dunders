@@ -2033,3 +2033,38 @@ async def test_help_about_opens_modal_with_version():
         assert not any(isinstance(getattr(w, "content", None), AboutDialog)
                        for w in app.desktop.windows)
         assert not app.desktop._has_modal()  # dismiss cleared the modal stack
+
+
+@pytest.mark.asyncio
+async def test_f3_on_folder_opens_stats_modal(tmp_path):
+    """F3 on a directory opens FolderStatsDialog and the background worker fills
+    in the correct totals."""
+    from dunders.fm.dialogs import FolderStatsDialog
+
+    sub = tmp_path / "sub"
+    (sub / "inner").mkdir(parents=True)
+    (sub / "a.txt").write_text("hello")        # 5 bytes
+    (sub / "inner" / "b.txt").write_text("xy")  # 2 bytes
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        idx = next(i for i, e in enumerate(panel.entries) if e.name == "sub")
+        panel.cursor = idx
+        app.action_view()
+
+        dlg = None
+        for _ in range(40):
+            await pilot.pause()
+            found = app.query(FolderStatsDialog)
+            if found:
+                dlg = found.first()
+                if dlg._done:
+                    break
+        assert dlg is not None, "FolderStatsDialog never opened"
+        assert dlg._done, "stats worker did not finish"
+        assert dlg._stats.files == 2
+        assert dlg._stats.dirs == 1
+        assert dlg._stats.total_bytes == 7
+        assert dlg._stats.max_depth == 1  # only 'inner' is a nested dir

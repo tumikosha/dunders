@@ -454,3 +454,87 @@ async def test_change_attributes_tab_chain_includes_buttons():
         await pilot.pause()
         focused = pilot.app.focused
         assert isinstance(focused, DialogButton) and focused.id == "ca-cancel"
+
+
+# --- FolderStatsDialog ------------------------------------------------------
+
+from dunders.fm.dialogs import FolderStatsDialog
+from dunders.fm.folder_stats import FolderStats
+
+
+def _folder_stats_line(dlg, y):
+    return "".join(seg.text for seg in dlg.render_line(y))
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_scanning_then_done():
+    dlg = FolderStatsDialog(name="myfolder")
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _H().run_test() as pilot:
+        await pilot.pause()
+        # Scanning state: placeholder values + Cancel button + "Scanning…".
+        assert not dlg._done
+        btn = _folder_stats_line(dlg, dlg._BTN_Y)
+        assert "[ Cancel ]" in btn
+        assert "Scanning" in _folder_stats_line(dlg, dlg._STATUS_Y)
+
+        dlg.set_stats(
+            FolderStats(files=12, dirs=3, total_bytes=2048,
+                        largest_name="big.bin", largest_size=2000, max_depth=4),
+            done=True,
+        )
+        await pilot.pause()
+        assert dlg._done
+        assert "12" in _folder_stats_line(dlg, dlg._FILES_Y)
+        assert "3" in _folder_stats_line(dlg, dlg._FOLDERS_Y)
+        assert "2048 bytes" in _folder_stats_line(dlg, dlg._SIZE_Y)
+        assert "big.bin" in _folder_stats_line(dlg, dlg._LARGEST_Y)
+        assert "4" in _folder_stats_line(dlg, dlg._DEPTH_Y)
+        assert "Done" in _folder_stats_line(dlg, dlg._STATUS_Y)
+        # Button flips to Close once done.
+        assert "[ Close ]" in _folder_stats_line(dlg, dlg._BTN_Y)
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_cancel_sets_event_and_marks_partial():
+    dlg = FolderStatsDialog(name="f")
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _H().run_test() as pilot:
+        dlg.focus()
+        await pilot.pause()
+        await pilot.press("c")           # Cancel while scanning
+        await pilot.pause()
+        assert dlg.cancel_event.is_set()
+        assert not dlg._done             # not dismissed yet — worker will finish
+        # Worker returns a partial result.
+        dlg.set_stats(FolderStats(files=5, partial=True), done=True)
+        await pilot.pause()
+        assert "Cancelled" in _folder_stats_line(dlg, dlg._STATUS_Y)
+        assert "[ Close ]" in _folder_stats_line(dlg, dlg._BTN_Y)
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_space_activates_button():
+    """Space is bound to the button (its focus target): while scanning it
+    cancels; the dialog is focused so the keypress lands."""
+    dlg = FolderStatsDialog(name="f")
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _H().run_test() as pilot:
+        dlg.focus()
+        await pilot.pause()
+        assert pilot.app.focused is dlg
+        await pilot.press("space")
+        await pilot.pause()
+        assert dlg.cancel_event.is_set()

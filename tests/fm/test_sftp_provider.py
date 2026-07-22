@@ -438,6 +438,30 @@ class TestIntegration:
                        mode="copy", on_status=_on_status, cancel_event=cancel)
         assert res.cancelled is True
 
+    def test_folder_stats_over_sftp(self, sftp_server):
+        """scan_folder_stats walks a remote sftp tree via provider.scan and
+        totals files/dirs/bytes/largest/depth — the F3 folder-stats feature."""
+        from dunders.fm.folder_stats import scan_folder_stats
+
+        _h, port, root = sftp_server
+        # fixture: hello.txt ("hi there"=8), dir/inner.txt ("inner"=5). Add more.
+        (root / "dir" / "sub").mkdir()
+        (root / "dir" / "sub" / "big.bin").write_bytes(b"Z" * 500)
+        (root / "dir" / ".dot").write_text("xx")  # hidden, counted
+
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        st = scan_folder_stats(reg, _root_loc(port))
+
+        assert st.partial is False
+        assert st.files == 4          # hello.txt, inner.txt, big.bin, .dot
+        assert st.dirs == 2           # dir, dir/sub
+        assert st.total_bytes == 8 + 5 + 500 + 2
+        assert st.largest_name == "big.bin"
+        assert st.largest_size == 500
+        assert st.max_depth == 2      # root/dir/sub
+
     def test_wrong_password_raises(self, sftp_server):
         _h, port, _root = sftp_server
         with pytest.raises(OSError) as ei:
