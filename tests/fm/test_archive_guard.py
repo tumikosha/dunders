@@ -107,15 +107,25 @@ async def test_f4_edit_inside_zip_opens_editable_editor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_f7_mkdir_inside_zip_is_blocked(tmp_path):
-    _make_archive(tmp_path)
+async def test_f7_mkdir_inside_zip_creates_entry(tmp_path):
+    # F7 is VFS-routed: a zip supports append, so mkdir inside it opens the
+    # dialog and writes a directory entry into the archive (not a stray local
+    # dir next to it).
+    archive = _make_archive(tmp_path)
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = _active_panel(app)
         _enter_zip(panel)
-        app.action_mkdir()  # must not raise, must not create a dir next to the zip
+        app.action_mkdir()
         await pilot.pause()
-        assert not app._has_active_modal()  # dialog was not opened
-        # No stray directory created alongside the archive.
+        assert app._has_active_modal()  # dialog opened (zip is write-capable)
+        from dunders.fm.dialogs import NewFileDialog
+        dlg = app.query_one(NewFileDialog)
+        dlg.post_message(NewFileDialog.Submitted(dlg, "newdir"))
+        for _ in range(4):
+            await pilot.pause()
+        with zipfile.ZipFile(archive) as zf:
+            assert "newdir/" in zf.namelist()
+        # No stray directory created alongside the archive on the local fs.
         assert {p.name for p in tmp_path.iterdir()} == {"a.zip"}
