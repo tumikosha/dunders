@@ -123,6 +123,27 @@ class TestFileIntoZip:
         assert "dir/top.txt" in names
         assert "dir/sub/deep.txt" in names
 
+    def test_copy_skip_existing_member(self, tmp_path):
+        # skip_existing must work cross-scheme too: a file whose member already
+        # exists in the zip is left untouched and recorded in result.skipped.
+        archive = tmp_path / "a.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("keep.txt", b"OLD")
+        src = tmp_path / "keep.txt"
+        src.write_text("NEW")
+        also = tmp_path / "fresh.txt"
+        also.write_text("FRESH")
+        res = transfer(
+            self._reg(),
+            [VfsPath.local(src), VfsPath.local(also)],
+            _root(archive), mode="copy", skip_existing=True,
+        )
+        assert res.errors == []
+        assert len(res.skipped) == 1
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.read("keep.txt") == b"OLD"     # not overwritten
+            assert zf.read("fresh.txt") == b"FRESH"  # new one copied
+
     def test_copy_dir_includes_dotfiles(self, tmp_path):
         # Regression: a directory copy is view-agnostic — hidden entries
         # (.env, .git, …) must be walked even though the panel filters them

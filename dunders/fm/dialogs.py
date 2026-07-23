@@ -520,6 +520,9 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         color: $text;
         border: none;
     }
+    CopyMoveDialog #cm-skip {
+        margin-top: 1;
+    }
     CopyMoveDialog #cm-buttons {
         height: 1;
         align: center middle;
@@ -573,6 +576,10 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
     def compose(self) -> ComposeResult:
         yield Static(self.prompt, id="cm-prompt")
         yield self._input
+        yield _PermCheckbox(
+            label_markup="Skip existing (don't overwrite)",
+            checked=False, id="cm-skip",
+        )
         with Horizontal(id="cm-buttons"):
             yield ShadowButton(
                 self._ok_label,
@@ -591,11 +598,20 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         try:
             return [
                 self._input,
+                self.query_one("#cm-skip", _PermCheckbox),
                 self.query_one("#cm-ok", ShadowButton),
                 self.query_one("#cm-cancel", ShadowButton),
             ]
         except Exception:
             return [self._input]
+
+    @property
+    def skip_existing(self) -> bool:
+        """Whether the 'Skip existing' checkbox is ticked (read at submit)."""
+        try:
+            return self.query_one("#cm-skip", _PermCheckbox).checked
+        except Exception:
+            return False
 
     def get_value(self) -> str:
         return self._input.value
@@ -806,6 +822,7 @@ class ProgressDialog(WindowContent):
     can_focus = True
 
     BINDINGS = [
+        Binding("space", "cancel", show=False),  # Cancel is the focus target
         Binding("c", "cancel", show=False),
         Binding("escape", "cancel", show=False),
         Binding("enter", "cancel", show=False),
@@ -822,6 +839,18 @@ class ProgressDialog(WindowContent):
         # Indeterminate = total unknown (a lazily-measured slow/network copy):
         # show a count-up + a sliding block instead of a misleading full bar.
         self.indeterminate = False
+        # Copy shows a SECOND bar (current file) + a file counter; delete/pack/
+        # move keep the single-bar layout.
+        self.two_bars = False
+        self.file_done = 0
+        self.file_total = 0
+        self.files_done = 0
+        self.files_total = 0
+        # Animation clock for indeterminate bars: advances one step per update so
+        # the marquee sweeps SMOOTHLY. Seeding the slider with the raw byte/file
+        # count instead made the block teleport (count % width jumps by big,
+        # irregular amounts) — "jumping like crazy".
+        self._anim = 0
         self.cancel_event = threading.Event()
 
     def set_progress(self, current: int, total: int) -> None:
@@ -829,6 +858,8 @@ class ProgressDialog(WindowContent):
         self.total = total
         self.is_bytes = False
         self.indeterminate = total <= 0
+        self.two_bars = False
+        self._anim += 1
         self.refresh()
 
     def set_copy_status(self, status: "CopyStatus") -> None:
@@ -837,77 +868,105 @@ class ProgressDialog(WindowContent):
         self.label = status.label
         self.is_bytes = status.is_bytes
         self.indeterminate = status.total <= 0
+        self.file_done = status.file_done
+        self.file_total = status.file_total
+        self.files_done = status.files_done
+        self.files_total = status.files_total
+        self.two_bars = True
+        self._anim += 1
         self.refresh()
 
-    # Layout: y0 title, y1 blank, y2 current file, y3 bar, y4 blank,
-    # y5 Cancel button. The button text is centred and the whole row clicks.
+    # Layout: y0 title, y1 blank, y2 current file. Single-bar: y3 bar. Two-bar
+    # (copy): y3 overall bar, y4 current-file bar. The Cancel button renders on
+    # the LAST inner row (computed from the height), so the modal border can
+    # never push it off-screen.
     _LABEL_Y = 2
     _BAR_Y = 3
-    _CANCEL_Y = 5
+    _FILE_BAR_Y = 4
     _CANCEL_LABEL = "[ Cancel ]"
 
     _BAR_FILLED = "█"
     _BAR_EMPTY = "░"
 
+    @property
+    def _cancel_y(self) -> int:
+        return max(self._FILE_BAR_Y + 1, self.size.height - 1)
+
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         if width <= 0:
             return Strip.blank(0)
+        # Button first so it always wins its (dynamic) row.
+        if y == self._cancel_y:
+            return self._render_cancel(width)
         if y == 0:
             text = (" " + self.title_text).ljust(width)[:width]
             return Strip([Segment(text, RichStyle(bold=True))])
         if y == self._LABEL_Y:
             return self._render_label(width)
         if y == self._BAR_Y:
-            return self._render_bar(width)
-        if y == self._CANCEL_Y:
-            return self._render_cancel(width)
+            return self._bar_line(width, self.current, self.total, self.is_bytes)
+        if self.two_bars and y == self._FILE_BAR_Y:
+            return self._bar_line(width, self.file_done, self.file_total, True)
         return Strip([Segment(" " * width)])
 
     def _render_label(self, width: int) -> Strip:
         shown = _ellipsize_left(self.label, max(1, width - 4))
-        text = ("  " + shown).ljust(width)[:width]
+        left = "  " + shown
+        if self.two_bars and self.files_total > 0:
+            right = f"{self.files_done}/{self.files_total} "
+            pad = max(1, width - len(left) - len(right))
+            text = (left + " " * pad + right)[:width]
+        else:
+            text = left.ljust(width)[:width]
         return Strip([Segment(text, RichStyle(dim=True))])
 
-    def _ratio(self) -> float:
-        if self.total > 0:
-            return max(0.0, min(1.0, self.current / self.total))
+    @staticmethod
+    def _ratio(done: int, total: int) -> float:
+        if total > 0:
+            return max(0.0, min(1.0, done / total))
         # No measurable work (e.g. all-empty files): treat as complete.
         return 1.0
 
-    def _counter_text(self) -> str:
-        if self.indeterminate:
-            # Unknown total: count-up only (bytes streamed, or files done).
-            if self.is_bytes:
-                return f" {format_size(self.current)}"
-            return f" {self.current} files"
-        if self.is_bytes:
-            return f" {format_size(self.current)} / {format_size(self.total)}"
-        return f" {self.current} / {self.total}"
+    # Fixed-width trailing fields so the bar length never jitters as the numbers
+    # change (e.g. "5.0M/20.0M" vs "512.0K/1.0M", or "25%" vs "100%"). The bar
+    # itself is then a constant width for a given dialog width, and the two bars
+    # line up under each other.
+    _COUNTER_W = 18
+    _PCT_W = 4
 
-    def _render_bar(self, width: int) -> Strip:
-        counter = self._counter_text()
-        pct = "" if self.indeterminate else f" {int(self._ratio() * 100):3d}%"
-        # 4 chars padding (2 each side), 2 chars for "[]" — leave the rest
-        # for the bar plus the counter + percentage suffix.
-        budget = width - 4 - 2 - len(counter) - len(pct)
-        bar_width = max(1, budget)
-        if self.indeterminate:
-            bar = self._indeterminate_bar(bar_width)
+    def _bar_line(self, width: int, done: int, total: int, is_bytes: bool) -> Strip:
+        indet = total <= 0
+        if is_bytes:
+            counter = (format_size(done) if indet
+                       else f"{format_size(done)}/{format_size(total)}")
         else:
-            filled = int(self._ratio() * bar_width)
+            counter = str(done) if indet else f"{done}/{total}"
+        pct = "" if indet else f"{int(self._ratio(done, total) * 100)}%"
+        counter = counter[:self._COUNTER_W].rjust(self._COUNTER_W)
+        pct = pct[:self._PCT_W].rjust(self._PCT_W)
+        # Reserved: "  [" (3) + "]" (1) + " " + counter + " " + pct.
+        bar_width = max(1, width - 5 - self._COUNTER_W - self._PCT_W - 2)
+        if indet:
+            bar = self._sliding_bar(bar_width)
+        else:
+            filled = int(self._ratio(done, total) * bar_width)
             bar = self._BAR_FILLED * filled + self._BAR_EMPTY * (bar_width - filled)
-        text = f"  [{bar}]{counter}{pct}".ljust(width)[:width]
+        text = f"  [{bar}] {counter} {pct}".ljust(width)[:width]
         return Strip([Segment(text)])
 
-    def _indeterminate_bar(self, bar_width: int) -> str:
-        """A sliding block whose position advances with ``current`` (files
-        copied), so the bar animates on an unknown-total transfer."""
-        block = max(3, bar_width // 6)
+    def _sliding_bar(self, bar_width: int) -> str:
+        """A block that sweeps smoothly back and forth, one cell per update
+        (driven by ``self._anim``), for an unknown-total bar. Uses the animation
+        clock — NOT the byte/file count — so it never teleports."""
+        block = max(3, min(bar_width, bar_width // 6 or 1))
+        span = max(1, bar_width - block)
+        cycle = 2 * span
+        p = self._anim % cycle
+        head = p if p <= span else cycle - p  # ping-pong: 0..span..0
         cells = [self._BAR_EMPTY] * bar_width
-        head = self.current % bar_width
         for i in range(block):
-            cells[(head + i) % bar_width] = self._BAR_FILLED
+            cells[min(head + i, bar_width - 1)] = self._BAR_FILLED
         return "".join(cells)
 
     def _cancel_x(self, width: int) -> int:
@@ -927,7 +986,7 @@ class ProgressDialog(WindowContent):
 
     def on_click(self, event) -> None:
         """Mouse cancel: click on the centred [ Cancel ] button."""
-        if getattr(event, "y", -1) != self._CANCEL_Y:
+        if getattr(event, "y", -1) != self._cancel_y:
             return
         start = self._cancel_x(self.size.width)
         x = getattr(event, "x", -1)
@@ -959,6 +1018,15 @@ class FolderStatsDialog(WindowContent):
         Binding("escape", "primary", show=False),
         Binding("enter", "primary", show=False),
     ]
+
+    class Dismissed(Message):
+        """Posted when the user closes the (finished) stats modal, so the app
+        routes it through ``_close_modal`` — which restores panel focus. A raw
+        ``Window.Closed`` bypasses that and leaves focus stranded off the panel."""
+
+        def __init__(self, dialog: "FolderStatsDialog") -> None:
+            self.dialog = dialog
+            super().__init__()
 
     _TITLE_Y = 0
     _FILES_Y = 2
@@ -1025,9 +1093,39 @@ class FolderStatsDialog(WindowContent):
             return self._render_status(width)
         return Strip([Segment(" " * width)])
 
+    def _get_palette(self) -> "Palette | None":
+        try:
+            for anc in self.ancestors_with_self:
+                pal = getattr(anc, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        except Exception:
+            return None
+        return None
+
+    def _value_style(self) -> RichStyle:
+        """Highlight colour for the result VALUES — theme-aware (the active
+        palette's bold title accent), with a readable fallback when no palette
+        is reachable (headless tests)."""
+        pal = self._get_palette()
+        if pal is not None:
+            try:
+                fg = pal.get("window.title.focused").fg
+                if fg:
+                    return RichStyle(color=fg, bold=True)
+            except Exception:
+                pass
+        return RichStyle(color="rgb(135,215,215)", bold=True)
+
     def _kv(self, key: str, value: str, width: int) -> Strip:
-        text = (f"  {key}: " + value).ljust(width)[:width]
-        return Strip([Segment(text)])
+        prefix = f"  {key}: "
+        line = (prefix + value).ljust(width)[:width]
+        if len(line) <= len(prefix):
+            return Strip([Segment(line, RichStyle(dim=True))])
+        return Strip([
+            Segment(prefix, RichStyle(dim=True)),
+            Segment(line[len(prefix):], self._value_style()),
+        ])
 
     def _render_status(self, width: int) -> Strip:
         if not self._done:
@@ -1066,12 +1164,7 @@ class FolderStatsDialog(WindowContent):
         if not self._done:
             self.cancel_event.set()
             return
-        node = self
-        while node is not None:
-            if isinstance(node, ModalWindow):
-                node.post_message(Window.Closed(node))
-                break
-            node = getattr(node, "parent", None)
+        self.post_message(FolderStatsDialog.Dismissed(self))
 
 
 def _ellipsize_left(text: str, width: int) -> str:

@@ -84,6 +84,9 @@ class OpResult:
     succeeded: list[Path] = field(default_factory=list)
     errors: list[OpError] = field(default_factory=list)
     cancelled: bool = False
+    # Files left untouched because they already existed at the destination and
+    # the caller asked to skip existing ones (copy "Skip existing" checkbox).
+    skipped: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -95,14 +98,22 @@ class CopyStatus:
     show *which file* is being copied and move the bar by **bytes** — a single
     multi-GB file then animates smoothly instead of jumping 0→100% in one step.
 
-    ``is_bytes`` distinguishes the local byte-granular path (True) from the
-    generic cross-provider path, which still counts whole files (False).
+    ``done``/``total`` are the **overall** progress across the whole operation;
+    ``is_bytes`` distinguishes the byte-granular path (True) from a whole-file
+    counter (False). The ``file_*`` fields carry the **current file's** own byte
+    progress so the dialog can show a second, per-file bar, and ``files_done``/
+    ``files_total`` drive the "file X of Y" counter. All the extra fields default
+    to 0, so a single-bar caller can keep constructing ``CopyStatus`` as before.
     """
 
-    done: int          # bytes (is_bytes) or files copied so far
-    total: int         # total bytes (is_bytes) or total files
+    done: int          # overall: bytes (is_bytes) or files copied so far
+    total: int         # overall: total bytes (is_bytes) or total files
     label: str = ""    # path/name of the file currently being copied
     is_bytes: bool = False
+    file_done: int = 0     # bytes of the current file copied so far
+    file_total: int = 0    # size of the current file (0 if unknown)
+    files_done: int = 0    # files completed so far
+    files_total: int = 0   # total files in the operation
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -111,6 +122,9 @@ StatusCallback = Callable[[CopyStatus], None]
 # Stream buffer for the chunked copy. Small enough that cancel/redraw stay
 # responsive on a huge single file, large enough not to syscall-thrash.
 _COPY_CHUNK = 1024 * 1024  # 1 MiB
+# Emit a "measuring" progress tick at most every this-many files while sizing a
+# tree, so the pre-copy scan shows life without flooding the UI marshaller.
+_MEASURE_TICK_EVERY = 2048
 
 
 class _Cancelled(Exception):
@@ -188,45 +202,84 @@ def mkdir_at(parent: Path, name: str) -> OpResult:
 # --------------------------------------------------------------------------
 
 
-def _count_bytes(paths: list[Path]) -> int:
-    """Total bytes of all regular files under `paths` (symlinks not followed)."""
+def _measure_local(
+    paths: list[Path],
+    cancel_event: threading.Event | None,
+    on_tick: Callable[[int], None] | None = None,
+) -> tuple[int, int]:
+    """One cancellable pass returning ``(file_count, total_bytes)``.
+
+    Before a copy the tree used to be walked TWICE (once for the file count,
+    once for the byte total) with no cancel check, so the dialog sat at
+    0% for seconds and Cancel did nothing. This walks once, checks
+    ``cancel_event`` per directory (raising ``_Cancelled``), and ``on_tick(n)``
+    lets the dialog show a live "measuring" count so the wait isn't a frozen bar.
+    """
+    files = 0
     total = 0
+    next_tick = _MEASURE_TICK_EVERY
     for root in paths:
+        if _check_cancelled(cancel_event):
+            raise _Cancelled
         try:
             if root.is_dir() and not root.is_symlink():
                 for dirpath, _dirnames, filenames in os.walk(root):
+                    if _check_cancelled(cancel_event):
+                        raise _Cancelled
                     for name in filenames:
+                        files += 1
                         try:
                             total += (Path(dirpath) / name).lstat().st_size
                         except OSError:
                             pass
+                        # Every N files (checked per file, so even one huge flat
+                        # directory animates and stays cancellable): re-check
+                        # cancel and tick. Ticking per file-emit would flood the
+                        # UI marshaller — with total==0 it can't throttle these
+                        # (done>=total is always true).
+                        if files >= next_tick:
+                            if _check_cancelled(cancel_event):
+                                raise _Cancelled
+                            if on_tick is not None:
+                                on_tick(files)
+                            next_tick = files + _MEASURE_TICK_EVERY
             else:
-                total += root.lstat().st_size
+                files += 1
+                try:
+                    total += root.lstat().st_size
+                except OSError:
+                    pass
+        except _Cancelled:
+            raise
         except OSError:
-            pass
-    return total
+            files += 1
+    return max(files, 1), total
 
 
 def _copy_one_file(
     src: Path,
     dst: Path,
-    on_bytes: Callable[[int, str], None],
+    file_start: Callable[[str, int], None],
+    on_bytes: Callable[[int], None],
     cancel_event: threading.Event | None,
 ) -> None:
     """Copy a single file (or symlink) in `_COPY_CHUNK` chunks.
 
-    Reports the file path + bytes written through `on_bytes(n, label)` and
-    checks `cancel_event` between chunks, so a cancel lands mid-file and the
+    Calls `file_start(label, size)` before the first byte (so the dialog shows
+    the name and can size the per-file bar) and `on_bytes(n)` per chunk, and
+    checks `cancel_event` between chunks so a cancel lands mid-file and the
     partial destination is removed rather than left half-written.
     """
     label = str(src)
     if src.is_symlink():
+        file_start(label, 0)
         os.symlink(os.readlink(src), dst)
-        on_bytes(0, label)
         return
-    # Announce the file before the first read so the dialog shows its name
-    # immediately, even for an empty file that never enters the loop below.
-    on_bytes(0, label)
+    try:
+        size = src.stat().st_size
+    except OSError:
+        size = 0
+    file_start(label, size)
     try:
         with open(src, "rb") as reader, open(dst, "wb") as writer:
             while True:
@@ -236,7 +289,7 @@ def _copy_one_file(
                 if not chunk:
                     break
                 writer.write(chunk)
-                on_bytes(len(chunk), label)
+                on_bytes(len(chunk))
     except _Cancelled:
         try:
             os.unlink(dst)
@@ -249,8 +302,11 @@ def _copy_one_file(
 def _copy_recursive(
     src: Path,
     dst: Path,
-    on_bytes: Callable[[int, str], None],
-    entry_bump: Callable[[], None],
+    file_start: Callable[[str, int], None],
+    on_bytes: Callable[[int], None],
+    file_done: Callable[[], None],
+    skip: Callable[[int, Path], None],
+    skip_existing: bool,
     cancel_event: threading.Event | None,
 ) -> None:
     if _check_cancelled(cancel_event):
@@ -261,13 +317,19 @@ def _copy_recursive(
         # _ensure_dir. Without it a second copy of `front` onto an existing
         # `dest/front` raised "File exists" instead of updating it.
         dst.mkdir(parents=True, exist_ok=True)
-        entry_bump()
         for child in src.iterdir():
-            _copy_recursive(child, dst / child.name, on_bytes, entry_bump,
-                            cancel_event)
+            _copy_recursive(child, dst / child.name, file_start, on_bytes,
+                            file_done, skip, skip_existing, cancel_event)
     else:
-        _copy_one_file(src, dst, on_bytes, cancel_event)
-        entry_bump()
+        if skip_existing and dst.exists():
+            try:
+                size = src.stat().st_size
+            except OSError:
+                size = 0
+            skip(size, dst)
+            return
+        _copy_one_file(src, dst, file_start, on_bytes, cancel_event)
+        file_done()
 
 
 def copy_paths(
@@ -278,41 +340,74 @@ def copy_paths(
     on_progress: ProgressCallback | None = None,
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
+    skip_existing: bool = False,
 ) -> OpResult:
     """Copy each source path into `dest_dir`, in chunks, with byte progress.
 
     `rename_to` is honoured only when `paths` has exactly one entry — it
     overrides the destination basename so the user can copy-with-rename.
+    `skip_existing` leaves a destination file untouched when it already exists.
 
-    Two progress channels, never both driving the display:
-
-    * `on_status` (preferred) — a :class:`CopyStatus` per chunk, carrying the
-      current file path and a *byte* counter so the bar animates within a big
-      file. The UI wires this up.
-    * `on_progress(index, total)` — the legacy whole-entry (files + dirs)
-      counter, emitted only when `on_status` is absent (older callers/tests).
+    The rich `on_status` (:class:`CopyStatus`) channel carries BOTH the overall
+    byte progress and the current file's own byte progress + a file counter, so
+    the dialog can show two bars. The legacy `on_progress(index, total)` counter
+    fires only when `on_status` is absent (older callers/tests).
     """
     result = OpResult()
     single_rename = rename_to if (rename_to and len(paths) == 1) else None
-    total_bytes = _count_bytes(paths)
-    file_total = _count_entries(paths)
-    done_bytes = [0]
-    entries = [0]
 
-    def _on_bytes(n: int, label: str) -> None:
-        done_bytes[0] += n
+    # Size the tree in ONE cancellable pass, showing a live "measuring" count so
+    # a big folder doesn't freeze the dialog at 0% with a dead Cancel button.
+    def _measure_tick(n: int) -> None:
         if on_status is not None:
-            on_status(CopyStatus(done_bytes[0], total_bytes, label, is_bytes=True))
+            on_status(CopyStatus(n, 0, "Measuring…", is_bytes=False))
+    try:
+        files_total, total_bytes = _measure_local(paths, cancel_event, _measure_tick)
+    except _Cancelled:
+        result.cancelled = True
+        return result
 
-    def _entry_bump() -> None:
-        entries[0] += 1
+    st = {"done_bytes": 0, "done_files": 0, "cur_done": 0, "cur_total": 0,
+          "label": ""}
+
+    def _emit() -> None:
+        if on_status is None:
+            return
+        on_status(CopyStatus(
+            st["done_bytes"], total_bytes, st["label"], is_bytes=True,
+            file_done=st["cur_done"], file_total=st["cur_total"],
+            files_done=st["done_files"], files_total=files_total,
+        ))
+
+    def _advance_file() -> None:
+        st["done_files"] += 1
         if on_status is None and on_progress is not None:
-            on_progress(entries[0], file_total)
+            on_progress(st["done_files"], files_total)
 
-    if on_status is not None:
-        on_status(CopyStatus(0, total_bytes, "", is_bytes=True))
-    elif on_progress is not None:
-        on_progress(0, file_total)
+    def _file_start(label: str, size: int) -> None:
+        st["label"] = label
+        st["cur_total"] = max(size, 0)
+        st["cur_done"] = 0
+        _emit()
+
+    def _on_bytes(n: int) -> None:
+        st["done_bytes"] += n
+        st["cur_done"] += n
+        _emit()
+
+    def _file_done() -> None:
+        _advance_file()
+        _emit()
+
+    def _skip(size: int, target: Path) -> None:
+        st["done_bytes"] += max(size, 0)
+        _advance_file()
+        result.skipped.append(target)
+        _emit()
+
+    _emit()  # initial 0%
+    if on_status is None and on_progress is not None:
+        on_progress(0, files_total)
 
     for src in paths:
         if _check_cancelled(cancel_event):
@@ -323,7 +418,8 @@ def copy_paths(
         try:
             if src.parent == dest_dir and dest_name == src.name:
                 raise OSError("source and destination are the same directory")
-            _copy_recursive(src, target, _on_bytes, _entry_bump, cancel_event)
+            _copy_recursive(src, target, _file_start, _on_bytes, _file_done,
+                            _skip, skip_existing, cancel_event)
         except _Cancelled:
             result.cancelled = True
             return result

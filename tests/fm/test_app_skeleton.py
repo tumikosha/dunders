@@ -2068,3 +2068,44 @@ async def test_f3_on_folder_opens_stats_modal(tmp_path):
         assert dlg._stats.dirs == 1
         assert dlg._stats.total_bytes == 7
         assert dlg._stats.max_depth == 1  # only 'inner' is a nested dir
+
+
+@pytest.mark.asyncio
+async def test_f3_folder_stats_close_restores_panel_focus(tmp_path):
+    """Closing the folder-statistics modal returns focus to the panel F3 was
+    pressed in (it dismisses via a Dismissed message routed through
+    _close_modal, not a raw Window.Closed that would strand focus)."""
+    from dunders.fm.dialogs import FolderStatsDialog
+    from dunders.fm.file_panel import FilePanel
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("hi")
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        src_id = panel.parent.id
+        idx = next(i for i, e in enumerate(panel.entries) if e.name == "sub")
+        panel.cursor = idx
+        app.action_view()
+        for _ in range(20):
+            await pilot.pause()
+            found = app.query(FolderStatsDialog)
+            if found and found.first()._done:
+                break
+        dlg = app.query(FolderStatsDialog).first()
+        app.set_focus(dlg)
+        await pilot.pause()
+        await pilot.press("space")           # close the finished dialog
+        for _ in range(6):
+            await pilot.pause()
+        # Focus is back on a FilePanel — specifically the source panel.
+        assert isinstance(app.focused, FilePanel)
+        node, pid = app.focused, None
+        while node is not None:
+            if getattr(node, "id", None) in ("panel-left", "panel-right"):
+                pid = node.id
+                break
+            node = getattr(node, "parent", None)
+        assert pid == src_id

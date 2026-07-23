@@ -188,9 +188,9 @@ def test_copy_progress_counts_files_inside_directory(tmp_path: Path):
     dst.mkdir()
     seen: list[tuple[int, int]] = []
     copy_paths([src], dst, on_progress=lambda i, n: seen.append((i, n)))
-    # 2 files + 1 dir = 3 entries.
-    assert seen[0] == (0, 3)
-    assert seen[-1] == (3, 3)
+    # The counter is file-based now ("file X of Y"): 2 files, dirs not counted.
+    assert seen[0] == (0, 2)
+    assert seen[-1] == (2, 2)
 
 
 def test_copy_status_reports_bytes_and_filename(tmp_path: Path):
@@ -212,6 +212,92 @@ def test_copy_status_reports_bytes_and_filename(tmp_path: Path):
     assert any(s.label.endswith("big.bin") for s in seen)
     # The bar genuinely animates within the single file (multiple updates).
     assert len({s.done for s in seen}) > 2
+
+
+def test_copy_status_carries_two_bar_fields(tmp_path: Path):
+    """CopyStatus reports the current file's own progress + a file counter so
+    the dialog can show a second bar."""
+    src = tmp_path / "tree"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.txt").write_text("aaaa")          # 4
+    (src / "sub" / "b.txt").write_bytes(b"x" * 100)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    seen: list[CopyStatus] = []
+    copy_paths([src], dest, rename_to="tree", on_status=seen.append)
+    assert seen
+    last = seen[-1]
+    assert last.files_total == 2                 # a.txt + b.txt (dirs not counted)
+    assert last.files_done == 2
+    # While copying the 100-byte file its per-file total is reported.
+    assert any(s.file_total == 100 for s in seen)
+    # The per-file counter resets between files (starts each file at 0).
+    assert any(s.file_done == 0 for s in seen)
+
+
+def test_copy_paths_skip_existing(tmp_path: Path):
+    """skip_existing leaves already-present destination files untouched and
+    records them in result.skipped, while still copying the new ones."""
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.txt").write_text("NEW-A")
+    (src / "b.txt").write_text("NEW-B")
+    (src / "sub" / "c.txt").write_text("NEW-C")
+    dest = tmp_path / "dst"
+    (dest / "src").mkdir(parents=True)
+    (dest / "src" / "a.txt").write_text("OLD-A")   # pre-existing -> skipped
+
+    result = copy_paths([src], dest, rename_to="src", skip_existing=True)
+    assert result.errors == []
+    assert {Path(p).name for p in result.skipped} == {"a.txt"}
+    assert (dest / "src" / "a.txt").read_text() == "OLD-A"   # untouched
+    assert (dest / "src" / "b.txt").read_text() == "NEW-B"   # copied
+    assert (dest / "src" / "sub" / "c.txt").read_text() == "NEW-C"
+
+
+def test_copy_paths_measure_is_cancellable(tmp_path: Path):
+    """Cancelling during the pre-copy sizing pass aborts immediately (the tree
+    used to be walked twice with no cancel check — a frozen, dead-Cancel wait)."""
+    import threading
+    src = tmp_path / "big"
+    src.mkdir()
+    for i in range(20):
+        (src / f"f{i}").write_text("x")
+    dest = tmp_path / "dst"
+    dest.mkdir()
+    ev = threading.Event()
+    ev.set()  # cancel before we even start measuring
+    result = copy_paths([src], dest, cancel_event=ev)
+    assert result.cancelled is True
+    assert not (dest / "big").exists()  # nothing copied
+
+
+def test_copy_paths_emits_measuring_status(tmp_path: Path):
+    """A copy reports a 'Measuring…' status while sizing so the dialog shows
+    life instead of a frozen 0% bar."""
+    src = tmp_path / "many"
+    src.mkdir()
+    for i in range(5000):
+        (src / f"f{i}").write_text("x")
+    dest = tmp_path / "dst"
+    dest.mkdir()
+    seen: list[CopyStatus] = []
+    copy_paths([src], dest, rename_to="many", on_status=seen.append)
+    assert any(s.label == "Measuring…" for s in seen)
+    # After measuring, the real copy still reports the full file count.
+    assert seen[-1].files_total == 5000
+    assert seen[-1].files_done == 5000
+
+
+def test_copy_paths_no_skip_overwrites(tmp_path: Path):
+    """Without skip_existing an existing file is overwritten (default)."""
+    src = tmp_path / "f.txt"
+    src.write_text("NEW")
+    dest = tmp_path / "dst"
+    dest.mkdir()
+    (dest / "f.txt").write_text("OLD")
+    copy_paths([src], dest)
+    assert (dest / "f.txt").read_text() == "NEW"
 
 
 def test_copy_status_suppresses_legacy_on_progress(tmp_path: Path):

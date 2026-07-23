@@ -138,7 +138,7 @@ async def test_progress_dialog_initial_render():
         line0 = "".join(seg.text for seg in dlg.render_line(0))
         assert "Deleting..." in line0
         bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
-        assert "0 / 10" in bar
+        assert "0/10" in bar
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,7 @@ async def test_progress_dialog_set_progress_updates_render():
         dlg.set_progress(3, 10)
         await pilot.pause()
         bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
-        assert "3 / 10" in bar
+        assert "3/10" in bar
 
 
 @pytest.mark.asyncio
@@ -179,6 +179,77 @@ async def test_progress_dialog_copy_status_shows_filename_and_bytes():
         # Human-readable byte counts + a percentage, not raw byte integers.
         assert "512" in bar and "%" in bar
         assert "524288" not in bar
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_two_bars_for_copy():
+    """A copy status renders BOTH an overall bar and a current-file bar, plus a
+    'file X/Y' counter on the label line."""
+    from dunders.fm.actions import CopyStatus
+    dlg = ProgressDialog(title="Copying", total=10)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        dlg.set_copy_status(CopyStatus(
+            done=5 * 1024 * 1024, total=20 * 1024 * 1024,
+            label="big/current.bin", is_bytes=True,
+            file_done=256 * 1024, file_total=1024 * 1024,
+            files_done=3, files_total=10,
+        ))
+        await pilot.pause()
+        assert dlg.two_bars is True
+        label = "".join(seg.text for seg in dlg.render_line(dlg._LABEL_Y))
+        assert "current.bin" in label
+        assert "3/10" in label                      # file counter
+        overall = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+        assert "5.0M/20.0M" in overall and "25%" in overall
+        file_bar = "".join(seg.text for seg in dlg.render_line(dlg._FILE_BAR_Y))
+        assert "256.0K/1.0M" in file_bar and "25%" in file_bar
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_indeterminate_bar_sweeps_smoothly():
+    """The unknown-total (indeterminate) bar must sweep one cell per update, not
+    teleport — seeding it with the raw byte count made it 'jump like crazy'."""
+    from dunders.fm.actions import CopyStatus
+    dlg = ProgressDialog(title="Copying", total=0)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        positions = []
+        for k in range(15):
+            # done jumps by a big, irregular amount each update (like real bytes)
+            dlg.set_copy_status(CopyStatus(done=k * 1_000_003, total=0,
+                                           label="Measuring…", is_bytes=False))
+            await pilot.pause()
+            bar = "".join(seg.text for seg in dlg.render_line(dlg._BAR_Y))
+            positions.append(bar.index("█") if "█" in bar else -1)
+        steps = [abs(positions[i] - positions[i - 1]) for i in range(1, len(positions))]
+        assert max(steps) <= 1  # smooth: never teleports despite huge done jumps
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_space_cancels():
+    dlg = ProgressDialog(title="Copying", total=5)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        dlg.focus()
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert dlg.cancel_event.is_set()
 
 
 @pytest.mark.asyncio
@@ -252,7 +323,7 @@ async def test_progress_dialog_mouse_click_on_cancel_button_cancels():
         stops: list[bool] = []
         dlg.on_click(SimpleNamespace(
             x=dlg._cancel_x(dlg.size.width) + 2,
-            y=dlg._CANCEL_Y,
+            y=dlg._cancel_y,
             stop=lambda: stops.append(True),
         ))
         assert dlg.cancel_event.is_set()
@@ -274,7 +345,7 @@ async def test_progress_dialog_mouse_click_outside_button_is_ignored():
         assert not dlg.cancel_event.is_set()
         dlg.on_click(SimpleNamespace(
             x=dlg._cancel_x(dlg.size.width) + len(dlg._CANCEL_LABEL) + 5,
-            y=dlg._CANCEL_Y,
+            y=dlg._cancel_y,
             stop=lambda: None,
         ))
         assert not dlg.cancel_event.is_set()
@@ -375,7 +446,10 @@ async def test_copymove_dialog_tab_chain():
         await pilot.pause()
         harness.dialog.focus_input()
         await pilot.pause()
-        # input -> ok -> cancel -> input
+        # input -> skip-checkbox -> ok -> cancel -> input
+        await pilot.press("tab")
+        await pilot.pause()
+        assert harness.focused.id == "cm-skip"
         await pilot.press("tab")
         await pilot.pause()
         assert harness.focused.id == "cm-ok"
@@ -386,6 +460,23 @@ async def test_copymove_dialog_tab_chain():
         await pilot.pause()
         from textual.widgets import Input
         assert isinstance(harness.focused, Input)
+
+
+@pytest.mark.asyncio
+async def test_copymove_dialog_skip_existing_checkbox():
+    """The 'Skip existing' checkbox is off by default and toggles via space."""
+    harness = _CMHarness(initial="/tmp/x")
+    async with harness.run_test() as pilot:
+        await pilot.pause()
+        assert harness.dialog.skip_existing is False
+        harness.dialog.focus_input()
+        await pilot.pause()
+        await pilot.press("tab")            # -> the skip checkbox
+        await pilot.pause()
+        assert harness.focused.id == "cm-skip"
+        await pilot.press("space")          # toggle on
+        await pilot.pause()
+        assert harness.dialog.skip_existing is True
 
 
 @pytest.mark.asyncio
@@ -538,3 +629,28 @@ async def test_folder_stats_space_activates_button():
         await pilot.press("space")
         await pilot.pause()
         assert dlg.cancel_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_values_highlighted():
+    """Result values render in a distinct highlight style; the key labels stay
+    dim — so the numbers stand out."""
+    dlg = FolderStatsDialog(name="proj")
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _H().run_test() as pilot:
+        await pilot.pause()
+        dlg.set_stats(FolderStats(files=42, dirs=7, total_bytes=123456,
+                                  largest_name="big.bin", largest_size=99999,
+                                  max_depth=3), done=True)
+        await pilot.pause()
+        segs = [s for s in dlg.render_line(dlg._FILES_Y)._segments if s.text.strip()]
+        key_seg, val_seg = segs[0], segs[-1]
+        assert "Files" in key_seg.text
+        assert "42" in val_seg.text
+        # Value style differs from the dim key style (bold and/or coloured).
+        assert val_seg.style != key_seg.style
+        assert val_seg.style.bold

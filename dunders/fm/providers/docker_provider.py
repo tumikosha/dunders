@@ -1120,7 +1120,7 @@ class DockerProvider:
 
     def copy_within(self, sources, dest, *, rename_to=None,
                     on_progress=None, on_status=None,
-                    cancel_event=None) -> OpResult | None:
+                    cancel_event=None, skip_existing=False) -> OpResult | None:
         return None
 
     def move_within(self, sources, dest, *, rename_to=None,

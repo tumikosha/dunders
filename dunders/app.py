@@ -716,6 +716,8 @@ class DundersApp(App):
         self, event: CopyMoveDialog.Submitted
     ) -> None:
         ctx = event.dialog.context
+        # Read the "Skip existing" checkbox before the dialog is torn down.
+        skip = bool(getattr(event.dialog, "skip_existing", False))
         self._close_modal(event.dialog)
         if not isinstance(ctx, CopyMoveRequest):
             return
@@ -728,13 +730,14 @@ class DundersApp(App):
                 table = self._db_dest_table(raw)
                 if table:
                     root = VfsPath(scheme="db", root=ctx.dest_loc.root, parts=())
-                    self._run_copy_into_target(ctx, root, rename_to=f"{table}.jsonl")
+                    self._run_copy_into_target(ctx, root, rename_to=f"{table}.jsonl",
+                                               skip_existing=skip)
                     return
             # Copy/move INTO a browsed archive at its current sub-path; the
             # typed value is ignored (append-only, no path editing). Checked
             # before the provider-prefix path since the prefill is a "<scheme>://"
             # URI which would otherwise match the prefix dispatch.
-            self._run_copy_into_archive(ctx)
+            self._run_copy_into_archive(ctx, skip_existing=skip)
             return
         # Provider prefix: "<scheme>:<spec>" (e.g. zip:backup.zip, ftp:host/path)
         # hands <spec> to that provider, which creates the target archive/
@@ -742,10 +745,11 @@ class DundersApp(App):
         target = self._resolve_prefixed_target(raw, base=ctx.dest_loc)
         if target is not None:
             dest_panel = self._opposite_panel(self._active_panel())
-            self._run_copy_into_target(ctx, target, open_in=dest_panel)
+            self._run_copy_into_target(ctx, target, open_in=dest_panel,
+                                       skip_existing=skip)
             return
         user_dest = Path(raw).expanduser() if raw else ctx.dest
-        self._run_copy_move(ctx, user_dest)
+        self._run_copy_move(ctx, user_dest, skip_existing=skip)
 
     def _resolve_prefixed_target(self, raw: str, *, base: VfsPath) -> VfsPath | None:
         """Map a typed ``<scheme>:<spec>`` destination to a write-target locator
@@ -804,12 +808,14 @@ class DundersApp(App):
 
         return _on_status
 
-    def _run_copy_into_archive(self, ctx: CopyMoveRequest) -> None:
+    def _run_copy_into_archive(self, ctx: CopyMoveRequest, *,
+                               skip_existing: bool = False) -> None:
         """Copy/move the selection into the browsed archive (ctx.dest_loc)."""
-        self._run_copy_into_target(ctx, ctx.dest_loc)
+        self._run_copy_into_target(ctx, ctx.dest_loc, skip_existing=skip_existing)
 
     def _run_copy_into_target(
-        self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None, rename_to=None
+        self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None, rename_to=None,
+        skip_existing: bool = False,
     ) -> None:
         """Copy/move the selection into ``target`` via the transfer engine.
 
@@ -822,7 +828,7 @@ class DundersApp(App):
             return
         op_label = "Copying" if ctx.op == "copy" else "Moving"
         progress = ProgressDialog(title=op_label, total=len(ctx.targets))
-        show_modal(self.desktop, progress, title=op_label, size=(64, 9))
+        show_modal(self.desktop, progress, title=op_label, size=(64, 11))
         self.call_after_refresh(progress.focus)
 
         _on_status = self._status_marshaller(progress)
@@ -840,6 +846,7 @@ class DundersApp(App):
                 on_progress=_on_progress,
                 on_status=_on_status,
                 cancel_event=progress.cancel_event,
+                skip_existing=skip_existing,
             )
             self.call_from_thread(
                 self._finish_into_target, ctx.op, progress, result, target, open_in
@@ -857,14 +864,15 @@ class DundersApp(App):
     ) -> None:
         self._close_modal(event.dialog)
 
-    def _run_copy_move(self, req: CopyMoveRequest, user_dest: Path) -> None:
+    def _run_copy_move(self, req: CopyMoveRequest, user_dest: Path, *,
+                       skip_existing: bool = False) -> None:
         if self.desktop is None:
             return
         source_name = req.targets[0].name if len(req.targets) == 1 else None
         dest_dir, rename_to = _resolve_copy_dest(user_dest, source_name)
         op_label = "Copying" if req.op == "copy" else "Moving"
         progress = ProgressDialog(title=op_label, total=len(req.targets))
-        show_modal(self.desktop, progress, title=op_label, size=(64, 9))
+        show_modal(self.desktop, progress, title=op_label, size=(64, 11))
         self.call_after_refresh(progress.focus)
 
         _on_status = self._status_marshaller(progress)
@@ -882,6 +890,7 @@ class DundersApp(App):
                 on_progress=_on_progress,
                 on_status=_on_status,
                 cancel_event=progress.cancel_event,
+                skip_existing=skip_existing,
             )
             self.call_from_thread(self._finish_op, req.op, progress, result)
 
@@ -3446,7 +3455,7 @@ class DundersApp(App):
                 op=op, targets=targets, dest=dest, base=panel.cwd, dest_loc=dest_loc
             ),
         )
-        show_modal(self.desktop, dialog, title=verb, size=(72, 9))
+        show_modal(self.desktop, dialog, title=verb, size=(72, 12))
         self.call_after_refresh(dialog.focus_input)
 
     def action_edit(self) -> None:
@@ -3522,6 +3531,7 @@ class DundersApp(App):
         walk is many round trips). Works for every scheme via provider.scan."""
         if self.desktop is None:
             return
+        self._remember_active_panel_id()  # so focus returns here on Cancel/Close
         dialog = FolderStatsDialog(name=loc.name or str(loc))
         show_modal(self.desktop, dialog, title="Folder statistics", size=(64, 13))
         self.call_after_refresh(dialog.focus)
@@ -3539,6 +3549,13 @@ class DundersApp(App):
             self.call_from_thread(dialog.set_stats, stats, True)
 
         self.run_worker(_worker, thread=True, exclusive=False, group="folderstats")
+
+    def on_folder_stats_dialog_dismissed(
+        self, event: "FolderStatsDialog.Dismissed"
+    ) -> None:
+        """Close the folder-statistics modal via _close_modal so panel focus is
+        restored to where F3 was pressed (a raw Window.Closed would strand it)."""
+        self._close_modal(event.dialog)
 
     def action_toggle_hidden(self) -> None:
         """Alt+H / View menu: show or hide dot-files in the active panel."""

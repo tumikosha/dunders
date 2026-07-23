@@ -321,6 +321,18 @@ class SftpProvider:
             except OSError:
                 return False
 
+    def exists(self, loc: VfsPath) -> bool:
+        if not loc.parts:
+            return True
+        sftp = self._sftp(loc.root)
+        lock = self._lock_for(loc.root)
+        with lock:
+            try:
+                sftp.stat(self._remote(loc))
+                return True
+            except OSError:
+                return False
+
     def open_read(self, loc: VfsPath) -> BinaryIO:
         sftp = self._sftp(loc.root)
         lock = self._lock_for(loc.root)
@@ -415,7 +427,8 @@ class SftpProvider:
 
     # No server-side copy; the engine streams via open_read/open_write.
     def copy_within(self, sources, dest, *, rename_to=None, on_progress=None,
-                    on_status=None, cancel_event=None) -> OpResult | None:
+                    on_status=None, cancel_event=None,
+                    skip_existing=False) -> OpResult | None:
         return None
 
     def move_within(self, sources, dest, *, rename_to=None, on_progress=None,

@@ -57,6 +57,108 @@ def _is_slow_dir(registry: VfsRegistry, loc: VfsPath) -> bool:
         return False
 
 
+def _dest_exists(provider: VfsProvider, loc: VfsPath) -> bool:
+    """True if ``loc`` already exists on ``provider`` (file or dir).
+
+    Uses the provider's own ``exists`` when available (cheap: one stat), else
+    falls back to ``is_dir`` plus a parent-listing scan — enough for the
+    "Skip existing" copy option on any scheme."""
+    fn = getattr(provider, "exists", None)
+    if callable(fn):
+        try:
+            return bool(fn(loc))
+        except OSError:
+            return False
+    try:
+        if provider.is_dir(loc):
+            return True
+    except OSError:
+        pass
+    parent = loc.parent
+    if parent is None:
+        return False
+    try:
+        return any(
+            e.name == loc.name
+            for e in provider.scan(parent, include_parent=False, show_hidden=True)
+        )
+    except OSError:
+        return False
+
+
+class _CopyProgress:
+    """Two-channel copy progress: overall (bytes across the whole operation)
+    plus the current file's own byte progress and a file counter. Every mutation
+    emits a :class:`CopyStatus` carrying both bars; the UI throttles the flood.
+
+    ``use_bytes`` drives the overall bar by bytes (sizes were measured);
+    ``indeterminate`` is the lazy sftp-directory case (unknown total → count-up).
+    Otherwise the overall bar counts whole files.
+    """
+
+    def __init__(self, *, on_status, on_progress, total_bytes, total_files,
+                 use_bytes, indeterminate):
+        self.on_status = on_status
+        self.on_progress = on_progress
+        self.total_bytes = total_bytes
+        self.total_files = total_files
+        self.use_bytes = use_bytes
+        self.indeterminate = indeterminate
+        self.done_bytes = 0
+        self.done_files = 0
+        self.cur_label = ""
+        self.cur_done = 0
+        self.cur_total = 0
+
+    def emit(self) -> None:
+        if self.on_status is None:
+            return
+        if self.use_bytes:
+            d, t, ib = self.done_bytes, self.total_bytes, True
+        elif self.indeterminate:
+            d, t, ib = self.done_bytes, 0, True
+        else:
+            d, t, ib = self.done_files, self.total_files, False
+        self.on_status(CopyStatus(
+            d, t, self.cur_label, ib,
+            file_done=self.cur_done, file_total=self.cur_total,
+            files_done=self.done_files,
+            files_total=0 if self.indeterminate else self.total_files,
+        ))
+
+    def file_start(self, name: str, size: int) -> None:
+        self.cur_label = name
+        self.cur_total = max(size, 0)
+        self.cur_done = 0
+        self.emit()
+
+    def chunk(self, n: int) -> None:
+        self.done_bytes += n
+        self.cur_done += n
+        self.emit()
+
+    def _advance_file(self) -> None:
+        self.done_files += 1
+        # Legacy whole-file counter: only when nobody consumes the rich status
+        # (older callers/tests). With on_status wired the dialog reads the file
+        # counter straight off CopyStatus, so firing on_progress too would fight
+        # the two-bar display by flipping it into set_progress mode.
+        if (self.on_progress is not None and self.on_status is None
+                and not self.indeterminate):
+            self.on_progress(self.done_files, self.total_files)
+
+    def file_done(self) -> None:
+        self._advance_file()
+        self.emit()
+
+    def skip(self, size: int) -> None:
+        # A skipped file was counted in the measured total, so advance the
+        # overall bar by its size (and the file counter) to keep 100% reachable.
+        self.done_bytes += max(size, 0)
+        self._advance_file()
+        self.emit()
+
+
 def transfer(
     registry: VfsRegistry,
     sources: list[VfsPath],
@@ -67,6 +169,7 @@ def transfer(
     on_progress: ProgressCallback | None = None,
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
+    skip_existing: bool = False,
 ) -> OpResult:
     """Copy or move ``sources`` into ``dest_dir``.
 
@@ -75,7 +178,8 @@ def transfer(
 
     ``on_status`` is the rich copy channel (current file + byte progress); the
     UI wires it up so a big single file animates the bar. ``on_progress`` is
-    the legacy whole-item counter still used by move.
+    the legacy whole-item counter still used by move. ``skip_existing`` leaves a
+    destination file untouched when it already exists (per-file).
     """
     if not sources:
         return OpResult()
@@ -90,6 +194,7 @@ def transfer(
                 on_progress=on_progress,
                 on_status=on_status,
                 cancel_event=cancel_event,
+                skip_existing=skip_existing,
             )
         else:
             result = provider.move_within(
@@ -112,6 +217,7 @@ def transfer(
         on_progress=on_progress,
         on_status=on_status,
         cancel_event=cancel_event,
+        skip_existing=skip_existing,
     )
 
 
@@ -125,6 +231,7 @@ def _generic_transfer(
     on_progress: ProgressCallback | None,
     on_status: StatusCallback | None,
     cancel_event: threading.Event | None,
+    skip_existing: bool = False,
 ) -> OpResult:
     result = OpResult()
     single_rename = rename_to if (rename_to and len(sources) == 1) else None
@@ -155,41 +262,13 @@ def _generic_transfer(
             result.cancelled = True
             return result
     total_files = max(total_files, 1)
-    use_bytes = total_bytes > 0
-    indeterminate = lazy
-
-    done_files = [0]
-    done_bytes = [0]
-
-    def on_chunk(label: str, n: int) -> None:
-        done_bytes[0] += n
-        # Byte streaming is counted locally (no round trips), so keep animating
-        # by bytes even when the total is unknown (indeterminate): total=0 tells
-        # the dialog to show a count-up + sliding bar. This also keeps a big
-        # single file cancellable mid-transfer.
-        if on_status is not None and (use_bytes or indeterminate):
-            total = total_bytes if use_bytes else 0
-            on_status(CopyStatus(done_bytes[0], total, label, is_bytes=True))
-
-    def on_file_done(label: str) -> None:
-        done_files[0] += 1
-        if indeterminate:
-            # Byte channel already animates the bar; don't flip it to a
-            # file-count here (that would fight the byte count-up).
-            return
-        if on_progress is not None:
-            on_progress(done_files[0], total_files)
-        if not use_bytes and on_status is not None:
-            on_status(CopyStatus(done_files[0], total_files, label, is_bytes=False))
-
-    if on_status is not None:
-        if use_bytes:
-            on_status(CopyStatus(0, total_bytes, "", is_bytes=True))
-        elif indeterminate:
-            on_status(CopyStatus(0, 0, "", is_bytes=True))
-        else:
-            on_status(CopyStatus(0, total_files, "", is_bytes=False))
-    if on_progress is not None and not indeterminate:
+    prog = _CopyProgress(
+        on_status=on_status, on_progress=on_progress,
+        total_bytes=total_bytes, total_files=total_files,
+        use_bytes=total_bytes > 0, indeterminate=lazy,
+    )
+    prog.emit()  # initial 0%
+    if on_progress is not None and on_status is None and not lazy:
         on_progress(0, total_files)
 
     for src in sources:
@@ -214,9 +293,16 @@ def _generic_transfer(
                     out_name += suffix
                 dst = dest_dir.child(out_name)
                 dst_p = registry.resolve(dst)
+                if skip_existing and _dest_exists(dst_p, dst):
+                    reader.close()
+                    prog.skip(0)
+                    result.skipped.append(dst.to_local() if dst.scheme == "file" else dst)
+                    continue
+                prog.file_start(name, 0)
                 try:
                     with reader, dst_p.open_write(dst) as writer:
-                        owns = _attach_writer_progress(writer, on_chunk, name)
+                        owns = _attach_writer_progress(
+                            writer, lambda _l, n: prog.chunk(n), name)
                         while True:
                             if _cancelled(cancel_event):
                                 raise _Cancelled
@@ -225,15 +311,15 @@ def _generic_transfer(
                                 break
                             writer.write(chunk)
                             if not owns:
-                                on_chunk(name, len(chunk))
+                                prog.chunk(len(chunk))
                 except _Cancelled:
                     _cleanup_partial(dst_p, dst)
                     raise
-                on_file_done(name)
+                prog.file_done()
                 result.succeeded.append(dst.to_local() if dst.scheme == "file" else dst)
                 continue  # exported sources are copy-only even in move mode (data-safe; the table is not deleted)
-            _copy_tree(registry, src, dest, on_chunk=on_chunk,
-                       on_file_done=on_file_done, cancel_event=cancel_event)
+            _copy_tree(registry, src, dest, size=None, skip_existing=skip_existing,
+                       prog=prog, result=result, cancel_event=cancel_event)
         except _Cancelled:
             result.cancelled = True
             return result
@@ -260,8 +346,10 @@ def _copy_tree(
     src: VfsPath,
     dest: VfsPath,
     *,
-    on_chunk,
-    on_file_done,
+    size: int | None,
+    skip_existing: bool,
+    prog: "_CopyProgress",
+    result: OpResult,
     cancel_event: threading.Event | None,
 ) -> None:
     if _cancelled(cancel_event):
@@ -275,15 +363,23 @@ def _copy_tree(
         # honoured it would silently drop dotfiles (.git, .env, …). Most visible
         # on cross-scheme transfers (sftp/zip) that route through this engine;
         # local→local goes through actions.copy_paths and was never affected.
+        # child.size is carried straight into the recursion so per-file progress
+        # needs no extra stat round trip.
         for child in src_p.scan(src, include_parent=False, show_hidden=True):
             _copy_tree(registry, child.loc, dest.child(child.name),
-                       on_chunk=on_chunk, on_file_done=on_file_done,
-                       cancel_event=cancel_event)
+                       size=child.size, skip_existing=skip_existing,
+                       prog=prog, result=result, cancel_event=cancel_event)
     else:
-        label = src.name
+        fsize = size if size is not None else _size_of(src_p, src)
+        if skip_existing and _dest_exists(dst_p, dest):
+            prog.skip(fsize)
+            result.skipped.append(dest.to_local() if dest.scheme == "file" else dest)
+            return
+        prog.file_start(src.name, fsize)
         try:
             with src_p.open_read(src) as reader, dst_p.open_write(dest) as writer:
-                owns = _attach_writer_progress(writer, on_chunk, label)
+                owns = _attach_writer_progress(
+                    writer, lambda _l, n: prog.chunk(n), src.name)
                 while True:
                     if _cancelled(cancel_event):
                         raise _Cancelled
@@ -292,11 +388,11 @@ def _copy_tree(
                         break
                     writer.write(chunk)
                     if not owns:
-                        on_chunk(label, len(chunk))
+                        prog.chunk(len(chunk))
         except _Cancelled:
             _cleanup_partial(dst_p, dest)
             raise
-        on_file_done(label)
+        prog.file_done()
 
 
 def _ensure_dir(dst_p: VfsProvider, dest: VfsPath) -> None:

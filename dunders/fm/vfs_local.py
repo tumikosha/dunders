@@ -70,6 +70,9 @@ class LocalProvider:
     def is_dir(self, loc: VfsPath) -> bool:
         return loc.to_local().is_dir()
 
+    def exists(self, loc: VfsPath) -> bool:
+        return loc.to_local().exists()
+
     def open_read(self, loc: VfsPath) -> BinaryIO:
         return open(loc.to_local(), "rb")
 
@@ -104,6 +107,7 @@ class LocalProvider:
         on_progress: ProgressCallback | None = None,
         on_status: actions.StatusCallback | None = None,
         cancel_event: threading.Event | None = None,
+        skip_existing: bool = False,
     ) -> actions.OpResult:
         return actions.copy_paths(
             [s.to_local() for s in sources],
@@ -112,6 +116,7 @@ class LocalProvider:
             on_progress=on_progress,
             on_status=on_status,
             cancel_event=cancel_event,
+            skip_existing=skip_existing,
         )
 
     def move_within(

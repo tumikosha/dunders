@@ -374,6 +374,7 @@ class ZipProvider:
         on_progress: ProgressCallback | None = None,
         on_status=None,
         cancel_event: threading.Event | None = None,
+        skip_existing: bool = False,
     ) -> OpResult | None:
         return None  # no intra-zip fast path; extraction is cross-provider
 
