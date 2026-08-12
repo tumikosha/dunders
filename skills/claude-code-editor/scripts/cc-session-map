@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""SessionStart hook: record this session's transcript path, keyed by claude's PID.
+
+The external-editor process (see cc-edit) receives almost no environment from
+Claude Code -- CLAUDE_CODE_SESSION_ID is only exported to tool-call children, not
+to the editor. What the editor *does* get is CLAUDE_CODE_MESSAGING_SOCKET, whose
+basename is claude's PID, and its own PPID, which is the same number. So this
+hook writes the transcript path under every PID key it can derive, and cc-edit
+looks it up by whichever key is available to it.
+
+Part of dunders -- https://github.com/tumikosha/dunders
+"""
+
+import json
+import os
+import pathlib
+import sys
+
+MAP_DIR = pathlib.Path.home() / ".claude" / "session-map"
+
+
+def usable(pid):
+    """True for a PID that can identify one session.
+
+    0 and 1 cannot. An orphaned hook process reports getppid() == 1, and a
+    transcript filed under "1" is both wrong (it belongs to whichever session
+    happened to be orphaned last) and immortal: prune_dead_entries asks
+    os.kill(1, 0), which raises PermissionError for a non-root user and takes
+    the "live process, leave it alone" branch forever.
+    """
+    return pid.isdigit() and int(pid) > 1
+
+
+def candidate_pids():
+    """Every PID key this session might later be looked up under."""
+    pids = set()
+
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", "")
+    if sock:
+        stem = pathlib.Path(sock).stem
+        if usable(stem):
+            pids.add(stem)
+
+    claude_pid = os.environ.get("CLAUDE_PID", "")
+    if usable(claude_pid):
+        pids.add(claude_pid)
+
+    ppid = str(os.getppid())
+    if usable(ppid):
+        pids.add(ppid)
+    return pids
+
+
+def prune_dead_entries():
+    """Drop entries whose claude process is gone, so the directory stays small."""
+    for stale in MAP_DIR.glob("*.json"):
+        # A 0/1 key is junk written by an older version — no live claude ever
+        # has one, and os.kill would report PID 1 as alive forever.
+        if not usable(stale.stem):
+            stale.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(int(stale.stem), 0)
+        except (ProcessLookupError, ValueError):
+            stale.unlink(missing_ok=True)
+        except PermissionError:
+            # Live process owned by someone else; leave it alone.
+            pass
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return 0
+
+    transcript = payload.get("transcript_path")
+    if not transcript:
+        return 0
+
+    record = json.dumps(
+        {
+            "transcript_path": transcript,
+            "session_id": payload.get("session_id", ""),
+            "cwd": payload.get("cwd", ""),
+        }
+    )
+
+    MAP_DIR.mkdir(parents=True, exist_ok=True)
+    for pid in candidate_pids():
+        (MAP_DIR / f"{pid}.json").write_text(record)
+
+    prune_dead_entries()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

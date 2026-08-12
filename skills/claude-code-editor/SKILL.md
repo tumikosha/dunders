@@ -1,0 +1,133 @@
+---
+name: claude-code-editor
+description: Installs dunders (the `__` terminal editor) and wires it up as Claude Code's external editor so that ctrl+x ctrl+e opens the current session's transcript for reference while composing a prompt, then strips the transcript on exit so only typed text is sent. Use this skill whenever someone wants to edit Claude Code prompts in a real editor, wants to see or reread conversation history while writing a prompt, complains that ctrl+x ctrl+e opens an empty buffer with no context, asks how to change which editor Claude Code opens, wants to install dunders or the `__` command, or mentions cc-edit, the session transcript, or ~/.claude/projects/*.jsonl — even if they only describe the symptom and never name dunders.
+---
+
+# Claude Code external editor with session history
+
+Set up `ctrl+x ctrl+e` in Claude Code so it opens an editor that already
+contains the conversation so far. The user writes their prompt at the top; on
+exit the history is cut away and only the typed text reaches Claude.
+
+## What the user actually gets
+
+```
+▌cursor here — write the prompt
+
+════ HISTORY BELOW — everything from this line down is discarded ════
+
+### user
+...
+### assistant
+...
+```
+
+## Install
+
+Run the bundled installer. It is idempotent — rerunning is how you change the
+editor or upgrade, not something to avoid.
+
+```bash
+bash scripts/install.sh                 # dunders + wrapper
+bash scripts/install.sh --editor nvim   # wrapper only, different editor
+bash scripts/install.sh --skip-dunders  # dunders already present
+bash scripts/install.sh --skip-hook     # installed as a plugin — it owns the hook
+bash scripts/install.sh --check         # report state, change nothing
+bash scripts/install.sh --uninstall     # remove everything it added
+bash scripts/install.sh --purge         # the above plus the log and dunders itself
+```
+
+`--uninstall` deliberately leaves dunders installed — people use `__` outside
+Claude Code. `--purge` removes it too (from uv and pipx both, since it can be
+installed under either or both) and deletes the log. It asks for confirmation
+first; `--yes` skips the prompt for unattended runs, and without a terminal it
+refuses rather than assuming consent.
+
+It installs `uv` and dunders if `__` is missing, copies `cc-edit` and
+`cc-session-map` into `~/.claude/dunders-cc/`, registers a `SessionStart` hook
+in `~/.claude/settings.json`, and writes a marked block into the user's shell
+profile. Every file it edits gets a `.bak-dunders-cc` backup first.
+
+When this skill arrived through `/plugin install dunders`, the plugin already
+declares that hook, so pass `--skip-hook` and leave the user's `settings.json`
+alone. Registering it in both places is not fatal — the hook writes the same
+record twice — but it leaves an orphaned entry behind when the plugin is
+removed.
+
+Afterwards tell the user to do all three of these, because skipping any one of
+them makes it look broken:
+
+1. `source` the profile or open a new terminal
+2. **restart claude** — the hook fires at session start, so sessions already
+   running have no entry in the PID map
+3. press `ctrl+x ctrl+e`
+
+## Why it needs a hook at all
+
+This is the part that surprises people, so explain it rather than hand-waving:
+Claude Code hands the external editor a stripped environment. `CLAUDE_CODE_SESSION_ID`
+is exported to tool-call children but **not** to the editor, so the wrapper
+cannot simply read which session it belongs to.
+
+What does reach the editor is `CLAUDE_CODE_MESSAGING_SOCKET`, whose basename is
+claude's PID. The `SessionStart` hook records `transcript_path` under that PID,
+and the wrapper looks it up. Picking the newest `.jsonl` by modification time
+instead does not work — parallel sessions and subagents write to the same
+directory, so the freshest file is regularly someone else's.
+
+For the full derivation, the approaches that were tried and rejected, and the
+environment observations behind them, read `references/design.md`. Read it when
+debugging a broken install or changing how the transcript is located; the
+summary above is enough for a plain installation.
+
+## Verifying
+
+Never claim it works without looking at the log — the failure modes are quiet
+by design, since a wrapper that printed errors would corrupt the prompt buffer.
+
+```bash
+tail -20 ~/.claude/cc-edit.log
+```
+
+A healthy run contains `resolved by : session-map/<pid>.json` followed by
+`buf after injection` and `stripped ->`.
+
+| Symptom | Meaning |
+|---|---|
+| No log at all | `$EDITOR` never picked up — profile not sourced, or claude started before it was |
+| `transcript : <NOT FOUND>` | Hook has not run; restart claude, check `~/.claude/session-map/` |
+| `resolved by : newest-in-…` | Fallback in use, may be the wrong session |
+| `!! history render FAILED` | Python error; its stderr follows in the log |
+| Marker present, nothing under it | Transcript found but empty — usually a brand-new session |
+| `marker absent at exit` | User deleted the marker, so the whole buffer was sent |
+
+## Configuration
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CC_REAL_EDITOR` | `__` | Which editor to actually run. GUI editors need a wait flag: `code --wait`, `subl -w` |
+| `CC_HISTORY_LINES` | `200` | How many recent messages to show |
+| `CC_EDIT_DEBUG` | `1` | `0` silences the log |
+
+These live in the managed block of the shell profile. Editing them there and
+reopening the shell is enough; no reinstall needed.
+
+## Things worth telling the user
+
+- **`$EDITOR` is global.** `git commit` without `-m` will now open the wrapper
+  too. It detects `COMMIT_EDITMSG`, `MERGE_MSG`, `TAG_EDITMSG`,
+  `git-rebase-todo`, `*.diff` and `*.patch` and passes them straight through, so
+  no transcript ever lands in a commit message. If they want the change confined
+  to Claude Code entirely, move the three exports out of the shell profile into
+  the `env` block of `~/.claude/settings.json`.
+- **The log holds environment dumps.** Secret-shaped variables are redacted,
+  because `CLAUDE_CODE_OAUTH_TOKEN` lives in that environment and this log is
+  exactly the kind of file people paste into a chat. If a user pastes an
+  unredacted log from an older version, tell them to rotate the token.
+- **History is per session.** A new session in a new tab shows its own nearly
+  empty transcript. That is correct behaviour, not a bug.
+- **Editing the history does nothing.** It gets cut away, and the live session's
+  context lives in the process's memory anyway — the `.jsonl` is a log, not the
+  source of truth.
+- **macOS and Linux only.** The wrapper is bash; dunders itself runs on Windows,
+  but this integration does not.

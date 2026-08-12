@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# cc-edit — $EDITOR wrapper for Claude Code's external editor (ctrl+x ctrl+e).
+#
+# Claude Code writes the chat input buffer to a temp file, opens $EDITOR on it,
+# and sends back whatever the file contains on exit. This wrapper appends the
+# current session's transcript below a sentinel line so you can reread the
+# conversation while composing, then strips everything from the sentinel down
+# before Claude reads the file back.
+#
+# Part of dunders — https://github.com/tumikosha/dunders
+#
+# Environment:
+#   CC_REAL_EDITOR    editor to actually run (default: __)
+#   CC_HISTORY_LINES  how many recent messages to show (default: 200)
+#   CC_EDIT_DEBUG     0 disables the diagnostic log (default: 1)
+
+set -euo pipefail
+
+BUF="${1:-}"
+[[ -n "$BUF" ]] || { echo "cc-edit: no file argument" >&2; exit 1; }
+
+REAL_EDITOR="${CC_REAL_EDITOR:-__}"
+MARKER="════ HISTORY BELOW — everything from this line down is discarded ════"
+
+# --- Diagnostics -------------------------------------------------------------
+# Records what the editor process actually receives. This log is the first thing
+# to look at when history does not show up, so it is on by default.
+LOG="$HOME/.claude/cc-edit.log"
+diag() { [[ "${CC_EDIT_DEBUG:-1}" == "0" ]] || printf '%s\n' "$*" >> "$LOG"; }
+diag "=== $(date '+%F %T') pid=$$ ppid=$PPID"
+diag "  argv        : $*"
+diag "  cwd         : $PWD"
+diag "  buf         : $BUF ($(wc -c < "$BUF" 2>/dev/null || echo missing) bytes)"
+diag "  real editor : $REAL_EDITOR"
+diag "  claude env  : $(env | grep -c '^CLAUDE' || true) vars"
+# Names only for anything secret-shaped. CLAUDE_CODE_OAUTH_TOKEN lives in this
+# environment, and this log is exactly the kind of file people paste into chats.
+while IFS= read -r line; do
+  case "${line%%=*}" in
+    *TOKEN*|*SECRET*|*KEY*|*PASSWORD*|*AUTH*) diag "    ${line%%=*}=<redacted>" ;;
+    *) diag "    $line" ;;
+  esac
+done < <(env | grep '^CLAUDE' | sort || true)
+
+# --- Guard -------------------------------------------------------------------
+# $EDITOR is inherited by every Claude child process, including `git commit`.
+# Injecting a transcript into a commit message would be a disaster, so anything
+# that looks like a git buffer goes straight through untouched.
+case "$(basename "$BUF")" in
+  COMMIT_EDITMSG|MERGE_MSG|TAG_EDITMSG|git-rebase-todo|*.diff|*.patch)
+    exec $REAL_EDITOR "$BUF" ;;
+esac
+[[ "$BUF" == *"/.git/"* ]] && exec $REAL_EDITOR "$BUF"
+
+# --- Locate this session's transcript ----------------------------------------
+# The editor process gets a stripped environment: CLAUDE_CODE_SESSION_ID is
+# exported only to tool-call children, never here. What does survive is
+# CLAUDE_CODE_MESSAGING_SOCKET, whose basename is claude's PID — the same number
+# as our own PPID. The cc-session-map SessionStart hook files the transcript
+# path under those keys, which is how we get from a PID back to a transcript.
+HIST=""
+MAP_DIR="$HOME/.claude/session-map"
+
+sock_pid=""
+if [[ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ]]; then
+  sock_pid="$(basename "$CLAUDE_CODE_MESSAGING_SOCKET" .sock)"
+fi
+
+for pid in "$sock_pid" "$PPID" "${CLAUDE_PID:-}"; do
+  [[ -n "$pid" && -f "$MAP_DIR/$pid.json" ]] || continue
+  cand="$(MAP_FILE="$MAP_DIR/$pid.json" python3 -c \
+    'import json,os;print(json.load(open(os.environ["MAP_FILE"])).get("transcript_path",""))' \
+    2>/dev/null || true)"
+  if [[ -n "$cand" && -f "$cand" ]]; then
+    HIST="$cand"; diag "  resolved by : session-map/$pid.json"; break
+  fi
+done
+
+# Fallback 1: the tool-child variable, in case it ever does get exported here.
+if [[ -z "$HIST" && -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+  for c in "$HOME/.claude/projects"/*/"$CLAUDE_CODE_SESSION_ID.jsonl"; do
+    [[ -f "$c" ]] && { HIST="$c"; diag "  resolved by : CLAUDE_CODE_SESSION_ID"; break; }
+  done
+fi
+
+# Fallback 2: newest transcript in this cwd's project directory. Claude Code
+# derives that directory name by replacing '/', '_' and '.' with '-'. Ambiguous
+# when several sessions share a cwd, hence last resort.
+if [[ -z "$HIST" ]]; then
+  slug="$(printf '%s' "$PWD" | tr '/_.' '-')"
+  newest="$(ls -t "$HOME/.claude/projects/$slug"/*.jsonl 2>/dev/null | head -1 || true)"
+  if [[ -n "$newest" ]]; then
+    HIST="$newest"; diag "  resolved by : newest-in-$slug (ambiguous)"
+  fi
+fi
+diag "  session id  : ${CLAUDE_CODE_SESSION_ID:-<UNSET>}"
+diag "  transcript  : ${HIST:-<NOT FOUND>}"
+
+# --- Append rendered history below the marker --------------------------------
+if [[ -n "$HIST" ]]; then
+  {
+    printf '\n%s\n' "$MARKER"
+    CC_HIST_FILE="$HIST" CC_HIST_LINES="${CC_HISTORY_LINES:-200}" python3 - <<'PY'
+import json, os, sys
+
+path = os.environ["CC_HIST_FILE"]
+limit = int(os.environ.get("CC_HIST_LINES", "200"))
+
+
+def text_of(msg):
+    # Text blocks only. Tool calls and their results are noise when the point is
+    # to reread the conversation, and they bloat the buffer enormously — a real
+    # transcript weighs megabytes with them and kilobytes without.
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(
+            b.get("text", "")
+            for b in c
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+rows = []
+with open(path, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") not in ("user", "assistant"):
+            continue
+        if rec.get("isMeta") or rec.get("isSidechain"):
+            continue
+        body = text_of(rec.get("message", {})).strip()
+        # Records starting with '<' are wrappers like <system-reminder>.
+        if not body or body.startswith("<"):
+            continue
+        rows.append((rec["type"], body))
+
+for role, body in rows[-limit:]:
+    sys.stdout.write(f"\n### {role}\n{body}\n")
+PY
+  } >> "$BUF" 2>>"$LOG" || diag "  !! history render FAILED (stderr above)"
+  diag "  buf after injection : $(wc -c < "$BUF") bytes"
+fi
+
+# --- Edit --------------------------------------------------------------------
+# Vim-family editors get +1 so the cursor lands in the empty compose area rather
+# than at the bottom of the transcript.
+case "$REAL_EDITOR" in
+  vi|vim|nvim|*/vim|*/nvim) $REAL_EDITOR +1 "$BUF" ;;
+  *) $REAL_EDITOR "$BUF" ;;
+esac
+
+# --- Strip everything from the marker down -----------------------------------
+if grep -qF "$MARKER" "$BUF"; then
+  tmp="$BUF.cc-edit.$$"
+  awk -v m="$MARKER" 'index($0, m) { exit } { print }' "$BUF" > "$tmp"
+  mv "$tmp" "$BUF"
+  diag "  stripped -> $(wc -c < "$BUF") bytes sent to Claude"
+else
+  diag "  marker absent at exit -> whole buffer sent to Claude"
+fi

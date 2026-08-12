@@ -1,0 +1,36 @@
+{
+  "name": "dunders",
+  "version": "0.1.0",
+  "description": "Use the dunders `__` terminal editor as Claude Code's external editor, with the current session's transcript loaded next to your prompt and stripped again on exit.",
+  "author": {
+    "name": "tumikosha",
+    "email": "tumikosha@gmail.com",
+    "url": "https://github.com/tumikosha"
+  },
+  "homepage": "https://github.com/tumikosha/dunders#claude-code-integration",
+  "repository": "https://github.com/tumikosha/dunders",
+  "license": "MIT",
+  "keywords": [
+    "editor",
+    "terminal",
+    "external-editor",
+    "transcript",
+    "session-history",
+    "file-manager",
+    "textual"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/skills/claude-code-editor/scripts/cc-session-map",
+            "timeout": 5,
+            "statusMessage": "Recording session transcript path..."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "dunders",
+  "description": "Claude Code integration for dunders — the `__` terminal file manager and editor.",
+  "owner": {
+    "name": "tumikosha",
+    "email": "tumikosha@gmail.com",
+    "url": "https://github.com/tumikosha"
+  },
+  "plugins": [
+    {
+      "name": "dunders",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Wires the dunders `__` editor into Claude Code as the external editor. Ctrl+X Ctrl+E opens your prompt with the session transcript below a sentinel line; the transcript is cut away on exit, so only what you typed is sent. Ships the SessionStart hook that maps claude's PID to its transcript, plus an installer with --check, --uninstall and --purge.",
+      "author": {
+        "name": "tumikosha",
+        "url": "https://github.com/tumikosha"
+      },
+      "homepage": "https://github.com/tumikosha/dunders#claude-code-integration",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "editor",
+        "terminal",
+        "external-editor",
+        "transcript",
+        "session-history",
+        "file-manager",
+        "textual"
+      ]
+    }
+  ]
+}
