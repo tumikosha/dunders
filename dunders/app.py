@@ -173,6 +173,14 @@ class _FocusableEditorContent(EditorContent):
                     handler=um, hotkey="f2",
                 )
             )
+        sq = getattr(app, "action_save_and_quit", None)
+        if callable(sq):
+            commands.append(
+                WindowCommand(
+                    id="save_quit", label="Save & Quit",
+                    handler=lambda: sq(self), hotkey="ctrl+g",
+                )
+            )
         return commands
 
 
@@ -699,6 +707,11 @@ class DundersApp(App):
         # math early-returns. call_after_refresh fires once Textual has
         # propagated the real terminal size to children.
         self.call_after_refresh(self._apply_default_layout)
+        # Editor launches (`dunders FILE`, `__ FILE`) open in Project View.
+        # Deferred for the same reason as the layout: Project View sizes the
+        # tree against Desktop.size, which is 0×0 until after the first refresh.
+        if self.launch_mode in ("editor", "we"):
+            self.call_after_refresh(self._enter_launch_project_view)
         # A persisted theme that failed to load fell back to modern_dark during
         # compose(); now that the app is mounted, tell the user (notify needs a
         # running app, so it can't fire from _resolve_initial_theme).
@@ -1600,6 +1613,11 @@ class DundersApp(App):
                 # New sub‑section for editor‑level actions
                 MenuSeparator(),
                 MenuItem(command_id="find"),
+                MenuItem(command_id="find_next"),
+                MenuItem(command_id="find_prev"),
+                MenuItem(command_id="replace"),
+                MenuItem(command_id="replace_all"),
+                MenuSeparator(),
                 MenuItem(command_id="copy"),
                 MenuItem(command_id="paste"),
                 # Separator after Paste
@@ -1607,12 +1625,15 @@ class DundersApp(App):
                 # Existing editor commands
                 MenuItem(command_id="split_h"),
                 MenuItem(command_id="split_v"),
+                MenuItem(command_id="fold_toggle"),
                 MenuItem(command_id="fold_all"),
                 MenuItem(command_id="unfold_all"),
                 MenuItem(command_id="record_macro"),
                 MenuSeparator(),
                 MenuItem(command_id="toggle_syntax"),
                 MenuItem(command_id="set_language"),
+                MenuSeparator(),
+                MenuItem(command_id="save_quit"),
             ]),
             Menu("View", [
                 MenuItem(command_id="panels.fullscreen"),  # Ctrl+P
@@ -1841,6 +1862,10 @@ class DundersApp(App):
     def _panel_cwd(self) -> Path:
         if self.initial_path is not None:
             return self.initial_path if self.initial_path.is_dir() else self.initial_path.parent
+        # Editor launches carry their files in initial_paths; seed the tree at
+        # the first file's directory so Project View opens on the right dir.
+        if self.initial_paths:
+            return self.initial_paths[0].parent
         return Path.cwd()
 
     def _mount_initial_windows(self) -> None:
@@ -1854,22 +1879,12 @@ class DundersApp(App):
             return
 
         if self.launch_mode == "editor":
-            file_label = (
-                str(self.initial_path) if self.initial_path else "<no file>"
-            )
-            editor = make_window(
-                _StubContent(
-                    f"Editor placeholder — {file_label}",
-                    title=file_label,
-                ),
-                title=file_label,
-                position=(2, 2),
-                size=(60, 18),
-                id="editor",
-            )
-            self.desktop.add_window(editor)
-            # Panels mounted but hidden — provide hotkey reveal in later phases.
+            # `dunders FILE` is the same thing as `__ FILE`: a real editor on
+            # the file, not a placeholder. Both land in Project View (the
+            # deferred _enter_launch_project_view below) so the file tree is
+            # there from the first keystroke.
             self._add_panel_windows(cwd, visible=False)
+            self._mount_cascaded_editors()
             return
 
         if self.launch_mode == "cli":
@@ -1895,10 +1910,15 @@ class DundersApp(App):
 
     def _mount_cascaded_editors(self) -> None:
         assert self.desktop is not None
+        # `__ f1 f2` passes initial_paths; `dunders FILE` passes the single
+        # initial_path instead. Treat both the same.
+        wanted = list(self.initial_paths)
+        if not wanted and self.initial_path is not None:
+            wanted = [self.initial_path]
         # Filter: directories are skipped; missing files are kept (they open
         # as an empty buffer that saves to that path on Ctrl+S).
         files: list[Path] = []
-        for p in self.initial_paths:
+        for p in wanted:
             if p.is_dir():
                 self.notify(f"skipped {p}: not a file", severity="warning")
                 continue
@@ -2137,6 +2157,15 @@ class DundersApp(App):
             return
         if not isinstance(win.content, FilePanel):
             return
+        # Revealing the panel OPPOSITE the project tree leaves Project View —
+        # the user asked for the two-panel split back. Focusing the tree itself
+        # is ordinary navigation inside Project View and keeps it.
+        if (
+            self._project_tree_panel_id is not None
+            and panel_id != self._project_tree_panel_id
+        ):
+            self._restore_tree_view_mode()
+            self._project_tree_panel_id = None
         # In editor/cli launch modes the panels are mounted hidden (and a panel
         # may also be minimized). Reveal ONLY the requested panel, give it a
         # sane half-screen geometry, and raise+focus it. ``show_window`` removes
@@ -3462,6 +3491,37 @@ class DundersApp(App):
         show_modal(self.desktop, dialog, title="Save As", size=(72, 7))
         self.call_after_refresh(dialog.focus_input)
 
+    def action_save_and_quit(self, editor: EditorContent | None = None) -> None:
+        """Ctrl+G: save the focused editor, then leave — no confirmation.
+
+        Deliberately skips the F10 ConfirmDialog: this is the `$EDITOR`
+        integration path (Claude Code's `ctrl+x ctrl+e` writes a temp buffer,
+        runs the editor, and reads the file back once the process exits), so
+        one keystroke has to both persist and quit. Only the focused editor is
+        saved; edits in other windows are dropped.
+        """
+        if self._has_active_modal() or self.desktop is None:
+            return
+        if editor is None:
+            win = self.desktop.focused_window
+            if win is None or not isinstance(win.content, EditorContent):
+                return
+            editor = win.content
+        try:
+            editor._save()
+        except Exception as exc:  # pragma: no cover - defensive
+            self.notify(f"Save failed: {exc}", severity="error")
+            return
+        if editor.is_dirty:
+            # _save() clears is_dirty only on success and no-ops on a buffer
+            # with no path, so a still-dirty buffer means nothing was written.
+            # Quitting here would silently discard the text.
+            self.notify(
+                "Not saved — use File ▸ Save As… first", severity="warning"
+            )
+            return
+        self.exit()
+
     def action_set_language(self, editor: "EditorContent") -> None:
         if self.desktop is None:
             return
@@ -4049,6 +4109,28 @@ class DundersApp(App):
         panel.view_mode = prev
         panel._ensure_cursor_visible()
         panel.refresh()
+
+    def _enter_launch_project_view(self) -> None:
+        """Open an editor launch straight into Project View (tree + editor).
+
+        Unlike the F9 path this leaves focus in the editor: the user asked to
+        edit a file, so the first keystroke belongs to the buffer, not to the
+        tree.
+        """
+        if self.desktop is None:
+            return
+        editor_win = self.desktop.focused_window
+        if editor_win is None or not isinstance(editor_win.content, EditorContent):
+            return
+        # Only the single-file launch. `__ a.py b.py c.py` is the cascade
+        # feature — Project View keeps one editor visible and would undo it.
+        editors = [
+            w for w in self.desktop.windows if isinstance(w.content, EditorContent)
+        ]
+        if len(editors) != 1:
+            return
+        self._project_view_from_editor()
+        self.desktop.focus_window(editor_win)
 
     def _project_view_from_editor(self) -> None:
         from dunders.fm.file_panel import FilePanel

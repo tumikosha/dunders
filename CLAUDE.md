@@ -376,7 +376,13 @@ Spec: `docs/superpowers/specs/2026-07-28-mcp-server-design.md`.
 
 `DundersApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and
 mounts the initial window set based on `launch_mode`
-(`fm`/`editor`/`cli`). It owns:
+(`fm`/`editor`/`cli`/`we`/`we-mc`). `editor` (`dunders FILE`) and a
+single-file `we` (`__ FILE`) are the same launch: `_mount_cascaded_editors`
+opens a real editor (no placeholder), and `_enter_launch_project_view` —
+deferred via `call_after_refresh` like the layout, since `Desktop.size` is 0×0
+at `on_mount` — enters Project View with the tree seeded at the file's dir and
+focus left in the buffer. A multi-file `we` keeps the plain cascade
+(Project View shows one editor, which would undo it). It owns:
 
 - The single `CommandRegistry` + `CommandDispatcher` + `CommandRouter`.
 - All NC F-key actions (`action_view`/`action_edit`/`action_copy`/etc.) and
@@ -406,7 +412,36 @@ mounts the initial window set based on `launch_mode`
   `EditorContent.get_commands()`. Only mechanical keys (F9 menu, F10 quit,
   Esc, Tab, Alt+L/R, Shift+Tab) live in `DundersApp.BINDINGS`. Don't add a
   panel/editor action to `BINDINGS` — both paths firing will call the action
-  twice.
+  twice. This is invisible for idempotent actions (`ctrl+f`/`f4` just re-show
+  the search panel) and fatal for toggles: F7 (`fold_toggle`) and F8
+  (`record_macro`) were declared in both `EditorContent.BINDINGS` and as
+  `WindowCommand` hotkeys, so each press folded-then-unfolded / started-then-
+  stopped recording and looked like a dead key. Both are now router-only.
+  `EditorContent.BINDINGS` still exists because it is the ONLY dispatch path
+  when the editor is embedded in a plain `App` (the demo, most editor tests) —
+  so a key that needs to work standalone lives there, and its `WindowCommand`
+  carries `hotkey_label` (display only) instead of `hotkey`.
+- **The editor F-keys must match `EDITOR_FKEY_LABELS`.** `_editor_status_items`
+  (`app.py`) wires each status-bar button to a command id, while the keys come
+  from `WindowCommand` hotkeys — nothing syncs the two, and they had silently
+  drifted: F3 advertised `SvAs` but ran Find Next, F5 `SplH` hit app-level
+  `window.maximize`, F6 `SplV` ran Replace All. Current contract: F3 `save_as`,
+  F4 `replace`, F5 `split_h`, F6 `split_v`, F7 `fold_toggle`, F8
+  `record_macro`, guarded by
+  `tests/fm/test_editor_hotkeys.py::test_editor_fkeys_match_the_status_bar`.
+  Search repeats moved off F3/Shift+F3 to Ctrl+L / Ctrl+Shift+L (Turbo Vision's
+  "search again"), Replace All is menu-only, and Ctrl+Backslash keeps Split
+  Horizontal via `action_split_h`.
+- **Ctrl+G = save & quit, no confirmation.** `save_quit` is registered by
+  `_FocusableEditorContent.get_commands()` (focus-scoped, so the hex viewer's
+  own `ctrl+g`/find-next is untouched) and handled by
+  `app.action_save_and_quit`. It deliberately bypasses `action_quit`'s
+  `ConfirmDialog`: this is the `$EDITOR` path (Claude Code's `ctrl+x ctrl+e`
+  reads the file back after the process exits), so one keystroke must persist
+  and exit. Success is read off `editor.is_dirty` after `_save()` — a
+  still-dirty buffer (unnamed, or a failed write) warns and does NOT exit,
+  since quitting would silently drop the text. Only the focused editor is
+  saved.
 - **Modal gating.** Almost every `action_*` calls `_has_active_modal()` first
   and bails so dialogs keep keyboard focus. New actions must do the same.
 - **Worker threads must marshal back to the UI thread** via
@@ -445,8 +480,16 @@ tests; widgets and the app shell have async smoke/integration tests
   themes in `dunders/windowing/themes/examples/*.toml`, discovered by
   `list_themes()` and parsed by `dunders/windowing/themes/loader.py`. The
   Options menu / `theme.cycle` (Ctrl+T) are built dynamically from that list.
-  A complete theme defines all 42 roles in `modern_dark` (older `turbo_blue`
-  / `midnight_commander` examples are partial at 21 roles).
+  A complete theme defines all 56 roles in `modern_dark`; every bundled theme
+  currently does, enforced by
+  `tests/windowing/test_theme_256_safe.py::test_every_bundled_theme_covers_all_modern_dark_roles`.
+  A missing role is not an error — `Theme.resolve` walks
+  `editor.syntax.heading` → `editor.syntax` → `editor` → empty — but it
+  silently renders that token unstyled, which is exactly how Markdown headings
+  stayed plain. Syntax roles come from `core/highlight.py:token_to_role`, which
+  collapses the Pygments token tree; markup lexers (Markdown/reST/diff) put
+  their structure under `Token.Generic`, mapped to
+  `heading`/`subheading`/`strong`/`emphasis`.
 - Per-`vibe/general.md`, user hotkeys/macros are also intended to live under
   `~/.config/dunders/` (those loaders not implemented yet).
 - User Menu (F2): mc/far-style command menu defined in Markdown. Loaded from

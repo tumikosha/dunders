@@ -78,6 +78,38 @@ def test_token_to_role_collapses_subtypes():
     assert token_to_role(Name) == "name"
 
 
+def test_token_to_role_maps_generic_markup():
+    # Markdown/diff/rst markup lives under Token.Generic, which used to fall
+    # through to None — headings rendered as plain text.
+    from pygments.token import Generic
+    assert token_to_role(Generic.Heading) == "heading"
+    assert token_to_role(Generic.Subheading) == "subheading"
+    assert token_to_role(Generic.Strong) == "strong"
+    assert token_to_role(Generic.Emph) == "emphasis"
+    # Generic branches with no role of their own stay unstyled.
+    assert token_to_role(Generic.Output) is None
+
+
+def test_tokenize_markdown_headings():
+    h = SyntaxHighlighter()
+    h.detect("notes.md", "")
+    assert "Markdown" in h.language_name
+    spans = h.tokenize(["# Title", "", "## Section", "", "plain text"])
+    assert [s.role for s in spans[0]] == ["heading"]
+    assert spans[0][0].start == 0 and spans[0][0].end == len("# Title")
+    assert [s.role for s in spans[2]] == ["subheading"]
+    assert spans[4] == []  # prose stays unstyled
+
+
+def test_tokenize_markdown_emphasis_and_strong():
+    h = SyntaxHighlighter()
+    h.detect("notes.md", "")
+    spans = h.tokenize(["some *em* and **bold** here"])
+    roles = {s.role for s in spans[0]}
+    assert "emphasis" in roles
+    assert "strong" in roles
+
+
 def test_tokenize_exact_column_positions():
     h = SyntaxHighlighter()
     h.detect("foo.py", "")

@@ -136,6 +136,17 @@ fg = "#cb4b16"
 [styles."editor.syntax.error"]
 fg = "#dc322f"
 
+[styles."editor.syntax.heading"]
+fg = "#859900"
+bold = true
+[styles."editor.syntax.subheading"]
+fg = "#268bd2"
+bold = true
+[styles."editor.syntax.strong"]
+bold = true
+[styles."editor.syntax.emphasis"]
+italic = true
+
 # File-panel per-type colours
 [styles."panel.file.dir"]
 fg = "#b58900"

@@ -14,6 +14,7 @@ from pygments.lexers import get_lexer_by_name, get_lexer_for_filename, guess_lex
 from pygments.token import (
     Comment,
     Error,
+    Generic,
     Keyword,
     Name,
     Number,
@@ -66,6 +67,18 @@ def token_to_role(tok: _TokenType) -> str | None:
         return "operator"
     if tok in Error:
         return "error"
+    # Markup lexers (Markdown, reST, diff) put their structure under Generic:
+    # a Markdown `# Title` is Generic.Heading, `##…` is Generic.Subheading.
+    # Without these, headings and emphasis tokenized to no role at all and
+    # rendered as plain text. Generic.Output/Prompt/Traceback stay unstyled.
+    if tok in Generic.Subheading:
+        return "subheading"
+    if tok in Generic.Heading:
+        return "heading"
+    if tok in Generic.Strong:
+        return "strong"
+    if tok in Generic.Emph:
+        return "emphasis"
     return None
 
 

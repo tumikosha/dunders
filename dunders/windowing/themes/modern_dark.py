@@ -72,6 +72,12 @@ modern_dark = Theme(
         "editor.syntax.operator":      Style(fg="#d4d4d4"),
         "editor.syntax.builtin":       Style(fg="#4ec9b0"),
         "editor.syntax.error":         Style(fg="#f44747"),
+        # Markup roles (Markdown/reST/diff headings and inline emphasis).
+        # strong/emphasis carry no colour so they keep the surrounding text's.
+        "editor.syntax.heading":       Style(fg="#c586c0", bold=True),
+        "editor.syntax.subheading":    Style(fg="#dcdcaa", bold=True),
+        "editor.syntax.strong":        Style(bold=True),
+        "editor.syntax.emphasis":      Style(italic=True),
     },
     border_focused=BorderStyle.DOUBLE,
     border_unfocused=BorderStyle.SINGLE,

@@ -6,8 +6,10 @@ from dunders.windowing import Window
 
 
 async def test_focus_panel_reveals_only_requested_panel_on_top():
-    # Editor launch mode mounts both panels hidden, with the editor on top.
-    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+    # CLI launch mode mounts both panels hidden, with the agent window on top.
+    # (Editor mode is no longer usable here: it opens in Project View, which
+    # reveals panel-left as the file tree.)
+    app = DundersApp(launch_mode="cli", initial_path="/tmp/foo.txt")
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.desktop is not None

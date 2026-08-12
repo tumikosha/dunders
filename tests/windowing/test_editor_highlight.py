@@ -137,3 +137,24 @@ async def test_set_language_changes_highlight():
         assert editor._syntax_spans
         roles = {s.role for row in editor._syntax_spans for s in row}
         assert roles & {"string", "number", "name"}
+
+
+async def test_markdown_heading_is_rendered_bold_and_coloured():
+    # Regression: Markdown headings are Token.Generic.Heading, which had no
+    # role mapping, so `# Title` rendered as plain text.
+    app = _Host("# Title\n\n## Section\n\nprose\n", "notes.md")
+    async with app.run_test() as pilot:
+        editor = app.query_one(EditorWidget)
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert [s.role for s in editor._syntax_spans[0]] == ["heading"]
+        assert [s.role for s in editor._syntax_spans[2]] == ["subheading"]
+        heading = editor._rich_style("editor.syntax.heading")
+        strip = editor.render_line(0)
+        assert any(
+            seg.style is not None
+            and seg.style.color == heading.color
+            and seg.style.bold
+            for seg in strip._segments if seg.text.strip()
+        )

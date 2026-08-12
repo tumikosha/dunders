@@ -160,3 +160,14 @@ fg = "#1c1c1c"
 fg = "#005f5f"
 [styles."editor.syntax.error"]
 fg = "#af0000"
+
+[styles."editor.syntax.heading"]
+fg = "#af00af"
+bold = true
+[styles."editor.syntax.subheading"]
+fg = "#875f00"
+bold = true
+[styles."editor.syntax.strong"]
+bold = true
+[styles."editor.syntax.emphasis"]
+italic = true

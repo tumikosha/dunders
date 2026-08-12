@@ -29,14 +29,27 @@ log = logging.getLogger(__name__)
 class EditorContent(WindowContent):
     """WindowContent that wraps an EditorWidget with macro support."""
 
+    # Two dispatch paths reach this content: Textual's binding walk (these
+    # BINDINGS, the only path when EditorContent is embedded in a plain App)
+    # and CommandRouter on App.on_key (the `WindowCommand` hotkeys in
+    # get_commands(), the path inside DundersApp). A key named by BOTH fires
+    # twice. That is harmless for idempotent actions — Ctrl+F/F4 just re-show
+    # the search panel — and fatal for anything stateful, which is how F7/F8
+    # became dead keys (fold-then-unfold, record-then-stop).
+    #
+    # So: every F-key the editor status bar advertises (F3 SvAs, F5 SplH,
+    # F6 SplV, F7 Fold, F8 Macr) is a WindowCommand hotkey and must NOT appear
+    # here. Search repeats live here instead, since no WindowCommand claims
+    # their keys — the commands carry `hotkey_label` only, so the menu still
+    # shows the shortcut without becoming a second owner of the key.
     BINDINGS = [
         Binding("ctrl+f", "open_find", "Find", show=False),
         Binding("f4", "open_replace", "Replace", show=False),
-        Binding("f3", "find_next", "Find Next", show=False),
-        Binding("shift+f3", "find_prev", "Find Prev", show=False),
-        Binding("f6", "replace_all", "Replace All", show=False),
-        Binding("f7", "fold_toggle", "Fold Toggle", show=False),
-        Binding("f8", "macro_toggle", "Macro", show=False),
+        # Turbo Vision's "search again" pair. F3/Shift+F3 used to do this, but
+        # the status bar promises Save As on F3 and that contract wins.
+        Binding("ctrl+l", "find_next", "Find Next", show=False),
+        Binding("ctrl+shift+l", "find_prev", "Find Prev", show=False),
+        Binding("ctrl+backslash", "split_h", "Split Horizontal", show=False),
         Binding("ctrl+r", "macro_toggle", "Macro", show=False),
         Binding("escape", "close_search", "Close", show=False),
     ]
@@ -273,9 +286,26 @@ class EditorContent(WindowContent):
     def get_commands(self) -> list[WindowCommand]:
         commands = [
             WindowCommand(id="save", label="Save", handler=self._save, hotkey="ctrl+s"),
-            WindowCommand(id="save_as", label="Save As...", handler=self._save_as),
+            # F3/F5/F6 mirror what the editor status bar advertises
+            # (`EDITOR_FKEY_LABELS`): SvAs / SplH / SplV. Clicking the status
+            # bar and pressing the key must do the same thing.
+            WindowCommand(id="save_as", label="Save As...", handler=self._save_as, hotkey="f3"),
             WindowCommand(id="find", label="Find", handler=self._find, hotkey="ctrl+f"),
             WindowCommand(id="replace", label="Replace", handler=self._replace, hotkey="f4"),
+            # Search repeats are Bindings (see BINDINGS), so these carry a
+            # label-only shortcut: the menu shows Ctrl+L without the command
+            # becoming a second owner of the key.
+            WindowCommand(
+                id="find_next", label="Find Next", handler=self.action_find_next,
+                hotkey_label="Ctrl+L",
+            ),
+            WindowCommand(
+                id="find_prev", label="Find Previous", handler=self.action_find_prev,
+                hotkey_label="Ctrl+Shift+L",
+            ),
+            WindowCommand(
+                id="replace_all", label="Replace All", handler=self.action_replace_all,
+            ),
             # Editor copy/paste commands. Hotkeys live on EditorWidget's
             # BINDINGS — duplicating them here would dispatch the action twice
             # (binding fires action_copy/paste, then App.on_key → router fires
@@ -286,11 +316,12 @@ class EditorContent(WindowContent):
             WindowCommand(
                 id="split_h", label="Split Horizontal",
                 handler=lambda: self.toggle_split("horizontal"),
-                hotkey="ctrl+backslash",
+                hotkey="f5",
             ),
             WindowCommand(
                 id="split_v", label="Split Vertical",
                 handler=lambda: self.toggle_split("vertical"),
+                hotkey="f6",
             ),
         ]
         commands.append(
@@ -393,7 +424,7 @@ class EditorContent(WindowContent):
     def _replace(self) -> None:
         self.action_open_replace()
 
-    _SEARCH_SKIP_KEYS = {"f4", "f3", "shift+f3", "f6", "escape", "ctrl+f"}
+    _SEARCH_SKIP_KEYS = {"f4", "ctrl+l", "ctrl+shift+l", "escape", "ctrl+f"}
 
     def action_open_find(self) -> None:
         self._macro_search_recorded = False
@@ -536,6 +567,11 @@ class EditorContent(WindowContent):
             ed.unfold_all()
         else:
             ed.fold_all()
+
+    def action_split_h(self) -> None:
+        # Ctrl+Backslash kept its old meaning when F5 took over Split
+        # Horizontal as a WindowCommand hotkey.
+        self.toggle_split("horizontal")
 
     def action_fold_toggle(self) -> None:
         self._fold_toggle()

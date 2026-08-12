@@ -180,3 +180,14 @@ fg = "#008080"
 [styles."editor.syntax.error"]
 fg = "#cc0000"
 bold = true
+
+[styles."editor.syntax.heading"]
+fg = "#0000aa"
+bold = true
+[styles."editor.syntax.subheading"]
+fg = "#aa00aa"
+bold = true
+[styles."editor.syntax.strong"]
+bold = true
+[styles."editor.syntax.emphasis"]
+italic = true

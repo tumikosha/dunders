@@ -114,7 +114,9 @@ async def test_replace_all_with_yes_confirms():
         await pilot.pause()
         sp.replace_input.value = "X"
         app._content._confirm_replace_all = lambda count, callback: callback(True)
-        await pilot.press("f6")
+        # Replace All lost its F-key when F6 became Split Vertical; it is a
+        # menu command now, so drive the action directly.
+        app._content.action_replace_all()
         await pilot.pause()
         assert app._content._editor.buffer.lines == ["X X X"]
 
@@ -129,7 +131,7 @@ async def test_replace_all_with_no_does_nothing():
         await pilot.pause()
         sp.replace_input.value = "X"
         app._content._confirm_replace_all = lambda count, callback: callback(False)
-        await pilot.press("f6")
+        app._content.action_replace_all()
         await pilot.pause()
         assert app._content._editor.buffer.lines == ["foo foo"]
 

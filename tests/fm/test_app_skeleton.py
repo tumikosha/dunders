@@ -3,6 +3,7 @@ import pytest
 from dunders.app import DundersApp, _table_stem
 from dunders.fm.file_panel import FilePanel
 from dunders.windowing import Desktop, MenuBar, StatusBar, Window
+from dunders.windowing.editor import EditorContent
 from dunders.fm.commandline import CommandLine
 
 
@@ -63,16 +64,28 @@ async def test_app_status_bar_shows_default_fkey_labels():
 
 
 @pytest.mark.asyncio
-async def test_app_editor_mode_hides_panels_initially():
-    """dunders <file> should mount panels but hide them; editor placeholder is visible."""
-    app = DundersApp(launch_mode="editor", initial_path="/tmp/foo.txt")
+async def test_app_editor_mode_opens_a_real_editor_in_project_view(tmp_path):
+    """`dunders FILE` == `__ FILE`: a real editor on the file, in Project View.
+
+    Project View means the left panel acts as the 1/4-width file tree, seeded
+    at the file's directory; the right panel stays hidden. Focus belongs to the
+    editor, not the tree.
+    """
+    target = tmp_path / "foo.txt"
+    target.write_text("x = 1\n", encoding="utf-8")
+    app = DundersApp(launch_mode="editor", initial_path=str(target))
     async with app.run_test() as pilot:
         await pilot.pause()
         desktop = app.query_one(Desktop)
-        # Panels exist but are not in desktop.windows (the visible list).
-        all_panel_ids = {"panel-left", "panel-right"}
+        editors = [w for w in desktop.windows if isinstance(w.content, EditorContent)]
+        assert len(editors) == 1
+        assert editors[0].content._editor.buffer.file_path == str(target)
         visible_ids = {w.id for w in desktop.windows}
-        assert all_panel_ids.isdisjoint(visible_ids)
+        assert "panel-left" in visible_ids and "panel-right" not in visible_ids
+        assert app._project_tree_panel_id == "panel-left"
+        tree = desktop.query_one("#panel-left", Window).content
+        assert str(tree.cwd) == str(tmp_path)
+        assert desktop.focused_window is editors[0]
 
 
 async def test_editor_menu_exposes_syntax_commands():

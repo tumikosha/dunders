@@ -64,3 +64,14 @@ def test_safe_theme_covers_all_modern_dark_roles(name):
     theme = load_theme(name)
     missing = set(modern_dark.styles) - set(theme.styles)
     assert not missing, f"{name} is missing roles: {sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    "name", [n for n in list_themes() if n != modern_dark.name]
+)
+def test_every_bundled_theme_covers_all_modern_dark_roles(name):
+    # modern_dark is the reference set; a bundled theme missing a role renders
+    # that token with the generic `editor` fallback, i.e. unstyled.
+    theme = load_theme(name)
+    missing = set(modern_dark.styles) - set(theme.styles)
+    assert not missing, f"{name} is missing roles: {sorted(missing)}"

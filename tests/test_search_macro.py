@@ -49,7 +49,8 @@ async def test_records_replace_all_action_with_confirmation():
         sp.find_input.value = "foo"
         await pilot.pause()
         sp.replace_input.value = "X"
-        await pilot.press("f6")
+        # F6 is Split Vertical now; Replace All is menu-only.
+        app.content.action_replace_all()
         await pilot.pause()
         actions = rec.stop_recording()
         kinds = [a.kind for a in actions]

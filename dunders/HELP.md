@@ -39,8 +39,14 @@ FTP/SFTP, databases), and an embedded command line with an optional AI assistant
 | Key | Action |
 |-----|--------|
 | `Ctrl+S` | Save |
+| `F3` | Save As |
+| `Ctrl+G` | Save & quit — no confirmation (for `$EDITOR` use) |
 | `Ctrl+F` | Find |
-| `Ctrl+H` | Replace |
+| `Ctrl+L` / `Ctrl+Shift+L` | Find Next / Previous |
+| `F4` | Replace |
+| `F5` / `F6` | Split horizontal / vertical |
+| `F7` / `F8` | Fold toggle / Record macro |
+| `Ctrl+H` | Syntax highlight on/off |
 | (menu) | Fold / split / macro commands live in the **Editor** menu |
 
 ### Database console (`dunders[db]`)

@@ -53,6 +53,38 @@ def _editor_windows(app):
 
 
 @pytest.mark.asyncio
+async def test_we_single_file_opens_in_project_view(tmp_path):
+    """`__ FILE` matches `dunders FILE`: one editor plus the 1/4-width tree."""
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    app = DundersApp(launch_mode="we", initial_paths=[str(f)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        desktop = app.query_one(Desktop)
+        assert app._project_tree_panel_id == "panel-left"
+        visible_ids = {w.id for w in desktop.windows}
+        assert "panel-left" in visible_ids and "panel-right" not in visible_ids
+        # Focus stays in the buffer — the user came here to type, not to browse.
+        assert isinstance(desktop.focused_window.content, EditorContent)
+
+
+@pytest.mark.asyncio
+async def test_we_multi_file_cascade_skips_project_view(tmp_path):
+    """The cascade keeps every editor visible, so Project View must stay off."""
+    files = []
+    for name in ("a.py", "b.py"):
+        p = tmp_path / name
+        p.write_text(f"# {name}\n")
+        files.append(p)
+    app = DundersApp(launch_mode="we", initial_paths=[str(p) for p in files])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._project_tree_panel_id is None
+        visible_ids = {w.id for w in app.query_one(Desktop).windows}
+        assert "panel-left" not in visible_ids
+
+
+@pytest.mark.asyncio
 async def test_we_three_files_cascade(tmp_path):
     files = []
     for name in ("a.py", "b.py", "c.py"):

@@ -186,3 +186,14 @@ fg = "#55ffff"
 [styles."editor.syntax.error"]
 fg = "#ff5555"
 bold = true
+
+[styles."editor.syntax.heading"]
+fg = "#ffff55"
+bold = true
+[styles."editor.syntax.subheading"]
+fg = "#55ffff"
+bold = true
+[styles."editor.syntax.strong"]
+bold = true
+[styles."editor.syntax.emphasis"]
+italic = true
