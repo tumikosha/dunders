@@ -41,6 +41,10 @@ class DbProvider:
     scheme = "db"
     display_name = "Database"
     capabilities = frozenset({"read", "write", "slow"})
+    # The copy engine must NOT force overwrite=True here: for a db, open_write's
+    # overwrite=True means UPDATE-an-existing-record (the F4 edit path), whereas
+    # a plain copy/import must INSERT. So a copy uses overwrite=False.
+    copy_overwrite = False
     open_placeholder = "connection URL: sqlite:///file.db, postgresql://user@host/db, mysql://…"
 
     # Openable-file capability: F3/Enter on a local file whose first bytes match

@@ -150,6 +150,109 @@ Inside the app:
 Editor-scoped keys (Save, Find/Replace, Split, Fold, Record macro) appear in
 the status bar when an editor window has focus.
 
+## Claude Code integration
+
+Use `__` as [Claude Code](https://claude.com/claude-code)'s external editor, with
+the current session's transcript loaded alongside your prompt. Press
+`Ctrl+X Ctrl+E` in Claude Code and the editor opens like this:
+
+```
+▌cursor here — write your prompt
+
+════ HISTORY BELOW — everything from this line down is discarded ════
+
+### user
+...
+### assistant
+...
+```
+
+Write above the marker, save, exit. The history is cut away before Claude reads
+the file back, so only your text is sent — the transcript is there to read, not
+to resend.
+
+### Install — as a Claude Code plugin
+
+Inside Claude Code:
+
+```
+/plugin marketplace add tumikosha/dunders
+/plugin install dunders
+```
+
+This brings in the `claude-code-editor` skill and registers the `SessionStart`
+hook automatically — the plugin declares it, so nothing edits your
+`settings.json`. Then ask Claude to set up the editor, or run the installer
+yourself and let the plugin keep owning the hook:
+
+```bash
+bash ~/.claude/plugins/cache/dunders/*/skills/claude-code-editor/scripts/install.sh --skip-hook
+```
+
+### Install — from a clone
+
+```bash
+git clone https://github.com/tumikosha/dunders dunders
+bash dunders/skills/claude-code-editor/scripts/install.sh
+```
+
+To make the skill available to Claude without the plugin system, symlink it —
+edits in the clone then take effect without reinstalling:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD/dunders/skills/claude-code-editor" ~/.claude/skills/
+```
+
+The installer fetches `uv` and dunders if `__` is missing, drops two scripts into
+`~/.claude/dunders-cc/`, registers a `SessionStart` hook in
+`~/.claude/settings.json`, and adds a marked block to your shell profile. It
+backs up every file it touches (`*.bak-dunders-cc`) and is safe to rerun.
+
+```bash
+install.sh --editor nvim     # wire up a different editor instead of __
+install.sh --skip-dunders    # wrapper only
+install.sh --check           # report current state, change nothing
+install.sh --uninstall       # remove everything it added
+install.sh --purge           # the above plus the log and dunders itself
+```
+
+`--uninstall` leaves dunders in place — `__` is useful outside Claude Code.
+`--purge` also removes it (from both uv and pipx) and deletes
+`~/.claude/cc-edit.log`; it confirms first, or takes `--yes` for scripts.
+
+Then: open a new terminal, **restart `claude`** (the hook fires at session start,
+so already-running sessions have no entry in the PID map), and press
+`Ctrl+X Ctrl+E`.
+
+### Configuration
+
+Set in the managed block of your shell profile:
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `CC_REAL_EDITOR` | `__` | Editor to run. GUI editors need a wait flag: `code --wait`, `subl -w` |
+| `CC_HISTORY_LINES` | `200` | How many recent messages to show |
+| `CC_EDIT_DEBUG` | `1` | `0` silences `~/.claude/cc-edit.log` |
+
+### Notes
+
+- `$EDITOR` is global, so `git commit` without `-m` opens the wrapper too. It
+  detects commit, merge, tag, rebase and diff buffers and passes them through
+  untouched — no transcript ever lands in a commit message. To confine the
+  change to Claude Code, move the exports into the `env` block of
+  `~/.claude/settings.json` instead.
+- History is per session; a fresh session shows its own, nearly empty transcript.
+- If something looks wrong, `tail -20 ~/.claude/cc-edit.log` — a healthy run logs
+  `resolved by : session-map/<pid>.json`.
+- macOS and Linux. The wrapper is bash; `__w` still covers Windows for normal
+  editing, but this integration does not.
+
+The directory also ships as a Claude Code skill — copy or symlink
+`skills/claude-code-editor` into `~/.claude/skills/` and Claude can perform the
+setup and troubleshooting itself. `skills/claude-code-editor/references/design.md`
+documents how the transcript is located and why the obvious approaches fail.
+
 ## Development
 
 ```bash
@@ -187,6 +290,10 @@ dunders/
 ├── themes/           # dark.yaml / light.yaml palettes
 └── config/defaults.py
 ```
+
+Alongside the package, the repository root carries `skills/` — Claude Code skills
+shipped with the project, currently `claude-code-editor` (see
+[Claude Code integration](#claude-code-integration)).
 
 See [`CLAUDE.md`](./CLAUDE.md) for an architecture deep-dive aimed at
 contributors and AI coding assistants.

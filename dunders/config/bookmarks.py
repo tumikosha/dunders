@@ -19,17 +19,18 @@ from pathlib import Path
 from dunders.config.user_config import config_dir
 
 
-__all__ = ["bookmarks_path", "list_bookmarks", "add_bookmark", "remove_bookmark"]
+__all__ = ["bookmarks_path", "list_bookmarks", "add_bookmark", "remove_bookmark", "bookmarks_mtime"]
 
 
 def bookmarks_path() -> Path:
     return config_dir() / "bookmarks.json"
 
 
-def list_bookmarks() -> list[dict]:
+def list_bookmarks(path: Path | None = None) -> list[dict]:
     """Every stored bookmark, or [] if the file is missing/corrupt."""
+    target = path if path is not None else bookmarks_path()
     try:
-        with open(bookmarks_path(), encoding="utf-8") as f:
+        with open(target, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return []
@@ -37,6 +38,15 @@ def list_bookmarks() -> list[dict]:
     if not isinstance(items, list):
         return []
     return [b for b in items if isinstance(b, dict) and "uri" in b and "label" in b]
+
+
+def bookmarks_mtime(path: Path | None = None) -> float:
+    """The bookmarks file mtime, or 0.0 if missing/unreadable."""
+    target = path if path is not None else bookmarks_path()
+    try:
+        return target.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def add_bookmark(label: str, uri: str, password: str | None = None) -> bool:

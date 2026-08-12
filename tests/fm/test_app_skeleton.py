@@ -1686,6 +1686,26 @@ async def test_open_dunder_empty_spec_opens_docker_but_not_ftp(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_mkdir_lands_cursor_on_new_folder(tmp_path):
+    """F7/mkdir selects the freshly-created folder in the panel that shows its
+    parent, so a new dir is immediately actionable."""
+    from dunders.app import MkdirRequest
+    from dunders.fm.dialogs import NewFileDialog
+
+    (tmp_path / "aaa.txt").write_text("x")   # sorts before the new folder
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        dlg = NewFileDialog(prompt="x",
+                            context=MkdirRequest(parent_loc=panel.cwd_loc))
+        app.on_new_file_dialog_submitted(NewFileDialog.Submitted(dlg, "zzz_new"))
+        await pilot.pause()
+        assert (tmp_path / "zzz_new").is_dir()
+        assert panel.entries[panel.cursor].name == "zzz_new"
+
+
+@pytest.mark.asyncio
 async def test_exit_docker_container_focuses_it_in_index(tmp_path, monkeypatch):
     """Leaving a container (.. to the index) lands the cursor on that container,
     not at the top. Exiting a real archive still focuses the archive file."""
@@ -2109,3 +2129,86 @@ async def test_f3_folder_stats_close_restores_panel_focus(tmp_path):
                 break
             node = getattr(node, "parent", None)
         assert pid == src_id
+
+
+@pytest.mark.asyncio
+async def test_gdrive_open_unconfigured_triggers_signin(monkeypatch, tmp_path):
+    """Opening a not-yet-configured Google Drive account from the '_' menu runs
+    the sign-in flow (label prefilled) — one entry point, no separate item."""
+    import asyncio
+
+    from dunders.fm.providers.gdrive import auth as gauth
+    from dunders.fm.providers.gdrive.auth import OAuthTokens
+    from dunders.fm.providers.gdrive.config import load_accounts
+
+    monkeypatch.setattr(gauth, "run_loopback_consent",
+                        lambda *a, **k: OAuthTokens("AT", "RT", 9e9))
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        seen = {}
+
+        def fake_ask(spec):
+            seen["label_default"] = next(
+                f.default for f in spec.fields if f.key == "label")
+            fut = asyncio.get_event_loop().create_future()
+            fut.set_result({"label": "work", "client_id": "cid",
+                            "client_secret": "sec"})
+            return fut
+
+        monkeypatch.setattr(app.forms, "ask", fake_ask)
+        app._do_open_dunder("gdrive", "work")     # '_' menu path, new account
+        for _ in range(30):
+            await pilot.pause()
+            if "work" in load_accounts():
+                break
+        assert seen.get("label_default") == "work"   # form prefilled with label
+        assert "work" in load_accounts()             # signed in + saved
+
+
+@pytest.mark.asyncio
+async def test_gdrive_open_no_accounts_shows_key_form(tmp_path):
+    """First time (no accounts) '_' > Google Drive goes straight to the sign-in
+    FORM whose fields are where the OAuth client id/secret go."""
+    from dunders.fm.form_dialog import FormDialog
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._open_dunder("gdrive")          # isolated config -> no accounts
+        dlg = None
+        for _ in range(20):
+            await pilot.pause()
+            found = app.query(FormDialog)
+            if found:
+                dlg = found.first()
+                break
+        assert dlg is not None                       # the key form opened
+        spec = dlg.spec
+        keys = {f.key for f in spec.fields}
+        assert {"client_id", "client_secret"} <= keys   # where you enter the keys
+
+
+@pytest.mark.asyncio
+async def test_gdrive_bookmark_reopens_folder_directly(monkeypatch, tmp_path):
+    """A Google Drive bookmark reopens by navigating straight to the loc
+    (account root + folder path preserved) — no sign-in form, no trailing-slash
+    label corruption."""
+    from dunders.core.vfs import VfsPath
+    from dunders.fm.providers.gdrive import config as gconfig
+
+    monkeypatch.setattr(gconfig, "load_accounts",
+                        lambda *a, **k: {"tumikosha": {"client_id": "c"}})
+
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app._active_panel()
+        captured = {}
+        monkeypatch.setattr(panel, "_change_cwd_loc",
+                            lambda loc: captured.update(loc=loc))
+        loc = VfsPath(scheme="gdrive", root="tumikosha", parts=("Docs", "2026"))
+        app._open_bookmark({"uri": loc.as_uri(), "label": "gd"})
+        await pilot.pause()
+        assert captured.get("loc") == loc      # exact account + folder restored

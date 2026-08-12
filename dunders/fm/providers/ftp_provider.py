@@ -134,6 +134,10 @@ class FtpProvider:
     scheme = "ftp"
     display_name = "FTP"
     capabilities = frozenset({"read", "write", "stream", "slow"})
+    # A real remote filesystem (unlike an append-only archive): the copy/move
+    # dialog offers a full editable destination path, so a single file can be
+    # renamed on the way in.
+    remote_fs = True
     open_placeholder = "[user[:pass]@]host[:port][/path]"
 
     def __init__(self) -> None:

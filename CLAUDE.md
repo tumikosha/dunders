@@ -356,6 +356,22 @@ open the form; result written to `<stem>.result.json` next to the schema (scenar
 returned via the API (scenario 1, in-memory members not written). Spec/plan:
 `docs/superpowers/specs/2026-06-27-form-editor-design.md`.
 
+### 2.7 `dunders.mcp` — MCP server over the VFS
+
+App-agnostic, stdlib-only (like `dunders.ai`). Exposes the VFS to an external
+LLM agent over the Model Context Protocol. `dunders --mcp` runs headless (no
+TUI); the agent (Claude Desktop/Code) spawns it and talks JSON-RPC over stdio.
+Bookmarks become mount points via a dynamic `MountTable` (re-reads
+`bookmarks.json` on mtime change → live reconfiguration, no restart;
+`--mcp-bookmarks PATH` serves a curated file). Tools: read
+(`list_mounts`/`list_dir`/`read_file`/`stat`/`search`/`grep`) always; write
+(`write_file`/`mkdir`/`delete`/`copy`) only behind `--mcp-write` (absent from
+`tools/list` otherwise). Security: path-traversal guard, per-bookmark `"mcp":
+false` opt-out, `--mcp-mounts` allowlist, no-AI-zone hiding for local mounts,
+passwords never serialized. `protocol.py`/`transport.py`/`errors.py` are the
+shared layer a future MCP *client* provider (`mcp://` in the panel) will reuse.
+Spec: `docs/superpowers/specs/2026-07-28-mcp-server-design.md`.
+
 ### 3. `dunders.app` — top-level shell
 
 `DundersApp(App)` composes `MenuBar + Desktop + CommandLine + StatusBar` and

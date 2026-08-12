@@ -300,7 +300,8 @@ def _generic_transfer(
                     continue
                 prog.file_start(name, 0)
                 try:
-                    with reader, dst_p.open_write(dst) as writer:
+                    ow = getattr(dst_p, "copy_overwrite", True)
+                    with reader, dst_p.open_write(dst, overwrite=ow) as writer:
                         owns = _attach_writer_progress(
                             writer, lambda _l, n: prog.chunk(n), name)
                         while True:
@@ -377,7 +378,15 @@ def _copy_tree(
             return
         prog.file_start(src.name, fsize)
         try:
-            with src_p.open_read(src) as reader, dst_p.open_write(dest) as writer:
+            # overwrite: a copy without "Skip existing" replaces an existing
+            # destination. Providers that refuse a silent clobber otherwise
+            # (sftp/ftp/zip) then overwrite instead of erroring; local always
+            # truncates. db opts OUT (copy_overwrite=False) — there overwrite=True
+            # means UPDATE-a-record, not clobber, so an import stays an insert.
+            # When skip_existing is on, existing files were already skipped above.
+            overwrite = getattr(dst_p, "copy_overwrite", True)
+            with src_p.open_read(src) as reader, \
+                    dst_p.open_write(dest, overwrite=overwrite) as writer:
                 owns = _attach_writer_progress(
                     writer, lambda _l, n: prog.chunk(n), src.name)
                 while True:

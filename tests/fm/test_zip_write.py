@@ -177,15 +177,29 @@ class TestFileIntoZip:
         assert not res.errors
         assert "dir/added.txt" in _names(archive)
 
-    def test_conflict_is_reported_not_crash(self, tmp_path):
+    def test_existing_member_is_overwritten(self, tmp_path):
+        # A plain copy (no Skip existing) OVERWRITES a member of the same name,
+        # rather than erroring — the copy engine asks for overwrite=True.
         archive = _make_zip(tmp_path / "a.zip")
         src = tmp_path / "existing.txt"  # same name as a member already inside
         src.write_text("new content")
         res = transfer(
             self._reg(), [VfsPath.local(src)], _root(archive), mode="copy"
         )
-        assert len(res.errors) == 1
-        assert "exist" in res.errors[0].reason.lower()
-        # original member untouched
+        assert res.errors == []
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.read("existing.txt") == b"new content"
+
+    def test_existing_member_is_kept_with_skip(self, tmp_path):
+        # With Skip existing, the member is left untouched and recorded skipped.
+        archive = _make_zip(tmp_path / "a.zip")
+        src = tmp_path / "existing.txt"
+        src.write_text("new content")
+        res = transfer(
+            self._reg(), [VfsPath.local(src)], _root(archive),
+            mode="copy", skip_existing=True,
+        )
+        assert res.errors == []
+        assert len(res.skipped) == 1
         with zipfile.ZipFile(archive) as zf:
             assert zf.read("existing.txt") == b"old"

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from dunders.app import DundersApp
+from dunders.mcp import run_stdio
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -29,6 +31,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Start in agent / CLI mode instead of the file manager.",
     )
+    parser.add_argument("--mcp", action="store_true",
+                        help="Run as a headless MCP server over stdio (no TUI).")
+    parser.add_argument("--mcp-write", action="store_true",
+                        help="Enable write tools (write_file/mkdir/delete/copy).")
+    parser.add_argument("--mcp-mounts", default=None,
+                        help="Comma-separated bookmark labels to expose (default: all).")
+    parser.add_argument("--mcp-bookmarks", default=None,
+                        help="Path to a bookmarks file to serve (default: config dir).")
     return parser.parse_args(argv)
 
 
@@ -44,8 +54,25 @@ def _resolve_launch_mode(args: argparse.Namespace) -> tuple[str, str | None]:
     return ("fm", args.path)
 
 
+def _run_mcp(args: argparse.Namespace) -> None:
+    from dunders.fm.vfs_local import default_registry
+    from dunders.mcp.mounts import MountTable
+
+    registry = default_registry()
+    allow = (
+        {s for s in (part.strip() for part in args.mcp_mounts.split(",")) if s}
+        if args.mcp_mounts else None
+    )
+    path = Path(args.mcp_bookmarks) if args.mcp_bookmarks else None
+    table = MountTable(registry, path=path, allow=allow)
+    run_stdio(registry, table, allow_write=args.mcp_write)
+
+
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    if args.mcp:
+        _run_mcp(args)
+        return
     launch_mode, initial_path = _resolve_launch_mode(args)
     DundersApp(launch_mode=launch_mode, initial_path=initial_path).run()
 

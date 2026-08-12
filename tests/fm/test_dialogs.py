@@ -654,3 +654,41 @@ async def test_folder_stats_values_highlighted():
         # Value style differs from the dim key style (bold and/or coloured).
         assert val_seg.style != key_seg.style
         assert val_seg.style.bold
+
+
+# --- GDriveConsentDialog ----------------------------------------------------
+
+import threading as _threading
+
+from dunders.fm.dialogs import GDriveConsentDialog
+
+
+@pytest.mark.asyncio
+async def test_gdrive_consent_dialog_copy_and_cancel(monkeypatch):
+    ev = _threading.Event()
+    url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=X"
+    dlg = GDriveConsentDialog(url, cancel_event=ev)
+
+    copied = []
+    from dunders.windowing.core import clipboard
+    monkeypatch.setattr(clipboard, "copy", lambda text, app=None: copied.append(text))
+
+    cancelled = []
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+        def on_gdrive_consent_dialog_cancelled(self, event) -> None:
+            cancelled.append(event)
+
+    async with _H().run_test() as pilot:
+        await pilot.pause()
+        from textual.widgets import Static
+        assert dlg.query_one("#gd-url", Static) is not None and dlg._url == url
+        dlg.action_copy_url()                        # the Copy URL button
+        assert copied == [url]                       # full URL, no truncation
+        dlg.action_cancel()
+        await pilot.pause()
+        assert ev.is_set()               # aborts the loopback wait
+        assert len(cancelled) == 1       # app is told to close the modal

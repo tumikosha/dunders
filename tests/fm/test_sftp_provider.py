@@ -411,6 +411,31 @@ class TestIntegration:
         assert seen
         assert all(s.total == 0 for s in seen)
 
+    def test_upload_overwrites_without_skip(self, sftp_server, tmp_path):
+        """A plain copy (no Skip existing) OVERWRITES an existing remote file —
+        sftp open_write refuses a silent clobber, so the engine passes
+        overwrite=True. With skip_existing the file is kept."""
+        from dunders.fm.vfs_engine import transfer
+
+        _h, port, root = sftp_server
+        (root / "f.txt").write_text("OLD")
+        p = SftpProvider()
+        _open(p, port)
+        reg = self._connected_registry(p, port)
+        src = tmp_path / "f.txt"
+        src.write_text("NEW")
+        dest = _root_loc(port)
+
+        res = transfer(reg, [VfsPath.local(src)], dest, mode="copy")
+        assert res.errors == []
+        assert (root / "f.txt").read_text() == "NEW"      # overwritten
+
+        (root / "f.txt").write_text("OLD2")
+        res2 = transfer(reg, [VfsPath.local(src)], dest, mode="copy",
+                        skip_existing=True)
+        assert len(res2.skipped) == 1
+        assert (root / "f.txt").read_text() == "OLD2"     # kept
+
     def test_download_dir_cancellable(self, sftp_server, tmp_path):
         """Cancel during a directory download is honoured (the measure phase used
         to be uninterruptible, so Cancel did nothing)."""
@@ -538,3 +563,42 @@ class TestIntegration:
 def test_registered_in_default_registry():
     from dunders.fm.vfs_local import default_registry
     assert "sftp" in default_registry().schemes()
+
+
+@_needs_paramiko
+@pytest.mark.asyncio
+async def test_copy_to_sftp_honours_typed_rename(sftp_server):
+    """Copying a single file INTO an sftp panel with an edited destination name
+    lands it under the NEW name (sftp is a real remote fs, not append-only)."""
+    import tempfile
+    from pathlib import Path
+
+    from dunders.app import DundersApp
+    from dunders.fm.dialogs import CopyMoveDialog
+
+    _h, port, root = sftp_server
+    left = Path(tempfile.mkdtemp())
+    (left / "orig.txt").write_text("PAYLOAD")
+
+    app = DundersApp(launch_mode="fm", initial_path=str(left))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sftp_root = VfsPath(scheme="sftp", root=f"bob@127.0.0.1:{port}", parts=())
+        # connect + point the opposite panel at the sftp root
+        app._vfs_registry.resolve(sftp_root).resolve_target(
+            f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/")
+        )
+        app._opposite_panel(app._active_panel())._change_cwd_loc(sftp_root)
+        await pilot.pause()
+        lp = app._active_panel()
+        lp.cursor = next(i for i, e in enumerate(lp.entries) if e.name == "orig.txt")
+        app.action_copy()
+        await pilot.pause()
+        dlg = app.query(CopyMoveDialog).first()
+        assert dlg._input.value.endswith("/orig.txt")   # editable, includes name
+        new_uri = dlg._input.value.rsplit("/", 1)[0] + "/renamed.txt"
+        dlg.post_message(CopyMoveDialog.Submitted(dlg, new_uri))
+        for _ in range(12):
+            await pilot.pause()
+        assert (root / "renamed.txt").read_text() == "PAYLOAD"
+        assert not (root / "orig.txt").exists()

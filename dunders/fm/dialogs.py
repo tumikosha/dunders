@@ -398,6 +398,86 @@ class AboutDialog(Container, WindowContent):
             node = getattr(node, "parent", None)
 
 
+class GDriveConsentDialog(Container, WindowContent):
+    """Shows the Google OAuth consent URL for the user to open themselves.
+
+    Auto-opening a browser is unreliable (it often launches a fresh profile not
+    signed into Google). So we just display the URL — selectable in most
+    terminals — and wait; the loopback server catches the redirect from whatever
+    browser the user completes it in. Cancel aborts the wait via cancel_event.
+    """
+
+    can_focus = False
+
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+
+    DEFAULT_CSS = """
+    GDriveConsentDialog { layout: vertical; }
+    GDriveConsentDialog #gd-prompt { margin: 1 2 0 2; }
+    GDriveConsentDialog #gd-url {
+        margin: 1 2; padding: 0 1; background: $boost; color: $text;
+        height: auto; max-height: 6; overflow-y: auto;
+    }
+    GDriveConsentDialog #gd-file { margin: 0 2; color: $text-muted; }
+    /* Pin the buttons to the dialog's bottom edge so a long wrapped URL can
+       never push them off-screen. */
+    GDriveConsentDialog #gd-buttons {
+        dock: bottom; height: 1; align: center middle; margin-bottom: 1;
+    }
+    """
+
+    class Cancelled(Message):
+        def __init__(self, dialog: "GDriveConsentDialog") -> None:
+            self.dialog = dialog
+            super().__init__()
+
+    def __init__(self, url: str, *, cancel_event, url_file: str | None = None) -> None:
+        super().__init__()
+        self._url = url
+        self._url_file = url_file
+        self.cancel_event = cancel_event
+        self.window_title = "Google Drive sign-in"
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            "Copy the consent URL (button below), open it in a browser signed "
+            "into Google, authorise, then return:",
+            id="gd-prompt", markup=False)
+        # Plain text (no markup): the long URL breaks Textual link markup, and
+        # copying wrapped terminal text truncates it (a 400). Use the Copy button.
+        yield Static(self._url, id="gd-url", markup=False)
+        if self._url_file:
+            yield Static(f"Full URL also saved to: {self._url_file}",
+                         id="gd-file", markup=False)
+        with Horizontal(id="gd-buttons"):
+            yield ShadowButton("Copy URL", id="gd-copy",
+                               face_bg="rgb(0,120,160)", hotkey="y")
+            yield ShadowButton("Cancel", id="gd-cancel",
+                               face_bg="rgb(160,40,40)", hotkey="c")
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        if event.button.id == "gd-copy":
+            self.action_copy_url()
+        else:
+            self.action_cancel()
+
+    def action_copy_url(self) -> None:
+        from dunders.windowing.core import clipboard
+        try:
+            clipboard.copy(self._url, app=self.app)
+            self.app.notify("Consent URL copied to clipboard.")
+        except Exception:
+            self.app.notify("Could not copy to clipboard.", severity="warning")
+
+    def action_cancel(self) -> None:
+        try:
+            self.cancel_event.set()
+        except Exception:
+            pass
+        self.post_message(GDriveConsentDialog.Cancelled(self))
+
+
 class InputDialog(Container, WindowContent):
     """Single-line text-input modal. Enter submits, Esc cancels.
 

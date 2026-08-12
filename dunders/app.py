@@ -212,6 +212,28 @@ def _resolve_copy_dest(
     return user_dest.parent, rename_to
 
 
+def _parse_remote_copy_dest(
+    dest_loc: VfsPath, raw: str, *, single: bool
+) -> tuple[VfsPath, str | None]:
+    """Split a typed remote-filesystem (sftp/ftp) copy destination into
+    ``(dir_loc, rename_to)``.
+
+    The dialog prefills an editable ``<scheme>://…!/dir/name`` locator; for a
+    single file the edited basename becomes ``rename_to`` (so the file can be
+    renamed on the way in) and the directory is its parent. A multi-item copy
+    (or an unparseable value) drops into the locator as a plain directory.
+    """
+    if not raw:
+        return dest_loc, None  # nothing typed -> drop into the current dir
+    try:
+        target = VfsPath.parse(raw)
+    except ValueError:
+        return dest_loc, None
+    if single and target.parts:
+        return (target.parent or dest_loc), target.name
+    return target, None
+
+
 # --- Dialog payload types --------------------------------------------------
 # Each F-key flow attaches a typed request to its dialog so
 # on_confirm_dialog_result / on_input_dialog_submitted can dispatch via
@@ -733,6 +755,17 @@ class DundersApp(App):
                     self._run_copy_into_target(ctx, root, rename_to=f"{table}.jsonl",
                                                skip_existing=skip)
                     return
+            # A real remote filesystem (sftp/ftp): honour the edited destination
+            # path so a single file can be renamed on the way in. Parse the typed
+            # locator into (dir, basename): the basename becomes rename_to.
+            prov = self._vfs_registry.resolve(ctx.dest_loc)
+            if getattr(prov, "remote_fs", False):
+                target, rename = _parse_remote_copy_dest(
+                    ctx.dest_loc, raw, single=len(ctx.targets) == 1
+                )
+                self._run_copy_into_target(ctx, target, rename_to=rename,
+                                           skip_existing=skip)
+                return
             # Copy/move INTO a browsed archive at its current sub-path; the
             # typed value is ignored (append-only, no path editing). Checked
             # before the provider-prefix path since the prefill is a "<scheme>://"
@@ -2031,7 +2064,7 @@ class DundersApp(App):
             win.styles.width = width
             win.styles.height = H
 
-    def _refresh_panels(self) -> None:
+    def _refresh_panels(self, *, focus_new: VfsPath | None = None) -> None:
         """Load directory contents into both panels (left and right).
 
         Each panel keeps the cursor on whatever entry it was on: a plain
@@ -2039,6 +2072,10 @@ class DundersApp(App):
         to the top. This matters most for slow providers (SFTP) whose async
         re-scan resets the cursor to 0 before the listing returns, so we pass
         the focused locator through as ``focus_loc`` to land back on it.
+
+        ``focus_new``: a freshly-created locator (e.g. a mkdir target). Any panel
+        whose cwd is its parent lands the cursor on it instead of on its previous
+        entry, so a new folder is selected the moment it appears.
         """
         from dunders.fm.file_panel import FilePanel  # local: avoid circular at import-time
         for panel_id in ("panel-left", "panel-right"):
@@ -2048,11 +2085,14 @@ class DundersApp(App):
                 continue
             content = win.content
             if isinstance(content, FilePanel):
-                focus_loc = (
-                    content.entries[content.cursor].loc
-                    if 0 <= content.cursor < len(content.entries)
-                    else None
-                )
+                if focus_new is not None and content.cwd_loc == focus_new.parent:
+                    focus_loc = focus_new
+                else:
+                    focus_loc = (
+                        content.entries[content.cursor].loc
+                        if 0 <= content.cursor < len(content.entries)
+                        else None
+                    )
                 content.refresh_listing(focus_loc=focus_loc)
                 content.refresh()
 
@@ -2378,6 +2418,17 @@ class DundersApp(App):
         panel = self._active_panel()
         if panel is None or self.desktop is None:
             return
+        # Google Drive, first time (no accounts yet): go STRAIGHT to the sign-in
+        # form (Account label + Client ID + Client secret) — that's where the
+        # keys go. With accounts present, fall through to the label prompt so you
+        # can pick which one to open (a new label there still triggers sign-in).
+        if scheme == "gdrive":
+            from dunders.fm.providers.gdrive.config import load_accounts
+            if not load_accounts():
+                self._remember_active_panel_id()
+                self.run_worker(self._gdrive_signin_flow(open_after=True),
+                                group="gdrive-auth", exclusive=True)
+                return
         provider = self._vfs_registry.for_scheme(scheme)
         label = getattr(provider, "display_name", scheme)
         # A provider may guide the prompt: `open_placeholder` is a greyed hint
@@ -2446,6 +2497,17 @@ class DundersApp(App):
         resolver = getattr(provider, "resolve_target", None)
         if resolver is None:
             return
+        # Google Drive: one entry point. If the typed account isn't configured
+        # yet, run the sign-in flow (prefilled with that label) and open the
+        # panel once it succeeds — no separate "sign in" menu item.
+        if scheme == "gdrive":
+            from dunders.fm.providers.gdrive.config import load_accounts
+            label = spec.strip() or "default"
+            if label not in load_accounts():
+                self.run_worker(
+                    self._gdrive_signin_flow(prefill_label=label, open_after=True),
+                    group="gdrive-auth", exclusive=True)
+                return
         # Provider needs a secret (e.g. FTP user without an inline password) and
         # none supplied yet → prompt for it, then re-enter with the password.
         needs = getattr(provider, "needs_password", None)
@@ -2857,6 +2919,121 @@ class DundersApp(App):
         show_modal(self.desktop, dialog, title="AI / LLM settings", size=(74, 26))
         self.call_after_refresh(dialog.focus_first_input)
 
+    async def _gdrive_signin_flow(self, *, prefill_label: str = "default",
+                                  open_after: bool = False) -> None:
+        from dunders.forms.schema import FieldSpec, FormSpec
+
+        spec = FormSpec(
+            title="Google Drive sign-in",
+            description=(
+                "Paste your Google OAuth 'Desktop app' client (create it once at "
+                "console.cloud.google.com). Then copy the consent URL and open it "
+                "in a browser signed into Google."
+            ),
+            fields=(
+                FieldSpec(key="label", type="str", label="Account label",
+                          default=prefill_label, required=True),
+                FieldSpec(key="client_id", type="str", label="Client ID",
+                          required=True),
+                FieldSpec(key="client_secret", type="str", label="Client secret",
+                          required=True),
+            ),
+        )
+        result = await self.forms.ask(spec)
+        if not result:
+            return
+        label = result["label"].strip() or "default"
+        cid = result["client_id"].strip()
+        secret = result["client_secret"].strip()
+        if not cid or not secret:
+            self.notify("Client id and secret are required.", severity="warning")
+            return
+        self.run_worker(
+            lambda: self._run_gdrive_consent(label, cid, secret,
+                                             open_after=open_after),
+            thread=True, group="gdrive-auth",
+        )
+
+    def _show_consent_dialog(self, url: str, cancel_event) -> None:
+        """Show the OAuth consent URL for the user to open in their own browser
+        (no auto-open). Stays up until sign-in completes or is cancelled."""
+        if self.desktop is None:
+            return
+        from dunders.config.user_config import config_dir
+        from dunders.fm.dialogs import GDriveConsentDialog
+
+        url_file = None
+        try:
+            p = config_dir() / "gdrive_consent_url.txt"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(url + "\n")
+            url_file = str(p)
+        except OSError:
+            pass
+        dialog = GDriveConsentDialog(url, cancel_event=cancel_event,
+                                     url_file=url_file)
+        self._gdrive_consent_dialog = dialog
+        show_modal(self.desktop, dialog, title="Google Drive sign-in", size=(90, 15))
+
+    def _close_consent_dialog(self) -> None:
+        dialog = getattr(self, "_gdrive_consent_dialog", None)
+        if dialog is not None:
+            self._gdrive_consent_dialog = None
+            try:
+                self._close_modal(dialog)
+            except Exception:
+                pass
+
+    def on_gdrive_consent_dialog_cancelled(self, event) -> None:
+        # The dialog already set cancel_event; just take the modal down.
+        self._close_consent_dialog()
+
+    def _run_gdrive_consent(self, label: str, cid: str, secret: str, *,
+                            open_after: bool = False) -> None:
+        import threading
+
+        from dunders.fm.providers.gdrive.api import UrllibTransport
+        from dunders.fm.providers.gdrive.auth import run_loopback_consent
+        from dunders.fm.providers.gdrive.config import save_account
+
+        cancel = threading.Event()
+
+        def _on_url(url: str) -> None:
+            self.call_from_thread(self._show_consent_dialog, url, cancel)
+
+        try:
+            # No auto-open: just show the URL. The loopback catches the redirect
+            # from whatever signed-in browser the user completes it in.
+            tokens = run_loopback_consent(
+                UrllibTransport(), cid, secret,
+                open_browser=False, on_url=_on_url, cancel_event=cancel,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface any failure as a toast
+            self.call_from_thread(self._close_consent_dialog)
+            if not cancel.is_set():
+                self.call_from_thread(
+                    self.notify, f"Google Drive sign-in failed: {exc}",
+                    severity="error")
+            return
+        self.call_from_thread(self._close_consent_dialog)
+        if not tokens.refresh_token:
+            self.call_from_thread(
+                self.notify,
+                "No refresh token returned — revoke access at "
+                "myaccount.google.com/permissions and retry.",
+                severity="warning")
+            return
+        save_account(label, client_id=cid, client_secret=secret,
+                     refresh_token=tokens.refresh_token)
+        if open_after:
+            self.call_from_thread(
+                self.notify, f"Google Drive account '{label}' signed in.")
+            self.call_from_thread(self._do_open_dunder, "gdrive", label)
+        else:
+            self.call_from_thread(
+                self.notify, f"Google Drive account '{label}' signed in — open "
+                "it from the '_' menu.")
+
     def action_edit_associations(self) -> None:
         """Seed (if needed) and open the file-associations TOML for editing."""
         if self._has_active_modal() or self.desktop is None:
@@ -2937,6 +3114,20 @@ class DundersApp(App):
             loc = VfsPath.parse(bm["uri"])
         except Exception:
             self.notify(f"Bad bookmark: {bm.get('label')!r}", severity="warning")
+            return
+        # Google Drive: the root IS the account label and the folder lives in
+        # loc.parts. Reopen by navigating straight to the loc (restores the exact
+        # folder) — going through _do_open_dunder would corrupt the label with a
+        # trailing "/" and drop the folder path. Unknown account -> sign in.
+        if loc.scheme == "gdrive":
+            from dunders.fm.providers.gdrive.config import load_accounts
+            if loc.root in load_accounts():
+                panel._change_cwd_loc(loc)
+            else:
+                self._remember_active_panel_id()
+                self.run_worker(
+                    self._gdrive_signin_flow(prefill_label=loc.root, open_after=True),
+                    group="gdrive-auth", exclusive=True)
             return
         if self._scheme_is_slow(loc.scheme):
             # A provider whose root is itself a full URL (db://<sqlalchemy-url>)
@@ -3313,7 +3504,11 @@ class DundersApp(App):
                 return
             result = provider.mkdir(ctx.parent_loc, name)
             self._report_op_result("mkdir", result)
-            self._refresh_panels()
+            # Land the cursor on the just-created folder (any panel showing the
+            # parent dir), so a fresh mkdir is immediately actionable — matters
+            # most on slow remotes (gdrive/sftp) where you can't eyeball-scroll.
+            new_loc = ctx.parent_loc.child(name) if not result.errors else None
+            self._refresh_panels(focus_new=new_loc)
             return
         if isinstance(ctx, PackRequest):
             name = event.value.strip()
@@ -3434,6 +3629,17 @@ class DundersApp(App):
             base_table = dest_loc.parts[0] if dest_loc.parts else stem
             initial = VfsPath(scheme="db", root=dest_loc.root, parts=(base_table,)).as_uri()
             prompt = f"{verb} '{targets[0].name}' into table (edit after !/):"
+        elif into_archive and getattr(
+            self._vfs_registry.resolve(dest_loc), "remote_fs", False
+        ):
+            # A real remote filesystem (sftp/ftp): full editable destination path,
+            # so a single file can be renamed on the way in (unlike an archive).
+            if len(targets) == 1:
+                initial = dest_loc.child(targets[0].name).as_uri()
+                prompt = f"{verb} '{targets[0].name}' to:"
+            else:
+                initial = dest_loc.as_uri()
+                prompt = f"{verb} {len(targets)} item(s) to:"
         elif into_archive:
             # Destination is a browsed archive dir; the path isn't user-editable
             # (append at the current sub-path). Show the locator for clarity.

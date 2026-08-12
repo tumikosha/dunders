@@ -174,4 +174,10 @@ def default_registry() -> VfsRegistry:
     # is present, so the panel never tries to enter a .7z it cannot open.
     if find_7z() is not None:
         reg.register(SevenZipProvider())
+    # Google Drive is stdlib-only (REST over urllib), so always register it; a
+    # connection is established lazily from stored creds when a "gdrive:" account
+    # is opened (an unconfigured label raises with actionable text).
+    from dunders.fm.providers.gdrive.config import make_connector
+    from dunders.fm.providers.gdrive_provider import GDriveProvider
+    reg.register(GDriveProvider(make_connector()))
     return reg
