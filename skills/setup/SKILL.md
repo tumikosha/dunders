@@ -1,5 +1,5 @@
 ---
-name: claude-code-editor
+name: setup
 description: Installs dunders (the `__` terminal editor) and wires it up as Claude Code's external editor so that ctrl+x ctrl+e opens the current session's transcript for reference while composing a prompt, then strips the transcript on exit so only typed text is sent. Use this skill whenever someone wants to edit Claude Code prompts in a real editor, wants to see or reread conversation history while writing a prompt, complains that ctrl+x ctrl+e opens an empty buffer with no context, asks how to change which editor Claude Code opens, wants to install dunders or the `__` command, or mentions cc-edit, the session transcript, or ~/.claude/projects/*.jsonl — even if they only describe the symptom and never name dunders.
 ---
 

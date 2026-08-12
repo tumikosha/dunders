@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/skills/claude-code-editor/scripts/cc-session-map",
+            "command": "${CLAUDE_PLUGIN_ROOT}/skills/setup/scripts/cc-session-map",
             "timeout": 5,
             "statusMessage": "Recording session transcript path..."
           }

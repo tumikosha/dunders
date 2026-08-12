@@ -180,20 +180,20 @@ Inside Claude Code:
 /plugin install dunders
 ```
 
-This brings in the `claude-code-editor` skill and registers the `SessionStart`
+This brings in the `setup` skill and registers the `SessionStart`
 hook automatically — the plugin declares it, so nothing edits your
 `settings.json`. Then ask Claude to set up the editor, or run the installer
 yourself and let the plugin keep owning the hook:
 
 ```bash
-bash ~/.claude/plugins/cache/dunders/*/skills/claude-code-editor/scripts/install.sh --skip-hook
+bash ~/.claude/plugins/cache/dunders/*/skills/setup/scripts/install.sh --skip-hook
 ```
 
 ### Install — from a clone
 
 ```bash
 git clone https://github.com/tumikosha/dunders dunders
-bash dunders/skills/claude-code-editor/scripts/install.sh
+bash dunders/skills/setup/scripts/install.sh
 ```
 
 To make the skill available to Claude without the plugin system, symlink it —
@@ -201,7 +201,7 @@ edits in the clone then take effect without reinstalling:
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s "$PWD/dunders/skills/claude-code-editor" ~/.claude/skills/
+ln -s "$PWD/dunders/skills/setup" ~/.claude/skills/
 ```
 
 The installer fetches `uv` and dunders if `__` is missing, drops two scripts into
@@ -249,8 +249,8 @@ Set in the managed block of your shell profile:
   editing, but this integration does not.
 
 The directory also ships as a Claude Code skill — copy or symlink
-`skills/claude-code-editor` into `~/.claude/skills/` and Claude can perform the
-setup and troubleshooting itself. `skills/claude-code-editor/references/design.md`
+`skills/setup` into `~/.claude/skills/` and Claude can perform the
+setup and troubleshooting itself. `skills/setup/references/design.md`
 documents how the transcript is located and why the obvious approaches fail.
 
 ## Development
@@ -292,7 +292,7 @@ dunders/
 ```
 
 Alongside the package, the repository root carries `skills/` — Claude Code skills
-shipped with the project, currently `claude-code-editor` (see
+shipped with the project, currently `setup` (see
 [Claude Code integration](#claude-code-integration)).
 
 See [`CLAUDE.md`](./CLAUDE.md) for an architecture deep-dive aimed at
