@@ -70,7 +70,9 @@ Generic, app-agnostic windowing system. Public API is re-exported from
   `app.py` registers focus-independent commands; panels and editors register
   focus-scoped ones.
 - `MenuBar` + `Dropdown` + `StatusBar` are pure widgets driven by the
-  dispatcher. `CommandPaletteContent` (Ctrl+P) lists all available commands.
+  dispatcher. `CommandPaletteContent` (**Ctrl+K**) lists all available
+  commands — Textual's own palette is disabled in `app.py` precisely because
+  it grabs Ctrl+P, which belongs to `panels.fullscreen` (see below).
 - `windowing/core/` is editor-agnostic primitives: `TextBuffer`,
   `FoldEngine` (+ `IndentFoldRule`), `MacroRecorder`, `MacroStorage`,
   search.
@@ -394,6 +396,13 @@ focus left in the buffer. A multi-file `we` keeps the plain cascade
 - Layout — `_apply_default_layout` tiles the two panels on resize. The
   initial call is deferred via `call_after_refresh` because `Desktop.size`
   is 0×0 at `on_mount`.
+- **Ctrl+P = `panels.fullscreen`**, the "back to Norton Commander" key
+  (`action_panels_fullscreen`): it stashes every editor/viewer/console window
+  in the IconTray (restorable via Ctrl+W; the console also returns on Ctrl+O),
+  exits Project View, and tiles both panels across the *full* Desktop. It is
+  the one key that gets from an editor launched as `__ FILE` back to the two
+  panels, so don't rebind it — and note the command palette is Ctrl+K, not
+  Ctrl+P (`app.py:451` disables Textual's palette to keep Ctrl+P free).
 - Focus restoration — `_pre_menu_focus`/`_pre_menu_window`/
   `_pre_modal_panel_id` are saved before activating the menu or a modal
   dialog so the dismiss path lands focus back on the right widget.

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""SessionStart hook: wire the editor wrapper up without touching the shell.
+
+A Claude Code plugin can declare skills, commands, hooks and MCP servers, and
+all four go away with the plugin. None of them can set $EDITOR, which is the one
+thing ctrl+x ctrl+e needs -- that is why the shell installer exists at all.
+
+What a plugin *can* do is run this hook, and ~/.claude/settings.json has an `env`
+block whose variables reach child processes. So one line written there replaces
+the whole shell-profile mechanism, and installing the plugin is the entire
+installation.
+
+The wrapper is copied to a stable path rather than pointed at directly: the
+plugin cache path carries the version and disappears on upgrade as well as on
+uninstall, and a stale EDITOR pointing at a missing file leaves the user unable
+to open an editor at all. cc-edit removes this copy and the settings entry the
+first time it runs after the plugin is gone.
+
+Part of dunders -- https://github.com/tumikosha/dunders
+"""
+
+import json
+import os
+import pathlib
+import shutil
+import sys
+
+HOME = pathlib.Path.home()
+CLAUDE_DIR = HOME / ".claude"
+TARGET_DIR = CLAUDE_DIR / "dunders-cc"
+SETTINGS = CLAUDE_DIR / "settings.json"
+STATE = TARGET_DIR / "installed.json"
+LOG = CLAUDE_DIR / "cc-edit.log"
+
+
+def log(msg):
+    """Diagnostics go to the log, never to stdout.
+
+    A SessionStart hook's output lands in the transcript, so anything printed
+    here would show up in the conversation on every single session start.
+    """
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"cc-wire: {msg}\n")
+    except OSError:
+        pass
+
+
+def write_json_atomic(path, data):
+    """Replace `path` with `data`, keeping a backup and never a partial file."""
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak-dunders-cc"))
+    tmp = path.with_suffix(path.suffix + ".cc-wire.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def main():
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    if not plugin_root:
+        # Not running from the plugin (install.sh path, or a bare invocation).
+        # It owns the wiring in that case; leave everything alone.
+        return 0
+
+    source = pathlib.Path(plugin_root) / "skills" / "setup" / "scripts" / "cc-edit"
+    if not source.is_file():
+        log(f"wrapper not found at {source} -- nothing wired")
+        return 0
+
+    shim = TARGET_DIR / "cc-edit"
+    try:
+        TARGET_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, shim)
+        shim.chmod(0o755)
+        # cc-session-map lives next to it so a manual run of either has both.
+        session_map = pathlib.Path(plugin_root) / "skills" / "setup" / "scripts" / "cc-session-map"
+        if session_map.is_file():
+            shutil.copy2(session_map, TARGET_DIR / "cc-session-map")
+            (TARGET_DIR / "cc-session-map").chmod(0o755)
+    except OSError as exc:
+        # Never write EDITOR when the shim is not in place: a half-wired setup
+        # points the editor at nothing.
+        log(f"could not place the shim: {exc}")
+        return 0
+
+    state = load_state()
+    try:
+        settings = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        log(f"settings.json unreadable ({exc}) -- left untouched")
+        return 0
+    if not isinstance(settings, dict):
+        log("settings.json is not an object -- left untouched")
+        return 0
+
+    env = settings.setdefault("env", {})
+    current = env.get("EDITOR", "")
+    ours = str(shim)
+    # Only claim EDITOR when it is free or already ours. Someone who keeps their
+    # own editor there gets left alone rather than silently overridden.
+    if current and current != ours and current != state.get("editor"):
+        log(f"EDITOR already set to {current!r} by someone else -- not touching it")
+        return 0
+
+    if current != ours:
+        env["EDITOR"] = ours
+        try:
+            write_json_atomic(SETTINGS, settings)
+        except OSError as exc:
+            log(f"could not write settings.json: {exc}")
+            return 0
+        log(f"EDITOR -> {ours}")
+
+    try:
+        STATE.write_text(
+            json.dumps(
+                {
+                    "plugin_root": plugin_root,
+                    "editor": ours,
+                    "real_editor": os.environ.get("CC_REAL_EDITOR", "__"),
+                    "managed_by": "plugin",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log(f"could not write {STATE}: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

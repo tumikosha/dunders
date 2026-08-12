@@ -42,6 +42,56 @@ while IFS= read -r line; do
   esac
 done < <(env | grep '^CLAUDE' | sort || true)
 
+# --- Self-removal after the plugin is gone -----------------------------------
+# `/plugin uninstall` deletes the plugin directory, and with it the hook that
+# would have tidied up — Claude Code has no plugin-removal hook. So the shim
+# checks for its own origin on every launch: if the plugin is gone, it undoes
+# the settings.json entry, deletes itself, and hands the file to a real editor.
+# Triggered by use rather than by uninstall, which is the only moment available.
+STATE="$HOME/.claude/dunders-cc/installed.json"
+if [[ -f "$STATE" ]]; then
+  root="$(STATE_FILE="$STATE" python3 -c \
+    'import json,os;print(json.load(open(os.environ["STATE_FILE"])).get("plugin_root",""))' \
+    2>/dev/null || true)"
+  if [[ -n "$root" && ! -d "$root" ]]; then
+    diag "  plugin root gone ($root) -> self-removing"
+    STATE_FILE="$STATE" python3 - <<'PY' 2>>"$LOG" || true
+import json, os, pathlib, shutil
+
+home = pathlib.Path.home()
+settings = home / ".claude" / "settings.json"
+state = json.load(open(os.environ["STATE_FILE"]))
+ours = state.get("editor", "")
+
+try:
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    env = data.get("env", {})
+    # Only drop EDITOR if it is still the entry we wrote; the user may have
+    # since pointed it somewhere of their own.
+    if env.get("EDITOR") == ours:
+        env.pop("EDITOR", None)
+        if not env:
+            data.pop("env", None)
+        shutil.copy2(settings, settings.with_suffix(".json.bak-dunders-cc"))
+        tmp = settings.with_suffix(".json.cc-edit.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(settings)
+except (OSError, json.JSONDecodeError, ValueError):
+    pass
+
+for path in (home / ".claude" / "dunders-cc", home / ".claude" / "session-map"):
+    shutil.rmtree(path, ignore_errors=True)
+PY
+    # The keystroke still has to open something, even if the tidying failed.
+    fallback="${CC_REAL_EDITOR:-}"
+    if [[ -z "$fallback" ]] || ! command -v "$fallback" >/dev/null 2>&1; then
+      command -v __ >/dev/null 2>&1 && fallback="__" || fallback="vi"
+    fi
+    diag "  handing $BUF to $fallback"
+    exec $fallback "$BUF"
+  fi
+fi
+
 # --- Guard -------------------------------------------------------------------
 # $EDITOR is inherited by every Claude child process, including `git commit`.
 # Injecting a transcript into a commit message would be a disaster, so anything

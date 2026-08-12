@@ -152,9 +152,14 @@ the status bar when an editor window has focus.
 
 ## Claude Code integration
 
+**`Ctrl+G` — the whole loop, one key.** In Claude Code it opens your prompt in
+`__` with the session transcript below it; in `__` it saves and exits, sending
+only what you typed.
+
 Use `__` as [Claude Code](https://claude.com/claude-code)'s external editor, with
-the current session's transcript loaded alongside your prompt. Press
-`Ctrl+X Ctrl+E` in Claude Code and the editor opens like this:
+the current session's transcript loaded alongside your prompt. `Ctrl+X Ctrl+E`
+is the same Claude Code action (`chat:externalEditor`) if you have remapped
+`Ctrl+G` in your own `keybindings.json`. The editor opens like this:
 
 ```
 ▌cursor here — write your prompt
@@ -180,14 +185,24 @@ Inside Claude Code:
 /plugin install dunders
 ```
 
-This brings in the `setup` skill and registers the `SessionStart`
-hook automatically — the plugin declares it, so nothing edits your
-`settings.json`. Then ask Claude to set up the editor, or run the installer
-yourself and let the plugin keep owning the hook:
+Then restart claude. That is the whole installation — no script to run, no shell
+profile to edit. The plugin's `SessionStart` hook copies the wrapper to
+`~/.claude/dunders-cc/` and points `env.EDITOR` in `~/.claude/settings.json` at
+it, which is the one thing a plugin manifest cannot declare on its own.
 
-```bash
-bash ~/.claude/plugins/cache/dunders/*/skills/setup/scripts/install.sh --skip-hook
 ```
+/plugin uninstall dunders
+```
+
+undoes it. The hook stops running; the next `ctrl+x ctrl+e` notices the plugin
+is gone, removes the `settings.json` entry, deletes the directories it created,
+and opens your file in a plain editor. Cleanup happens on that first use rather
+than at uninstall, because Claude Code has no plugin-removal hook — uninstall
+and never press the key again and one inert directory and one settings line stay
+behind.
+
+An `EDITOR` you set yourself is never overwritten; the integration stays inert
+and logs why.
 
 ### Install — from a clone
 

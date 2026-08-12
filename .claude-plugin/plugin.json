@@ -1,7 +1,7 @@
 {
   "name": "dunders",
   "version": "0.1.0",
-  "description": "Use the dunders `__` terminal editor as Claude Code's external editor, with the current session's transcript loaded next to your prompt and stripped again on exit.",
+  "description": "Ctrl+G in Claude Code opens your prompt in the dunders `__` terminal editor with the current session's transcript below it; Ctrl+G again saves, exits and sends only what you typed. Ships the SessionStart hook that maps claude's PID to its transcript, plus an installer with --check, --uninstall and --purge.",
   "author": {
     "name": "tumikosha",
     "email": "tumikosha@gmail.com",
@@ -23,6 +23,12 @@
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/skills/setup/scripts/cc-wire",
+            "timeout": 5,
+            "statusMessage": "Wiring the dunders editor..."
+          },
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/skills/setup/scripts/cc-session-map",

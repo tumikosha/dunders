@@ -161,6 +161,17 @@ PY
   exit 0
 fi
 
+# --- what this gets you ------------------------------------------------------
+# Printed before any work: the key is the whole point of the integration, and a
+# user who reads only the first screen should still learn it.
+cat <<'BANNER'
+
+Ctrl+G — the whole loop, one key:
+  in Claude Code   Ctrl+G opens your prompt in the editor, with the session
+                   transcript below it
+  in the editor    Ctrl+G saves and exits, sending only what you typed
+BANNER
+
 # --- prerequisites -----------------------------------------------------------
 head_ "prerequisites"
 command -v python3 >/dev/null 2>&1 || {
@@ -247,11 +258,16 @@ cat <<EOF
 
 Done.
 
+  Ctrl+G in Claude Code opens $EDITOR_CMD with the transcript;
+  Ctrl+G in $EDITOR_CMD saves and exits, sending only what you typed.
+
 Next:
   1. source $PROFILE     (or open a new terminal)
   2. restart claude      — the hook only fires at session start, so sessions
                            already running have no entry in the PID map
-  3. press ctrl+x ctrl+e — type above the marker line, save, exit
+  3. press Ctrl+G        — or ctrl+x ctrl+e, which is the same action and
+                           survives a custom keybindings.json; type above the
+                           marker line, then save and exit
 
 Verify:  tail -20 ~/.claude/cc-edit.log
          a working run logs 'resolved by : session-map/<pid>.json'

@@ -11,6 +11,24 @@ exit the history is cut away and only the typed text reaches Claude.
 
 ## What the user actually gets
 
+Tell them the key first — it is the same one at both ends, which is the part
+people remember:
+
+```
+Ctrl+G — the whole loop, one key:
+  in Claude Code   Ctrl+G opens your prompt in __, with the session transcript
+                   below it
+  in the editor    Ctrl+G saves and exits, sending only what you typed
+```
+
+`ctrl+x ctrl+e` is the same Claude Code action (`chat:externalEditor`) and is
+worth mentioning as the fallback: `Ctrl+G` is only the default binding, so a
+user with their own `~/.claude/keybindings.json` may have remapped it. In the
+editor `Ctrl+G` is dunders' own Save & Quit — it skips the quit confirmation,
+which is exactly why the round trip is one keystroke.
+
+And what the buffer looks like:
+
 ```
 ▌cursor here — write the prompt
 
@@ -24,8 +42,35 @@ exit the history is cut away and only the typed text reaches Claude.
 
 ## Install
 
+Two paths. Prefer the plugin — it needs no shell at all.
+
+### As a plugin (nothing else to run)
+
+```
+/plugin marketplace add tumikosha/dunders
+/plugin install dunders
+```
+
+Then **restart claude**. On the next session start the plugin's `SessionStart`
+hook runs `cc-wire`, which copies the wrapper to `~/.claude/dunders-cc/` and
+points `env.EDITOR` in `~/.claude/settings.json` at it. The shell profile is
+never touched.
+
+`/plugin uninstall dunders` undoes it: the hook stops running, and the next
+`ctrl+x ctrl+e` finds its plugin gone, removes the `settings.json` entry,
+deletes `~/.claude/dunders-cc/` and `~/.claude/session-map/`, and opens the file
+in a plain editor instead. Cleanup is triggered by that first use, because
+Claude Code has no plugin-removal hook — someone who uninstalls and never
+presses the key again keeps one directory and one settings line, both inert.
+
+`cc-wire` will not take `EDITOR` from anyone: if it is already set to something
+that is not ours, the integration stays inert and says so in the log.
+
+### From a clone, or to set `$EDITOR` process-wide
+
 Run the bundled installer. It is idempotent — rerunning is how you change the
-editor or upgrade, not something to avoid.
+editor or upgrade, not something to avoid. Use it when `$EDITOR` should point at
+the wrapper outside Claude Code too; the plugin path only affects Claude Code.
 
 ```bash
 bash scripts/install.sh                 # dunders + wrapper
