@@ -155,3 +155,156 @@ def test_history_limit_keeps_the_most_recent_turns(env, tmp_path):
     shown = seen.read_text()
     assert "second answer" in shown       # newest kept
     assert "first question" not in shown  # oldest trimmed
+
+
+# ---------------------------------------------------------------------------
+# A missing real editor — the plugin wires the wrapper but never installs `__`
+# ---------------------------------------------------------------------------
+
+def test_a_missing_real_editor_falls_back_instead_of_doing_nothing(env, tmp_path):
+    """`ctrl+x ctrl+e` did nothing at all on a machine without dunders.
+
+    The wrapper ran, injected the transcript, then died at the exec with
+    `set -e` armed — no editor, and a buffer still carrying the whole
+    transcript for Claude to swallow as the prompt.
+    """
+    buf = tmp_path / "claude-prompt.md"
+    buf.write_text("typed text\n")
+
+    result = run(env, buf, real_editor="definitely-not-installed",
+                 VISUAL="/usr/bin/true")
+
+    assert result.returncode == 0
+    log = env["log"].read_text()
+    assert "real editor 'definitely-not-installed' not found" in log
+    assert "uv tool install dunders" in log        # says how to fix it
+    assert "falling back to /usr/bin/true" in log
+    # The transcript is still cut away, so Claude gets the prompt and nothing else.
+    assert buf.read_text().rstrip("\n") == "typed text"
+    assert "second answer" not in buf.read_text()
+
+
+def test_the_fallback_never_picks_the_wrapper_itself(env, tmp_path):
+    """$VISUAL can point back at cc-edit; choosing it would recurse."""
+    decoy = tmp_path / "cc-edit"
+    decoy.write_text("#!/usr/bin/env bash\nexit 0\n")
+    decoy.chmod(0o755)
+    # A PATH without the real `__` and with a harmless `nano`, so the chain has
+    # somewhere to land that neither recurses nor blocks on a terminal.
+    fake_nano = tmp_path / "nano"
+    fake_nano.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_nano.chmod(0o755)
+
+    buf = tmp_path / "claude-prompt.md"
+    buf.write_text("typed text\n")
+    result = run(env, buf, real_editor="definitely-not-installed",
+                 VISUAL=str(decoy), PATH=f"{tmp_path}:/usr/bin:/bin")
+
+    assert result.returncode == 0
+    log = env["log"].read_text()
+    assert f"falling back to {decoy}" not in log
+    assert f"falling back to {fake_nano}" in log or "falling back to nano" in log
+
+
+def test_an_editor_that_exits_nonzero_still_gets_the_buffer_stripped(env, tmp_path):
+    """Otherwise `set -e` skips the strip and the transcript is sent."""
+    failing = tmp_path / "failing-editor"
+    failing.write_text("#!/usr/bin/env bash\nexit 3\n")
+    failing.chmod(0o755)
+
+    buf = tmp_path / "claude-prompt.md"
+    buf.write_text("typed text\n")
+    result = run(env, buf, real_editor=str(failing))
+
+    assert result.returncode == 0
+    assert "editor exited 3" in env["log"].read_text()
+    assert buf.read_text().rstrip("\n") == "typed text"
+
+
+# ---------------------------------------------------------------------------
+# The install offer — the only moment with a terminal to ask on
+# ---------------------------------------------------------------------------
+
+def run_pty(env, buf, answer, tmp_path, real_editor="__", **extra):
+    """Drive the wrapper on a real pty, typing `answer` at the prompt."""
+    import pty as pty_mod
+    import select
+
+    master, slave = pty_mod.openpty()
+    proc = subprocess.Popen(
+        ["bash", str(CC_EDIT), str(buf)],
+        stdin=slave, stdout=slave, stderr=slave,
+        env={
+            **os.environ,
+            "HOME": str(env["home"]),
+            "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+            "CC_REAL_EDITOR": real_editor,
+            "VISUAL": "",
+            "CLAUDE_CODE_MESSAGING_SOCKET": f"/tmp/cc-socks/{env['pid']}.sock",
+            **extra,
+        },
+    )
+    os.close(slave)
+    seen = b""
+    os.write(master, answer.encode())
+    while True:
+        ready, _, _ = select.select([master], [], [], 20)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        seen += chunk
+    proc.wait(timeout=20)
+    os.close(master)
+    return seen.decode(errors="replace")
+
+
+@pytest.fixture
+def fake_uv(tmp_path):
+    """A uv stand-in that "installs" a runnable `__` into ~/.local/bin."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    uv = bindir / "uv"
+    uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "uv called: $*"\n'
+        'mkdir -p "$HOME/.local/bin"\n'
+        'printf \'#!/usr/bin/env bash\\necho opened >> "$HOME/opened.txt"\\n\' '
+        '> "$HOME/.local/bin/__"\n'
+        'chmod +x "$HOME/.local/bin/__"\n'
+    )
+    uv.chmod(0o755)
+    return uv
+
+
+def test_a_missing_editor_offers_to_install_and_then_opens(env, tmp_path, fake_uv):
+    buf = tmp_path / "claude-prompt.md"
+    buf.write_text("typed text\n")
+
+    out = run_pty(env, buf, "\n", tmp_path)          # Enter = the default yes
+
+    assert "is not installed" in out
+    assert "uv called: tool install --force" in out  # it really ran the installer
+    assert (env["home"] / "opened.txt").exists()     # …and then opened the editor
+    assert buf.read_text().rstrip("\n") == "typed text"
+
+
+def test_declining_is_remembered(env, tmp_path, fake_uv):
+    marker = env["home"] / ".claude/dunders-cc/autoinstall-declined"
+    buf = tmp_path / "claude-prompt.md"
+
+    buf.write_text("typed text\n")
+    # A fallback that exits on its own — nano would block this pty forever.
+    out = run_pty(env, buf, "n\n", tmp_path, VISUAL="/usr/bin/true")
+    assert "not asking again" in out
+    assert marker.exists()
+    assert not (env["home"] / "opened.txt").exists()   # nothing was installed
+
+    buf.write_text("typed again\n")
+    out2 = run_pty(env, buf, "\n", tmp_path, VISUAL="/usr/bin/true")
+    assert "is not installed" not in out2              # and it stays quiet after
+    assert "declined earlier" in env["log"].read_text()

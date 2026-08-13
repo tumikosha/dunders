@@ -44,22 +44,61 @@ And what the buffer looks like:
 
 Two paths. Prefer the plugin — it needs no shell at all.
 
-### As a plugin (nothing else to run)
+### As a plugin (no shell configuration)
 
 ```
 /plugin marketplace add tumikosha/dunders
-/plugin install dunders
+/plugin install dunders@dunders
 ```
+
+**A plugin install cannot run code**, so it cannot install dunders itself.
+Claude Code has no install event — the manifest carries only hooks, skills and
+MCP servers — and the earliest our code executes is the next `SessionStart`,
+whose budget is five seconds. A `uv tool install` takes minutes.
+
+So the wrapper asks, at the first `ctrl+x ctrl+e`, which is the first moment
+with a terminal on it: *"dunders (`__`) is not installed — install it now with
+uv? [Y/n]"*. Yes installs (uv, else pipx) and opens the editor; no falls back
+to `$VISUAL`/nano/vi, drops `~/.claude/dunders-cc/autoinstall-declined`, and
+never asks again (delete that file to be asked once more). With no terminal —
+tests, headless runs, `git commit` — it never asks at all.
+
+Installing it beforehand skips the question entirely:
+
+```bash
+uv tool install dunders            # or: pipx install dunders
+```
+
+Write `dunders@dunders` rather than the bare name: `<plugin>@<marketplace>` is
+how Claude Code keys an install, and the short form only resolves while no
+other marketplace ships a plugin by that name.
 
 Then **start a new session**. Installing does not run the hooks; only a session
 start does. On that next start the plugin's `SessionStart` hook runs `cc-wire`,
 which copies the wrapper to `~/.claude/dunders-cc/` and points `env.EDITOR` in
 `~/.claude/settings.json` at it. The shell profile is never touched.
 
-The restart is for the hook, not for the variable: the `env` block of
-settings.json is re-read live, and a variable added to it reaches a session
-that started a day earlier. So `~/.claude/dunders-cc/installed.json` is the
-thing to check — present means wired, and nothing needs restarting.
+**`/clear` is not a new session.** It clears the context and keeps the process,
+and the `SessionStart` hook does not fire (observed on 2.1.231:
+`installed.json`, which `cc-wire` rewrites on every run, keeps its old
+timestamp across a `/clear`). Say "quit claude and start it again" — in the
+same terminal, since the plugin path puts `EDITOR` in settings.json rather than
+in a shell profile, so the shell's environment is not involved. Only an
+`install.sh` setup needs a fresh terminal or a `source`.
+
+**The installing session cannot use the result.** Claude Code resolves the
+external editor from the environment it started with, and `cc-wire` writes
+`env.EDITOR` a moment later — so the very session that did the wiring still
+opens whatever `$EDITOR` was, which on a machine whose shell exports nothing is
+`vi`. That is the "I installed it and ctrl+x ctrl+e opens vim" report, and the
+fix is one restart, not a reinstall. The `env` block itself *is* re-read live —
+a variable added to it reaches a session that started a day earlier — but the
+`chat:externalEditor` path does not consult it again.
+
+Two files answer the two questions: `~/.claude/dunders-cc/installed.json` says
+whether the wiring happened, `~/.claude/cc-edit.log` says whether a keystroke
+ever reached the wrapper. State present and log silent means a session older
+than the settings entry — restart.
 
 Someone who already has the marketplace gets nothing new from `marketplace
 add` — it reports success on a clone it leaves at whatever commit it was on.
@@ -164,7 +203,7 @@ A healthy run contains `resolved by : session-map/<pid>.json` followed by
 
 | Symptom | Meaning |
 |---|---|
-| No log at all | `$EDITOR` never picked up — profile not sourced, or claude started before it was |
+| No log at all, vim opens instead | `$EDITOR` never picked up — the session started before `env.EDITOR` existed (plugin path: quit claude and start it again, `/clear` will not do), or the profile was not sourced (install.sh path) |
 | `transcript : <NOT FOUND>` | Hook has not run; restart claude, check `~/.claude/session-map/` |
 | `resolved by : newest-in-…` | Fallback in use, may be the wrong session |
 | `!! history render FAILED` | Python error; its stderr follows in the log |

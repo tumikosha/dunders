@@ -252,11 +252,112 @@ PY
 fi
 
 # --- Edit --------------------------------------------------------------------
+# The plugin wires the wrapper but cannot install the editor it runs: Claude
+# Code has no plugin-install event, so the earliest our code executes is the
+# next SessionStart, and a multi-minute `uv tool install` does not fit a hook's
+# five-second budget. The keystroke is the first moment with a terminal to ask
+# on, so that is where the offer lives.
+#
+# Declining is remembered. Without the marker every single ctrl+x ctrl+e would
+# re-ask, which is worse than the missing editor.
+DECLINED="$HOME/.claude/dunders-cc/autoinstall-declined"
+SPEC="dunders[all] @ git+https://github.com/tumikosha/dunders.git"
+
+offer_install() {
+  if [[ -f "$DECLINED" ]]; then
+    diag "  auto-install declined earlier -- not asking again"
+    return 1
+  fi
+  # No terminal means no consent: tests, headless runs and `git commit` paths
+  # must never block on a question nobody can see.
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    diag "  no tty -- not offering to install"
+    return 1
+  fi
+
+  local mgr=""
+  if command -v uv >/dev/null 2>&1; then mgr="uv"
+  elif command -v pipx >/dev/null 2>&1; then mgr="pipx"
+  fi
+  if [[ -z "$mgr" ]]; then
+    printf '\n  dunders (__) is not installed, and neither uv nor pipx is here.\n'
+    printf '  Install uv first:  curl -LsSf https://astral.sh/uv/install.sh | sh\n\n'
+    diag "  neither uv nor pipx available -- cannot offer an install"
+    return 1
+  fi
+
+  printf '\n  dunders (__) is not installed — it is the editor this wrapper opens.\n'
+  printf '  Install it now with %s? [Y/n] ' "$mgr"
+  local answer=""
+  read -r -t 60 answer || answer=""
+  case "${answer:-y}" in
+    [Nn]*)
+      printf '\n  Fine — falling back to another editor, and not asking again.\n'
+      printf '  Change your mind later: rm %s\n\n' "$DECLINED"
+      mkdir -p "$(dirname "$DECLINED")" 2>/dev/null || true
+      : > "$DECLINED" 2>/dev/null || true
+      diag "  user declined the install"
+      return 1
+      ;;
+  esac
+
+  printf '\n  Installing with %s — first time takes a minute.\n\n' "$mgr"
+  diag "  installing dunders with $mgr"
+  if [[ "$mgr" == "uv" ]]; then
+    uv tool install --force "$SPEC" || { diag "  install failed"; return 1; }
+  else
+    pipx install --force "$SPEC" || { diag "  install failed"; return 1; }
+  fi
+  hash -r 2>/dev/null || true
+
+  # uv and pipx both land in ~/.local/bin, which the current shell may not have
+  # on PATH yet — take the absolute path rather than declaring failure.
+  local found=""
+  for candidate in __ "$HOME/.local/bin/__"; do
+    if command -v "$candidate" >/dev/null 2>&1; then found="$candidate"; break; fi
+  done
+  if [[ -z "$found" ]]; then
+    diag "  installed, but __ is still not on PATH"
+    return 1
+  fi
+  REAL_EDITOR="$found"
+  diag "  installed: $found"
+  printf '  Done: %s\n\n' "$found"
+  return 0
+}
+
+editor_bin="${REAL_EDITOR%% *}"
+if ! command -v "$editor_bin" >/dev/null 2>&1; then
+  diag "  !! real editor '$editor_bin' not found"
+  if [[ "$(basename "$editor_bin")" == "__" ]]; then
+    offer_install || true
+  fi
+fi
+
+# Still nothing runnable — the user said no, there was no terminal to ask on, or
+# the install failed. Open *something*: a dead keystroke looks like a bug, and
+# with `set -e` armed it used to leave the un-stripped transcript in the buffer.
+if ! command -v "${REAL_EDITOR%% *}" >/dev/null 2>&1; then
+  for candidate in "${VISUAL:-}" __ nano vi; do
+    [[ -n "$candidate" ]] || continue
+    # Never pick ourselves: $VISUAL can point back at this wrapper.
+    [[ "$(basename "${candidate%% *}")" == "cc-edit" ]] && continue
+    command -v "${candidate%% *}" >/dev/null 2>&1 || continue
+    REAL_EDITOR="$candidate"
+    break
+  done
+  diag "     install it with \`uv tool install dunders\` (or pipx install dunders);"
+  diag "     falling back to $REAL_EDITOR for now"
+fi
+
 # Vim-family editors get +1 so the cursor lands in the empty compose area rather
 # than at the bottom of the transcript.
+#
+# A non-zero exit must not skip the strip below — `set -e` would otherwise hand
+# Claude the whole transcript as the prompt.
 case "$REAL_EDITOR" in
-  vi|vim|nvim|*/vim|*/nvim) $REAL_EDITOR +1 "$BUF" ;;
-  *) $REAL_EDITOR "$BUF" ;;
+  vi|vim|nvim|*/vim|*/nvim) $REAL_EDITOR +1 "$BUF" || diag "  editor exited $?" ;;
+  *) $REAL_EDITOR "$BUF" || diag "  editor exited $?" ;;
 esac
 
 # --- Strip everything from the marker down -----------------------------------

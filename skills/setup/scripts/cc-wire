@@ -119,6 +119,17 @@ def main():
         log(f"wrapper not found at {source} -- nothing wired")
         return 0
 
+    # The plugin ships the wrapper, not the editor it runs. Wire up anyway (the
+    # wrapper falls back to nano/vi and says so), but record it here so the
+    # answer is in the log before anyone presses the key and sees nothing.
+    real_editor = os.environ.get("CC_REAL_EDITOR", "__")
+    if shutil.which(real_editor.split()[0] if real_editor else "__") is None:
+        log(
+            f"{real_editor!r} is not on PATH -- install it with "
+            "`uv tool install dunders` (or pipx install dunders); "
+            "until then the wrapper falls back to nano/vi"
+        )
+
     shim = TARGET_DIR / "cc-edit"
     try:
         TARGET_DIR.mkdir(parents=True, exist_ok=True)
