@@ -101,6 +101,12 @@ packages = ["dunders"]
 "dunders/themes/dark.yaml"  = "dunders/themes/dark.yaml"
 "dunders/themes/light.yaml" = "dunders/themes/light.yaml"
 "dunders/HELP.md"           = "dunders/HELP.md"
+# The Claude Code wrappers ship inside the wheel so `dunders --setup-claude`
+# works from a plain `uv tool install`, with no clone and no plugin. The
+# canonical copies stay under skills/ — the plugin manifest points at them
+# there — and are mapped into the package at build time rather than moved.
+"skills/setup/scripts/cc-edit"         = "dunders/claude_scripts/cc-edit"
+"skills/setup/scripts/cc-session-map"  = "dunders/claude_scripts/cc-session-map"
 
 [tool.hatch.build.targets.sdist]
 include = [

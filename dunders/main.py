@@ -41,6 +41,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
              "current working directory; pass an empty value (--pd '') to "
              "use the edited file's own directory instead.",
     )
+    parser.add_argument(
+        "--setup-claude",
+        action="store_true",
+        help="Wire this install into Claude Code (ctrl+x ctrl+e / Ctrl+G opens "
+             "the prompt here, with the session transcript). Writes only under "
+             "~/.claude; the shell profile is not touched.",
+    )
+    parser.add_argument(
+        "--remove-claude",
+        action="store_true",
+        help="Undo --setup-claude. Leaves dunders itself installed.",
+    )
     parser.add_argument("--mcp", action="store_true",
                         help="Run as a headless MCP server over stdio (no TUI).")
     parser.add_argument("--mcp-write", action="store_true",
@@ -127,6 +139,13 @@ def _run_mcp(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    if args.setup_claude or args.remove_claude:
+        from dunders.claude_setup import remove_claude, setup_claude
+
+        code, lines = remove_claude() if args.remove_claude else setup_claude()
+        for line in lines:
+            print(line)
+        raise SystemExit(code)
     if args.mcp:
         _run_mcp(args)
         return

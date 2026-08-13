@@ -28,19 +28,32 @@ Installs [`uv`](https://docs.astral.sh/uv/) if you don't have it, then installs
 the `db:` database dunder, image and office/PDF viewers — via the `[all]` extra)
 into an isolated environment — no system Python needed.
 
-**Linux / macOS / WSL** (bash/zsh):
+**Linux / macOS / WSL** (bash/zsh) — editor **and** Claude Code integration:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git"
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git" && dunders --setup-claude
 ```
 
-**Windows** (PowerShell):
+Then start a new `claude` session and press **Ctrl+G**: your prompt opens in
+`__` with the session transcript below a sentinel line, and Ctrl+G again sends
+back only what you typed. (`ctrl+x ctrl+e` is the same action, and works at
+both ends too.) The setup step writes nothing outside `~/.claude` — no shell
+profile, no plugin — and `dunders --remove-claude` undoes exactly what it
+wrote. Drop that last command if you only want the editor.
+
+**Windows** (PowerShell) — editor only:
 
 ```powershell
 irm https://astral.sh/uv/install.ps1 | iex; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git"
 ```
 
-Then run `dunders` or just "__". (Already have `uv`? Just `uv tool install "dunders[all] @ git+https://github.com/tumikosha/dunders.git"`.)
+Run `__w` on Windows (`__` assumes a persistent relay subshell; `__w` suspends
+instead). The Claude Code integration is not available there yet — its
+wrappers are bash — and `dunders --setup-claude` says so instead of leaving a
+dead `$EDITOR` behind.
+
+Already have `uv`? Just the last command:
+`uv tool install "dunders[all] @ git+https://github.com/tumikosha/dunders.git"`.
 
 Want a leaner install? Pick only the extras you need instead of `[all]` —
 e.g. `dunders[db]` (database only), `dunders[sftp,db]`, or plain `dunders` for
