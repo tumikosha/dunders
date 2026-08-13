@@ -126,8 +126,8 @@ for name in (".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile"):
     if "dunders claude-code editor" in text or "dunders-cc/cc-edit" in text:
         print(
             f"cc-edit: {profile} still exports EDITOR at this wrapper; "
-            "run `bash scripts/install.sh --uninstall` from a dunders clone, "
-            "or delete that block by hand.",
+            "run `bash skills/setup/scripts/install.sh --uninstall` from a "
+            "dunders clone, or delete that block by hand.",
             file=sys.stderr,
         )
 PY

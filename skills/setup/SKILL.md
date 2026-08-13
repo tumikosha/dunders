@@ -51,10 +51,15 @@ Two paths. Prefer the plugin — it needs no shell at all.
 /plugin install dunders
 ```
 
-Then **restart claude**. Installing does not run the hooks; only a session
+Then **start a new session**. Installing does not run the hooks; only a session
 start does. On that next start the plugin's `SessionStart` hook runs `cc-wire`,
 which copies the wrapper to `~/.claude/dunders-cc/` and points `env.EDITOR` in
 `~/.claude/settings.json` at it. The shell profile is never touched.
+
+The restart is for the hook, not for the variable: the `env` block of
+settings.json is re-read live, and a variable added to it reaches a session
+that started a day earlier. So `~/.claude/dunders-cc/installed.json` is the
+thing to check — present means wired, and nothing needs restarting.
 
 Someone who already has the marketplace gets nothing new from `marketplace
 add` — it reports success on a clone it leaves at whatever commit it was on.
@@ -78,8 +83,8 @@ If `ctrl+x ctrl+e` still opens the editor after an uninstall, `EDITOR` is
 coming from a shell profile rather than from the plugin — `install.sh` writes
 such a block, and a machine that has seen both installs has both. Nothing in
 the plugin may edit a user's profile, so the wrapper names the offending file
-in `~/.claude/cc-edit.log` on its way out; `bash scripts/install.sh
---uninstall` from a clone removes the block.
+in `~/.claude/cc-edit.log` on its way out; `bash
+skills/setup/scripts/install.sh --uninstall` from a clone removes the block.
 
 `cc-wire` will not take `EDITOR` from anyone: if it is already set to something
 that is not ours, the integration stays inert and says so in the log. It still
