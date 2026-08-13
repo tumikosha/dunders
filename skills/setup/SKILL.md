@@ -51,10 +51,15 @@ Two paths. Prefer the plugin — it needs no shell at all.
 /plugin install dunders
 ```
 
-Then **restart claude**. On the next session start the plugin's `SessionStart`
-hook runs `cc-wire`, which copies the wrapper to `~/.claude/dunders-cc/` and
-points `env.EDITOR` in `~/.claude/settings.json` at it. The shell profile is
-never touched.
+Then **restart claude**. Installing does not run the hooks; only a session
+start does. On that next start the plugin's `SessionStart` hook runs `cc-wire`,
+which copies the wrapper to `~/.claude/dunders-cc/` and points `env.EDITOR` in
+`~/.claude/settings.json` at it. The shell profile is never touched.
+
+Someone who already has the marketplace gets nothing new from `marketplace
+add` — it reports success on a clone it leaves at whatever commit it was on.
+`/plugin marketplace update dunders` (or a `remove` followed by an `add`) is
+what refetches it.
 
 `/plugin uninstall dunders` undoes it: the hook stops running, and the next
 `ctrl+x ctrl+e` finds its plugin gone, removes the `settings.json` entry,
@@ -63,8 +68,23 @@ in a plain editor instead. Cleanup is triggered by that first use, because
 Claude Code has no plugin-removal hook — someone who uninstalls and never
 presses the key again keeps one directory and one settings line, both inert.
 
+"Its plugin gone" means gone from `~/.claude/plugins/installed_plugins.json`,
+not gone from disk: uninstalling leaves the versioned cache directory behind,
+marker file and all, so a directory test would read "installed" forever. A
+plugin that is merely *disabled* is still installed and does not trigger
+removal.
+
+If `ctrl+x ctrl+e` still opens the editor after an uninstall, `EDITOR` is
+coming from a shell profile rather than from the plugin — `install.sh` writes
+such a block, and a machine that has seen both installs has both. Nothing in
+the plugin may edit a user's profile, so the wrapper names the offending file
+in `~/.claude/cc-edit.log` on its way out; `bash scripts/install.sh
+--uninstall` from a clone removes the block.
+
 `cc-wire` will not take `EDITOR` from anyone: if it is already set to something
-that is not ours, the integration stays inert and says so in the log.
+that is not ours, the integration stays inert and says so in the log. It still
+records the install in `installed.json`, because the wrapper has been copied
+into `~/.claude/` either way and has to stay removable.
 
 ### From a clone, or to set `$EDITOR` process-wide
 
@@ -176,3 +196,19 @@ reopening the shell is enough; no reinstall needed.
   source of truth.
 - **macOS and Linux only.** The wrapper is bash; dunders itself runs on Windows,
   but this integration does not.
+
+## Releasing a change to the plugin
+
+Bump `version` in **both** `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json` in the same commit. Claude Code caches an
+installed plugin as `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`
+and reuses that directory when the version matches, so shipping new content
+under an old version reaches nobody: the user reinstalls, is told the install
+succeeded, and keeps running the previous tree. That is exactly how a released
+`cc-wire` stayed invisible — the manifest in git declared the hook, the
+installed 0.1.0 cache did not contain the script, and `ctrl+x ctrl+e` died with
+`ENOENT` on a wrapper nothing had copied into place.
+
+`tests/test_plugin_wiring.py` guards the parts that can be checked from the
+repo: the two manifests agree on the version, every declared hook command
+exists and is executable, and `cc-wire` is among them.

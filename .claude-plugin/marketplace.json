@@ -10,7 +10,7 @@
     {
       "name": "dunders",
       "source": "./",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "description": "Ctrl+G in Claude Code opens your prompt in the dunders `__` terminal editor, with the current session's transcript below a sentinel line; Ctrl+G in the editor saves and exits, and the transcript is cut away so only what you typed is sent. Ships the SessionStart hook that maps claude's PID to its transcript, plus an installer with --check, --uninstall and --purge.",
       "author": {
         "name": "tumikosha",

@@ -50,18 +50,49 @@ done < <(env | grep '^CLAUDE' | sort || true)
 # Triggered by use rather than by uninstall, which is the only moment available.
 STATE="$HOME/.claude/dunders-cc/installed.json"
 if [[ -f "$STATE" ]]; then
-  root="$(STATE_FILE="$STATE" python3 -c \
-    'import json,os;print(json.load(open(os.environ["STATE_FILE"])).get("plugin_root",""))' \
-    2>/dev/null || true)"
-  if [[ -n "$root" && ! -d "$root" ]]; then
-    diag "  plugin root gone ($root) -> self-removing"
-    STATE_FILE="$STATE" python3 - <<'PY' 2>>"$LOG" || true
-import json, os, pathlib, shutil
+  # Exits 0 when it decided the plugin is gone AND finished tidying up.
+  if STATE_FILE="$STATE" python3 - <<'PY' 2>>"$LOG"
+import json, os, pathlib, shutil, sys
 
 home = pathlib.Path.home()
 settings = home / ".claude" / "settings.json"
-state = json.load(open(os.environ["STATE_FILE"]))
+try:
+    state = json.loads(pathlib.Path(os.environ["STATE_FILE"]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError, ValueError):
+    sys.exit(1)
 ours = state.get("editor", "")
+root = state.get("plugin_root", "")
+key = state.get("plugin_key", "")
+
+
+def still_installed():
+    """Is the plugin still installed?
+
+    The registry is the authority: `/plugin uninstall` drops the plugin's key
+    from it, while leaving the versioned cache directory on disk (complete
+    with its `.in_use` marker). Testing the directory therefore reads
+    "installed" long after the plugin is gone — which is precisely how an
+    uninstalled integration kept answering the keystroke.
+
+    Enablement is deliberately not consulted: a *disabled* plugin is still
+    installed, and must not trigger removal.
+    """
+    if key:
+        registry = home / ".claude" / "plugins" / "installed_plugins.json"
+        try:
+            plugins = json.loads(registry.read_text(encoding="utf-8")).get("plugins")
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+            plugins = None
+        if isinstance(plugins, dict):
+            return key in plugins
+    # No key recorded (a clone, an older install), or the registry moved or
+    # went unreadable: fall back to the install directory. Erring towards
+    # "installed" leaves a working editor, which is the safer failure.
+    return bool(root) and pathlib.Path(root).is_dir()
+
+
+if still_installed():
+    sys.exit(1)
 
 try:
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -81,7 +112,27 @@ except (OSError, json.JSONDecodeError, ValueError):
 
 for path in (home / ".claude" / "dunders-cc", home / ".claude" / "session-map"):
     shutil.rmtree(path, ignore_errors=True)
+
+# A shell profile can also export EDITOR at us — install.sh writes exactly such
+# a block, and a machine that has been through both installs has both. Nothing
+# here may edit a user's profile, so say where the keystroke still comes from
+# instead of letting it look like a failed uninstall.
+for name in (".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile"):
+    profile = home / name
+    try:
+        text = profile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        continue
+    if "dunders claude-code editor" in text or "dunders-cc/cc-edit" in text:
+        print(
+            f"cc-edit: {profile} still exports EDITOR at this wrapper; "
+            "run `bash scripts/install.sh --uninstall` from a dunders clone, "
+            "or delete that block by hand.",
+            file=sys.stderr,
+        )
 PY
+  then
+    diag "  plugin gone -> self-removed"
     # The keystroke still has to open something, even if the tidying failed.
     fallback="${CC_REAL_EDITOR:-}"
     if [[ -z "$fallback" ]] || ! command -v "$fallback" >/dev/null 2>&1; then
