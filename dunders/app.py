@@ -512,6 +512,7 @@ class DundersApp(App):
         initial_path: str | Path | None = None,
         initial_paths: list[str | Path] | None = None,
         terminal_mode: TerminalMode = "relay",
+        project_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         # Drop Textual's built-in priority ctrl+q→quit binding so the key is
@@ -526,6 +527,11 @@ class DundersApp(App):
             Path(p).expanduser() for p in (initial_paths or [])
         ]
         self.terminal_mode: TerminalMode = terminal_mode
+        # Where the panels (and so Project View's tree) start. Set from --pd;
+        # None means "derive it", which is what every non-editor launch does.
+        self.project_dir: Path | None = (
+            Path(project_dir).expanduser() if project_dir else None
+        )
         # VFS provider registry for file operations routed through transfer().
         self._vfs_registry = default_registry()
         # Plugin runtime: an event bus + the narrow PluginApi handed to each
@@ -1860,10 +1866,15 @@ class DundersApp(App):
         return self.launch_mode in ("fm", "we-mc")
 
     def _panel_cwd(self) -> Path:
+        # --pd wins outright: an editor launch resolves it to the cwd by
+        # default, so `__ FILE` shows the tree of the directory the command
+        # was run from, not of wherever the file happens to live.
+        if self.project_dir is not None:
+            return self.project_dir
         if self.initial_path is not None:
             return self.initial_path if self.initial_path.is_dir() else self.initial_path.parent
-        # Editor launches carry their files in initial_paths; seed the tree at
-        # the first file's directory so Project View opens on the right dir.
+        # Editor launches constructed without --pd (tests, embedders) still
+        # seed the tree at the first file's directory.
         if self.initial_paths:
             return self.initial_paths[0].parent
         return Path.cwd()

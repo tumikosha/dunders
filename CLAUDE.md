@@ -382,9 +382,24 @@ mounts the initial window set based on `launch_mode`
 single-file `we` (`__ FILE`) are the same launch: `_mount_cascaded_editors`
 opens a real editor (no placeholder), and `_enter_launch_project_view` —
 deferred via `call_after_refresh` like the layout, since `Desktop.size` is 0×0
-at `on_mount` — enters Project View with the tree seeded at the file's dir and
-focus left in the buffer. A multi-file `we` keeps the plain cascade
-(Project View shows one editor, which would undo it). It owns:
+at `on_mount` — enters Project View with focus left in the buffer. A
+multi-file `we` keeps the plain cascade (Project View shows one editor, which
+would undo it).
+
+The tree's root comes from `--pd`, resolved in `main._resolve_project_dir`:
+flag absent → the process **cwd**, so `__ src/deep/mod.py` run from a project
+root shows the project rather than `src/deep/`; `--pd PATH` → that path (any
+launch mode); a **bare** `--pd` (or `--pd ''`) → the edited file's own
+directory, the pre-flag behaviour. The flag is `nargs="?"`, so
+`__ --pd FILE` parses as `pd=FILE` with no positional path and the file would
+never open — `_reclaim_pd_file` hands such a value back to the positional list
+and treats the flag as bare. A `--pd` that names a file (rather than a
+directory) roots the tree at that file's directory. The result reaches the app
+as `project_dir` and short-circuits
+`_panel_cwd()`. A file-manager launch without the flag gets `None` and keeps
+seeding its panels from the positional path.
+
+`DundersApp` owns:
 
 - The single `CommandRegistry` + `CommandDispatcher` + `CommandRouter`.
 - All NC F-key actions (`action_view`/`action_edit`/`action_copy`/etc.) and

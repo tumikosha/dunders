@@ -129,9 +129,10 @@ def test_main_arg_parsing(monkeypatch, tmp_path):
     captured: dict = {}
 
     class _FakeApp:
-        def __init__(self, *, launch_mode, initial_path) -> None:
+        def __init__(self, *, launch_mode, initial_path, project_dir=None) -> None:
             captured["launch_mode"] = launch_mode
             captured["initial_path"] = initial_path
+            captured["project_dir"] = project_dir
 
         def run(self) -> None:
             captured["ran"] = True
@@ -141,7 +142,13 @@ def test_main_arg_parsing(monkeypatch, tmp_path):
     # Case 1: no args -> fm mode, no path
     monkeypatch.setattr("sys.argv", ["dunders"])
     main_mod.main()
-    assert captured == {"launch_mode": "fm", "initial_path": None, "ran": True}
+    assert captured == {
+        "launch_mode": "fm",
+        "initial_path": None,
+        # fm launches derive their cwd themselves; --pd was not given.
+        "project_dir": None,
+        "ran": True,
+    }
 
     # Case 2: directory path -> fm mode with path
     captured.clear()

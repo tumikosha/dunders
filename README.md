@@ -119,6 +119,12 @@ dunders path/to/file     # open a file in the editor
 dunders --cli            # agent / CLI mode (stub)
 ```
 
+A file argument opens the editor in Project View: the file on the right, a file
+tree on the left. The tree starts at the **current working directory**, so
+running `__ src/deep/mod.py` from a project root shows the project. `--pd`
+overrides that — `--pd PATH` roots the tree wherever you like, and a bare
+`--pd` (or `--pd ''`) roots it at the edited file's own directory.
+
 ### Short launchers
 
 Two extra console scripts are installed alongside `dunders`, differing only in
