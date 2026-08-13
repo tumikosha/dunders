@@ -249,7 +249,7 @@ class Desktop(Container):
         except Exception:
             pass
 
-    def cycle_focus(self, direction: int = 1) -> None:
+    def cycle_focus(self, direction: int = 1, *, restore_minimized: bool = False) -> None:
         # Tab between windows is suppressed while a modal is up — focus
         # must stay inside the modal. Without this guard cycle_focus would
         # hand keyboard focus to a panel underneath the dialog.
@@ -265,8 +265,16 @@ class Desktop(Container):
             self.focus_window(visible[0])
             return
         idx = visible.index(self.focused_window)
-        new_idx = (idx + direction) % len(visible)
-        self.focus_window(visible[new_idx])
+        new_idx = idx + direction
+        # Minimizing drops a window out of self.windows entirely, so a cycle
+        # over the visible set alone can never reach it again — after Ctrl+P
+        # stashed the editor, Shift+Tab just bounced between the two panels
+        # and the editor looked lost. Wrapping past either end pulls the most
+        # recently minimized window back instead.
+        if restore_minimized and self.minimized_windows and not 0 <= new_idx < len(visible):
+            self.restore_window(self.minimized_windows[-1])
+            return
+        self.focus_window(visible[new_idx % len(visible)])
 
     # --- modal gating ------------------------------------------------------
 

@@ -123,3 +123,56 @@ async def test_panels_fullscreen_reveals_hidden_panel(tmp_path):
         assert right in app.desktop.windows
         left = app.desktop.query_one("#panel-left", Window)
         assert left in app.desktop.windows
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_comes_back_to_the_editor_after_ctrl_p(tmp_path):
+    """Ctrl+P hides the editor in the tray; Shift+Tab must still reach it.
+
+    Minimizing drops a window out of `desktop.windows` altogether, so the
+    cycle used to bounce between the two panels with the editor unreachable
+    except through the Ctrl+W tray chord.
+    """
+    f = tmp_path / "a.py"
+    f.write_text("a = 1\n")
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        _focus_panel_on_file(app, "panel-left", f)
+        app.action_project_view()
+        await _settle(pilot)
+        editor = _editor_windows(app)[0]
+
+        app.action_panels_fullscreen()
+        await _settle(pilot)
+        assert editor in app.desktop.minimized_windows
+
+        # Two panels, then the editor: three windows in the cycle.
+        seen = []
+        for _ in range(3):
+            app.action_cycle_window()
+            await _settle(pilot)
+            seen.append(app.desktop.focused_window)
+
+        assert editor in seen, "the editor never came back into the cycle"
+        assert editor in app.desktop.windows
+        assert editor not in app.desktop.minimized_windows
+
+
+@pytest.mark.asyncio
+async def test_cycling_two_panels_alone_does_not_wander(tmp_path):
+    """With nothing minimized the cycle stays exactly where it was."""
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        left = app.desktop.query_one("#panel-left", Window)
+        right = app.desktop.query_one("#panel-right", Window)
+        app.desktop.focus_window(left)
+
+        app.action_cycle_window()
+        await _settle(pilot)
+        assert app.desktop.focused_window is right
+
+        app.action_cycle_window()
+        await _settle(pilot)
+        assert app.desktop.focused_window is left

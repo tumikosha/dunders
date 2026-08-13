@@ -27,6 +27,11 @@ user with their own `~/.claude/keybindings.json` may have remapped it. In the
 editor `Ctrl+G` is dunders' own Save & Quit — it skips the quit confirmation,
 which is exactly why the round trip is one keystroke.
 
+The chord closes the buffer too: **`ctrl+x ctrl+e` inside the editor saves and
+exits**, exactly like Ctrl+G. Someone whose Ctrl+G is taken can use the same
+two keys at both ends. Ctrl+X on its own still cuts (the line, when nothing is
+selected); the cut is undone if Ctrl+E follows within a second and a half.
+
 And what the buffer looks like:
 
 ```

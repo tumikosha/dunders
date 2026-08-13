@@ -32,6 +32,7 @@ from .frame import (
     render_left_char,
     render_right_char,
     render_top,
+    top_prefix_boxes,
 )
 from .palette import Palette, Style
 
@@ -56,6 +57,48 @@ Target = Literal[
     "content",
     "outside",
 ]
+
+
+# Frame buttons that light up under the pointer. Borders, the title and the
+# resize grip are draggable rather than clickable, so they stay unstyled.
+HOVERABLE_BOXES = frozenset({
+    "close_box",
+    "copy_box",
+    "copy_dir_box",
+    "copy_name_box",
+    "copy_path_box",
+    "minimize_box",
+    "zoom_box",
+})
+
+
+def _highlight_span(
+    segments: list[Segment], span: tuple[int, int]
+) -> list[Segment]:
+    """Reverse-video the given column range across a row of segments.
+
+    Reverse rather than a themed colour: every bundled theme already styles
+    the border, and swapping fg/bg reads as "pressable" against all of them
+    without adding a role each theme would have to define.
+    """
+    start, end = span
+    out: list[Segment] = []
+    x = 0
+    for seg in segments:
+        text = seg.text
+        style = seg.style or RichStyle()
+        while text:
+            if x >= end or x + len(text) <= start:
+                cut = len(text)                      # wholly outside
+            elif x < start:
+                cut = start - x                      # up to the span
+            else:
+                cut = min(end - x, len(text))        # inside the span
+            piece, text = text[:cut], text[cut:]
+            inside = start <= x < end
+            out.append(Segment(piece, style + RichStyle(reverse=True) if inside else style))
+            x += cut
+    return out
 
 
 @dataclass
@@ -106,6 +149,18 @@ class Window(Container):
             self.window = window
             super().__init__()
 
+    class CopyPartRequested(Message):
+        """One of the editor title bar's [D]/[N]/[P] buttons was clicked.
+
+        ``part`` is "dir", "name" or "path"; the host decides what those mean
+        for the content it put in the window.
+        """
+
+        def __init__(self, window: "Window", part: str) -> None:
+            self.window = window
+            self.part = part
+            super().__init__()
+
     class FocusRequested(Message):
         def __init__(self, window: "Window") -> None:
             self.window = window
@@ -137,6 +192,9 @@ class Window(Container):
         self._palette: Palette | None = palette
         self._saved_rect: tuple[Offset, Size] | None = None
         self._drag: _DragState | None = None
+        # Title-bar button under the pointer, highlighted like a status-bar
+        # button so the frame's boxes read as clickable.
+        self._hover_target: str | None = None
 
         if isinstance(title, str):
             title = TitleSpec(text=title)
@@ -301,6 +359,9 @@ class Window(Container):
                 segs.append(Segment(text[idx + len(title_text):], border_style))
         else:
             segs = [Segment(text, border_style)]
+        span = self._hover_span()
+        if span is not None:
+            segs = _highlight_span(segs, span)
         return Strip(segs)
 
     def _strip_from_bottom(
@@ -372,13 +433,14 @@ class Window(Container):
             return "resize_grip" if deco.resize_grip else "corner_br"
 
         if on_top:
-            # Close box at positions [1..3] if decoration is on and left side is on.
-            if deco.close_box and sides.left and 1 <= x <= 3:
-                return "close_box"
-            if deco.copy_box and sides.left:
-                base = 4 if deco.close_box else 1
-                if base <= x <= base + 2:
-                    return "copy_box"
+            # Left-hand buttons, laid out by the same list the renderer uses so
+            # the hit boxes cannot drift from the glyphs.
+            if sides.left:
+                col = 1
+                for target, glyph in top_prefix_boxes(deco):
+                    if col <= x < col + len(glyph):
+                        return target
+                    col += len(glyph)
             if sides.right:
                 # Right-side decorations stacked from the right edge inward:
                 # zoom_box (rightmost), then minimize_box to its left.
@@ -449,6 +511,11 @@ class Window(Container):
             self.post_message(Window.CopyBoxClicked(self))
             event.stop()
             return
+        if target in ("copy_dir_box", "copy_name_box", "copy_path_box"):
+            part = target[len("copy_"):-len("_box")]
+            self.post_message(Window.CopyPartRequested(self, part))
+            event.stop()
+            return
 
         # drag / resize
         edges = self._edges_from_target(target)
@@ -498,6 +565,7 @@ class Window(Container):
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         if self._drag is None:
+            self._update_hover(event.offset)
             return
         event.stop()
         dx = event.screen_offset.x - self._drag.start_screen.x
@@ -546,6 +614,35 @@ class Window(Container):
             self.release_mouse()
             self._drag = None
             event.stop()
+
+    def _update_hover(self, local: Offset) -> None:
+        target = self.hit_test(local)
+        target = target if target in HOVERABLE_BOXES else None
+        if target != self._hover_target:
+            self._hover_target = target
+            self.refresh()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if self._hover_target is not None:
+            self._hover_target = None
+            self.refresh()
+
+    def _hover_span(self) -> tuple[int, int] | None:
+        """Columns of the hovered button, asked of hit_test itself.
+
+        Scanning beats recomputing the layout here: the glyph widths live in
+        one place (`top_prefix_boxes`) and hit_test already knows them, so a
+        wider button can never highlight the wrong cells.
+        """
+        if self._hover_target is None:
+            return None
+        cols = [
+            x for x in range(self.size.width)
+            if self.hit_test(Offset(x, 0)) == self._hover_target
+        ]
+        if not cols:
+            return None
+        return cols[0], cols[-1] + 1
 
     def _find_desktop(self) -> "Desktop | None":
         from .desktop import Desktop

@@ -98,11 +98,37 @@ class BorderSides:
 class Decorations:
     close_box: bool = False
     copy_box: bool = False
+    # Editor windows carry three copy buttons instead of the panel's single
+    # one: the file's directory, its name, and the two joined.
+    copy_dir_box: bool = False
+    copy_name_box: bool = False
+    copy_path_box: bool = False
     zoom_box: bool = False
     minimize_box: bool = False
     resize_grip: bool = False
     number: int | None = None
     subtitle: str | None = None
+
+
+def top_prefix_boxes(decorations: Decorations) -> list[tuple[str, str]]:
+    """The left-hand title-bar buttons, in order: ``(target, glyph)``.
+
+    One list feeds both the renderer and Window's hit testing. They used to
+    each carry their own column arithmetic, which is exactly the kind of pair
+    that drifts the moment a button is inserted in the middle.
+    """
+    boxes: list[tuple[str, str]] = []
+    if decorations.close_box:
+        boxes.append(("close_box", "[■]"))
+    if decorations.copy_box:
+        boxes.append(("copy_box", "[⧉]"))
+    if decorations.copy_dir_box:
+        boxes.append(("copy_dir_box", "[⧉D]"))
+    if decorations.copy_name_box:
+        boxes.append(("copy_name_box", "[⧉N]"))
+    if decorations.copy_path_box:
+        boxes.append(("copy_path_box", "[⧉P]"))
+    return boxes
 
 
 @dataclass
@@ -156,12 +182,8 @@ def render_top(
     if inner_width < 0:
         return (left_corner + right_corner)[:width]
 
-    # Build decoration prefix (close_box + number) and suffix (zoom_box).
-    prefix_parts: list[str] = []
-    if decorations.close_box:
-        prefix_parts.append("[■]")
-    if decorations.copy_box:
-        prefix_parts.append("[⧉]")
+    # Build decoration prefix (boxes + number) and suffix (zoom_box).
+    prefix_parts: list[str] = [glyph for _target, glyph in top_prefix_boxes(decorations)]
     if decorations.number is not None:
         prefix_parts.append(f"─ {decorations.number} ─")
     prefix = "".join(prefix_parts)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 
 from textual import events
 from textual.binding import Binding
@@ -106,6 +107,9 @@ class EditorWidget(ScrollView):
 
     show_line_numbers: reactive[bool] = reactive(True)
 
+    # How long a Ctrl+X stays eligible to become the `ctrl+x ctrl+e` chord.
+    SAVE_QUIT_CHORD_TIMEOUT = 1.5
+
     class CursorMoved(Message):
         def __init__(self, editor: "EditorWidget", row: int, col: int) -> None:
             super().__init__()
@@ -118,6 +122,16 @@ class EditorWidget(ScrollView):
             super().__init__()
             self.editor = editor
             self.modified = modified
+
+    class SaveQuitRequested(Message):
+        """`ctrl+x ctrl+e` inside the buffer — save and leave.
+
+        The host decides what "quit" means; the widget only reports the chord.
+        """
+
+        def __init__(self, editor: "EditorWidget") -> None:
+            super().__init__()
+            self.editor = editor
 
     def __init__(
         self,
@@ -145,6 +159,10 @@ class EditorWidget(ScrollView):
         self._dragging = False
         self.macro_recorder: MacroRecorder | None = None
         self.macro_skip_keys: set[str] = set()
+        # True between a Ctrl+X and the next keystroke; see
+        # _handle_save_quit_chord.
+        self._save_quit_chord_armed = False
+        self._save_quit_chord_at = 0.0
         # Set the reactive directly to match constructor argument
         self.show_line_numbers = show_line_numbers
 
@@ -951,6 +969,8 @@ class EditorWidget(ScrollView):
     def on_key(self, event: events.Key) -> None:
         if not self.has_focus:
             return
+        if self._handle_save_quit_chord(event):
+            return
         rec = self.macro_recorder
         if rec is not None and rec.is_recording and event.key not in self.macro_skip_keys:
             data = f"{event.key}|{event.character or ''}"
@@ -967,6 +987,46 @@ class EditorWidget(ScrollView):
             self.buffer.insert_char(event.character)
             self._post_buffer_update()
             event.prevent_default()
+
+    def _handle_save_quit_chord(self, event: events.Key) -> bool:
+        """`ctrl+x ctrl+e` — the same chord that opened this buffer closes it.
+
+        Claude Code's external-editor action is `ctrl+x ctrl+e`, and the Ctrl+G
+        that normally saves and quits is remapped on plenty of machines, so the
+        chord has to work here too.
+
+        Ctrl+X cannot simply become a prefix: with nothing selected it cuts the
+        current line, and swallowing it would break that. So the cut happens as
+        always and is *undone* when Ctrl+E follows immediately — the buffer has
+        an undo stack precisely for this. Any other key ends the chord and is
+        handled normally.
+
+        "Immediately" is also literal: the arming expires after
+        SAVE_QUIT_CHORD_TIMEOUT seconds, so a Ctrl+X to cut a line and a Ctrl+E
+        minutes later are two unrelated keystrokes rather than a chord that
+        quits the app and resurrects the cut line.
+
+        Returns True when the event was consumed.
+        """
+        if self._save_quit_chord_armed:
+            expired = (
+                monotonic() - self._save_quit_chord_at > self.SAVE_QUIT_CHORD_TIMEOUT
+            )
+            self._save_quit_chord_armed = False
+            if event.key == "ctrl+e" and not expired:
+                # Put back the line Ctrl+X just took.
+                if self.buffer.undo():
+                    self._post_buffer_update()
+                self.post_message(self.SaveQuitRequested(self))
+                event.prevent_default()
+                event.stop()
+                return True
+            return False
+        if event.key == "ctrl+x":
+            # Arm without consuming: the Cut binding still runs after this.
+            self._save_quit_chord_armed = True
+            self._save_quit_chord_at = monotonic()
+        return False
 
     def _rendered_row_to_buffer_row(self, rendered_row: int) -> int:
         if self._line_map and 0 <= rendered_row < len(self._line_map):

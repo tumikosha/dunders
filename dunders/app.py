@@ -187,6 +187,29 @@ class _FocusableEditorContent(EditorContent):
 from dunders.windowing.helpers import ModalWindow  # noqa: E402
 
 
+def _copy_part(raw: str, part: str) -> str | None:
+    """Split a buffer's file_path into the piece a title-bar button copies.
+
+    `part` is "dir", "name" or "path"; anything else returns None.
+
+    Local paths are absolutised first: `__ CLAUDE.md` stores exactly that
+    relative string, so the directory came out as "." and the "full path" as
+    the bare name — neither of which is pasteable anywhere. A VFS locator
+    (`sftp://host/a/b.txt`, `zip:///arch.zip!/inner/x.py`) is left alone and
+    split on "/" instead, since it is not a filesystem path at all.
+    """
+    if part not in ("dir", "name", "path"):
+        return None
+    if "://" in raw:
+        head, _, tail = raw.rpartition("/")
+        return {"dir": head or raw, "name": tail or raw, "path": raw}[part]
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = Path(os.path.normpath(str(path)))
+    return {"dir": str(path.parent), "name": path.name, "path": str(path)}[part]
+
+
 def _table_stem(name: str) -> str:
     """A DB table name from a file/segment name — drop a trailing
     ``.jsonl``/``.json`` so ``pages2.jsonl`` -> ``pages2``."""
@@ -3533,6 +3556,19 @@ class DundersApp(App):
             return
         self.exit()
 
+    def on_editor_widget_save_quit_requested(self, message) -> None:
+        """`ctrl+x ctrl+e` in the buffer does what Ctrl+G does.
+
+        Same chord Claude Code uses to open the editor, and the one to reach
+        for when Ctrl+G is remapped — which it is on plenty of machines.
+        """
+        editor = None
+        for node in message.editor.ancestors_with_self:
+            if isinstance(node, EditorContent):
+                editor = node
+                break
+        self.action_save_and_quit(editor)
+
     def action_set_language(self, editor: "EditorContent") -> None:
         if self.desktop is None:
             return
@@ -4008,7 +4044,12 @@ class DundersApp(App):
             position=position,
             size=size,
             decorations=Decorations(
-                close_box=True, zoom_box=True, minimize_box=True, resize_grip=True
+                close_box=True, zoom_box=True, minimize_box=True, resize_grip=True,
+                # [D]/[N]/[P] — directory, file name, both joined. Only for a
+                # buffer that has a path; an untitled one has nothing to copy.
+                copy_dir_box=bool(file_path),
+                copy_name_box=bool(file_path),
+                copy_path_box=bool(file_path),
             ),
             id=win_id,
         )
@@ -5357,7 +5398,10 @@ class DundersApp(App):
             else:
                 self._focus_panel("panel-left")
             return
-        self.desktop.cycle_focus(+1)
+        # restore_minimized: Ctrl+P stashes the editor in the tray, and without
+        # this the cycle would loop between the two panels forever with no way
+        # back to the buffer short of Ctrl+W.
+        self.desktop.cycle_focus(+1, restore_minimized=True)
 
     @staticmethod
     def _focused_inside_search_panel(focused) -> bool:
@@ -5407,6 +5451,29 @@ class DundersApp(App):
         # System clipboard (pbcopy/xclip) + OSC 52 fallback for SSH.
         clipboard.copy(path, app=self)
         self.notify(f"copied {path}")
+
+    def on_window_copy_part_requested(self, event) -> None:
+        """[D]/[N]/[P] in an editor title bar: directory, name, or both.
+
+        The path comes off the buffer rather than the window title — the title
+        is only the file name, and Save As changes what the buffer points at.
+        """
+        content = getattr(event.window, "content", None)
+        if not isinstance(content, EditorContent):
+            return
+        raw = getattr(content._editor.buffer, "file_path", None) or getattr(
+            content, "_file_path", None
+        )
+        if not raw:
+            self.notify("Buffer has no file yet", severity="warning")
+            return
+        text = _copy_part(str(raw), event.part)
+        if text is None:
+            return
+        if not text:
+            return
+        clipboard.copy(text, app=self)
+        self.notify(f"copied {text}")
 
     def action_insert_current_file(self) -> None:
         """Ctrl+N: insert the active panel's current entry into the command

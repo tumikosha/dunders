@@ -84,3 +84,67 @@ async def test_ctrl_g_is_registered_as_an_editor_command(tmp_path):
         assert "save_quit" in {
             getattr(item, "command_id", None) for item in editor_menu.items
         }
+
+
+# ---------------------------------------------------------------------------
+# ctrl+x ctrl+e — the same chord that opened the buffer
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ctrl_x_ctrl_e_saves_and_exits(tmp_path, monkeypatch):
+    """Ctrl+G is remapped on plenty of machines; the opening chord must work."""
+    target = tmp_path / "prompt.md"
+    target.write_text("hello", encoding="utf-8")
+    app = DundersApp(launch_mode="we", initial_paths=[target])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        exits: list[bool] = []
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(True))
+        await pilot.press("!")
+        await pilot.pause()
+        await pilot.press("ctrl+x")
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert exits == [True]
+        assert "!" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_chord_puts_back_the_line_ctrl_x_cut(tmp_path, monkeypatch):
+    """Ctrl+X with no selection cuts the line — the chord must undo that."""
+    target = tmp_path / "prompt.md"
+    target.write_text("first line\nsecond line\n", encoding="utf-8")
+    app = DundersApp(launch_mode="we", initial_paths=[target])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "exit", lambda *a, **k: None)
+        await pilot.press("ctrl+x")
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert target.read_text(encoding="utf-8").startswith("first line")
+
+
+@pytest.mark.asyncio
+async def test_ctrl_x_alone_still_cuts(tmp_path, monkeypatch):
+    """Only the immediate Ctrl+E cancels the cut; anything else keeps it."""
+    target = tmp_path / "prompt.md"
+    target.write_text("first line\nsecond line\n", encoding="utf-8")
+    app = DundersApp(launch_mode="we", initial_paths=[target])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        exits: list[bool] = []
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(True))
+        await pilot.press("ctrl+x")
+        await pilot.pause()
+        assert exits == []
+        editor = _focused_editor(app)
+        assert "first line" not in editor._editor.buffer.lines
+        # A Ctrl+E that arrives *later* is not part of the chord: the arming
+        # expires, so it neither quits nor resurrects the cut line.
+        editor._editor._save_quit_chord_at -= (
+            editor._editor.SAVE_QUIT_CHORD_TIMEOUT + 1
+        )
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert exits == []
+        assert "first line" not in editor._editor.buffer.lines

@@ -418,6 +418,12 @@ seeding its panels from the positional path.
   the one key that gets from an editor launched as `__ FILE` back to the two
   panels, so don't rebind it — and note the command palette is Ctrl+K, not
   Ctrl+P (`app.py:451` disables Textual's palette to keep Ctrl+P free).
+  Because `Desktop.minimize_window` *removes* the window from `desktop.windows`
+  (it lives in `minimized_windows` until restored), a plain cycle over the
+  visible set could never reach the stashed editor again — Shift+Tab just
+  bounced between the two panels. `action_cycle_window` therefore passes
+  `restore_minimized=True`, and `cycle_focus` pulls the most recently
+  minimized window back when the cycle would wrap past either end.
 - Focus restoration — `_pre_menu_focus`/`_pre_menu_window`/
   `_pre_modal_panel_id` are saved before activating the menu or a modal
   dialog so the dismiss path lands focus back on the right widget.
@@ -466,6 +472,27 @@ seeding its panels from the positional path.
   still-dirty buffer (unnamed, or a failed write) warns and does NOT exit,
   since quitting would silently drop the text. Only the focused editor is
   saved.
+- **`ctrl+x ctrl+e` does the same, as a chord.** Ctrl+G is remapped on plenty
+  of machines, so the chord that *opens* the editor also closes it.
+  `EditorWidget._handle_save_quit_chord` implements it in `on_key`, and
+  `app.on_editor_widget_save_quit_requested` turns the resulting
+  `EditorWidget.SaveQuitRequested` into `action_save_and_quit`. Ctrl+X cannot
+  simply be a prefix — with nothing selected it cuts the current line
+  (`TextBuffer.cut_selection` falls back to `delete_line`) — so the cut runs
+  as always and is undone via the buffer's undo stack when Ctrl+E follows.
+  The arming expires after `SAVE_QUIT_CHORD_TIMEOUT` (1.5 s): without that, a
+  Ctrl+X to cut a line and an unrelated Ctrl+E minutes later would quit the
+  app *and* resurrect the line.
+- **Title-bar buttons come from one list.** `frame.top_prefix_boxes(deco)`
+  returns the left-hand buttons as `(target, glyph)` pairs; `render_top` draws
+  from it and `Window.hit_test` walks it for the column ranges. They used to
+  carry separate arithmetic (`1 <= x <= 3`, `base = 4 if close_box else 1`),
+  which is the same drift-prone pairing as the editor F-keys and the status
+  bar. Editor windows with a file add `[⧉D]`/`[⧉N]`/`[⧉P]` — directory, file
+  name, full path — each posting `Window.CopyPartRequested(window, part)`,
+  handled by `app.on_window_copy_part_requested`, which reads the path off
+  `buffer.file_path` (not the window title, which is only the name and would
+  go stale after Save As). An untitled buffer gets no buttons.
 - **Modal gating.** Almost every `action_*` calls `_has_active_modal()` first
   and bails so dialogs keep keyboard focus. New actions must do the same.
 - **Worker threads must marshal back to the UI thread** via
