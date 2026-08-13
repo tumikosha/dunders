@@ -64,6 +64,13 @@ ours = state.get("editor", "")
 root = state.get("plugin_root", "")
 key = state.get("plugin_key", "")
 
+# Self-removal is strictly the plugin's story: it exists because Claude Code
+# has no plugin-removal hook. A `dunders --setup-claude` install has no plugin
+# to disappear, and without this guard its empty plugin_root read as "gone" —
+# the first keystroke after installing deleted the whole integration.
+if state.get("managed_by") != "plugin":
+    sys.exit(1)
+
 
 def still_installed():
     """Is the plugin still installed?

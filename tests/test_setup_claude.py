@@ -152,3 +152,30 @@ def test_the_cli_flags_reach_the_functions(monkeypatch, home):
         main_mod.main()
 
     assert calls == ["setup", "remove"]
+
+
+def test_the_wrapper_does_not_self_remove_a_uv_managed_install(home, tmp_path):
+    """0.2.0 shipped with this broken: one keystroke wiped the integration.
+
+    cc-edit's self-removal exists for `/plugin uninstall`, which leaves no
+    hook behind to clean up. It keyed off `plugin_root`, and a
+    `--setup-claude` install has none — so an empty value read as "the plugin
+    is gone" and the first ctrl+x ctrl+e deleted everything just installed.
+    """
+    import os
+    import subprocess
+
+    setup_claude(home)
+    buf = tmp_path / "claude-prompt.md"
+    buf.write_text("typed text\n")
+
+    result = subprocess.run(
+        ["bash", str(home / ".claude/dunders-cc/cc-edit"), str(buf)],
+        env={**os.environ, "HOME": str(home), "CC_REAL_EDITOR": "/usr/bin/true"},
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert (home / ".claude/dunders-cc/cc-edit").is_file()
+    assert settings_of(home)["env"]["EDITOR"].endswith("dunders-cc/cc-edit")
+    assert buf.read_text().rstrip("\n") == "typed text"

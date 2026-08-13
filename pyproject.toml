@@ -1,6 +1,6 @@
 [project]
 name = "dunders"
-version = "0.1.0"
+version = "0.2.1"
 description = "dunders — fill in the blank: an open-source terminal platform on Textual where everything is a panel. We ship the underscores; you write what goes between them — a dual-pane EVERYTHING manager: files, editor, LLM-agent CLI, and whatever you plug in."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -91,7 +91,7 @@ __ = "dunders.main:main_we"
 __w = "dunders.main:main_wew"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling<1.32"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -111,6 +111,11 @@ packages = ["dunders"]
 [tool.hatch.build.targets.sdist]
 include = [
     "dunders/**",
+    # The wheel's force-include reads these from the source tree, so a wheel
+    # built out of the sdist (pip --no-binary, a distro packager) needs them
+    # present — otherwise `dunders --setup-claude` ships with nothing to copy.
+    "skills/setup/scripts/cc-edit",
+    "skills/setup/scripts/cc-session-map",
     "README.md",
     "LICENSE",
     "pyproject.toml",

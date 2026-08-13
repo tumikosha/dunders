@@ -33,9 +33,9 @@ into an isolated environment — no system Python needed.
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git" && dunders --setup-claude
 ```
-
-Then start a new `claude` session and press **Ctrl+G**: your prompt opens in
-`__` with the session transcript below a sentinel line, and Ctrl+G again sends
+Run `__` in console. 
+Or start a new `claude` session and press **Ctrl-X + Ctrl-E** or **Ctrl-G**: your prompt opens in
+`__` with the session transcript below a sentinel line, and  **Ctrl-X + Ctrl-E** or **Ctrl-G** again sends
 back only what you typed. (`ctrl+x ctrl+e` is the same action, and works at
 both ends too.) The setup step writes nothing outside `~/.claude` — no shell
 profile, no plugin — and `dunders --remove-claude` undoes exactly what it
