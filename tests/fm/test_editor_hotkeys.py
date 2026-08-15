@@ -160,3 +160,56 @@ async def test_fold_toggle_is_in_the_editor_menu(tmp_path):
         editor_menu = next(m for m in app._all_menus if m.label == "Editor")
         cmd_ids = {getattr(item, "command_id", None) for item in editor_menu.items}
         assert {"fold_toggle", "fold_all", "unfold_all"} <= cmd_ids
+
+
+@pytest.mark.asyncio
+async def test_tab_indents_the_selected_block_in_the_full_app(tmp_path):
+    """The App's priority Tab must hand the key to the editor, not switch panels."""
+    target = tmp_path / "a.py"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    app = DundersApp(launch_mode="editor", initial_path=str(target))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        editor = app.desktop.focused_window.content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 0
+        await pilot.press("shift+down", "shift+end", "tab")
+        await pilot.pause()
+        assert editor.buffer.lines[:3] == ["    alpha", "    beta", "gamma"]
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_unindents_the_selected_block_in_the_full_app(tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("        alpha\n        beta\ngamma\n", encoding="utf-8")
+    app = DundersApp(launch_mode="editor", initial_path=str(target))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        editor = app.desktop.focused_window.content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 0
+        await pilot.press("shift+down", "shift+end", "shift+tab")
+        await pilot.pause()
+        assert editor.buffer.lines[:3] == ["    alpha", "    beta", "gamma"]
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_without_a_selection_still_cycles_windows(tmp_path):
+    """Unindent must not steal the window cycler when nothing is selected."""
+    target = tmp_path / "a.py"
+    target.write_text("    alpha\n", encoding="utf-8")
+    app = DundersApp(launch_mode="editor", initial_path=str(target))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        window = app.desktop.focused_window
+        editor = window.content._editor
+        editor.focus()
+        await pilot.pause()
+        cycled = []
+        app.desktop.cycle_focus = lambda *a, **k: cycled.append((a, k))
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["    alpha", ""]
+        assert cycled, "Shift+Tab did not reach the window cycler"

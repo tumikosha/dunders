@@ -66,6 +66,10 @@ class EditorWidget(ScrollView):
         Binding("backspace", "backspace", "Backspace", show=False),
         Binding("delete", "delete_forward", "Delete", show=False),
         Binding("tab", "insert_tab", "Tab", show=False),
+        # Block unindent. In the full app the App's priority Shift+Tab gets the
+        # key first and forwards it here only when something is selected (see
+        # DundersApp.action_cycle_window); this binding is the standalone path.
+        Binding("shift+tab", "unindent_tab", "Unindent", show=False),
         Binding("ctrl+right", "word_right", "Word Right", show=False),
         Binding("ctrl+left", "word_left", "Word Left", show=False),
         Binding("alt+right", "word_right", "Word Right", show=False),
@@ -109,6 +113,9 @@ class EditorWidget(ScrollView):
 
     # How long a Ctrl+X stays eligible to become the `ctrl+x ctrl+e` chord.
     SAVE_QUIT_CHORD_TIMEOUT = 1.5
+
+    # Width of one Tab stop, in spaces (the editor never inserts a raw \t).
+    TAB_SIZE = 4
 
     class CursorMoved(Message):
         def __init__(self, editor: "EditorWidget", row: int, col: int) -> None:
@@ -676,12 +683,12 @@ class EditorWidget(ScrollView):
         except NoActiveAppError:
             pass
 
-    def _post_buffer_update(self) -> None:
+    def _post_buffer_update(self, keep_selection: bool = False) -> None:
         self._rescan_folds()
         self._refresh_render()
         self._schedule_syntax()
         self.post_message(self.BufferModified(self, self.buffer.modified))
-        self._post_cursor_update()
+        self._post_cursor_update(keep_selection=keep_selection)
 
     def _start_or_extend_selection(self) -> None:
         if not self.buffer.has_selection:
@@ -871,9 +878,29 @@ class EditorWidget(ScrollView):
         self._post_cursor_update()
 
     def action_insert_tab(self) -> None:
-        spaces = 4 - (self.buffer.cursor_col % 4)
+        if self.buffer.has_selection:
+            # Block indent. Collapsed folds inside the selection are pulled in
+            # first so their hidden lines shift with the rest of the block.
+            self._delete_collapsed_in_selection()
+            self.buffer.indent_selection(" " * self.TAB_SIZE)
+            self._post_buffer_update(keep_selection=True)
+            return
+        spaces = self.TAB_SIZE - (self.buffer.cursor_col % self.TAB_SIZE)
         self.buffer.insert_char(" " * spaces)
         self._post_buffer_update()
+
+    def action_unindent_tab(self) -> bool:
+        """Shift+Tab: pull the selected block back one Tab stop.
+
+        Returns False when there is nothing selected, so the app-level
+        Shift+Tab can fall through to cycling windows.
+        """
+        if not self.buffer.has_selection:
+            return False
+        self._delete_collapsed_in_selection()
+        self.buffer.unindent_selection(self.TAB_SIZE)
+        self._post_buffer_update(keep_selection=True)
+        return True
 
     def action_newline(self) -> None:
         if self.buffer.has_selection:

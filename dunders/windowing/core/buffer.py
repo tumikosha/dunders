@@ -273,6 +273,87 @@ class TextBuffer:
         self._clipboard = self.current_line
         return self._clipboard
 
+    def indent_selection(self, indent: str = "    ") -> bool:
+        """Insert `indent` at the start of every line the selection touches.
+
+        The block Tab of every NC-era editor. A selection ending in column 0
+        does not touch that last line (the cursor is sitting *before* it), so
+        it is left alone — otherwise dragging one line down would indent two.
+
+        Anchors and the cursor shift right by the inserted width so the same
+        text stays selected and Tab can be pressed repeatedly. An anchor that
+        sat in column 0 stays there, so a whole-line selection keeps covering
+        the whole line — including the indent just inserted.
+        """
+        span = self._selected_line_span()
+        if span is None or not indent:
+            return False
+        sr, er = span
+        self._save_undo()
+        width = len(indent)
+        for row in range(sr, er + 1):
+            self.lines[row] = indent + self.lines[row]
+        if self.sel_start_row is not None and sr <= self.sel_start_row <= er:
+            if self.sel_start_col:
+                self.sel_start_col += width
+        if self.sel_end_row is not None and sr <= self.sel_end_row <= er:
+            if self.sel_end_col:
+                self.sel_end_col += width
+        if sr <= self.cursor_row <= er and self.cursor_col:
+            self.cursor_col += width
+        self.modified = True
+        return True
+
+    def _selected_line_span(self) -> tuple[int, int] | None:
+        """Rows the selection touches, in document order (or None)."""
+        rng = self.selection_range()
+        if not rng:
+            return None
+        (sr, _sc), (er, ec) = rng
+        if er > sr and ec == 0:
+            er -= 1
+        return sr, er
+
+    def unindent_selection(self, width: int = 4) -> bool:
+        """Strip up to `width` columns of leading indent off each touched line.
+
+        The mirror of `indent_selection`. A leading tab counts as one whole
+        stop, so a tab-indented file unindents in one press rather than
+        shrinking column by column. Lines with no indent are simply left as
+        they are — a block whose first line is flush left still unindents the
+        rest, instead of the whole press doing nothing.
+
+        Anchors and the cursor move left by however much *their own* line lost,
+        which is not one shared number: lines can carry different indents.
+        """
+        span = self._selected_line_span()
+        if span is None or width <= 0:
+            return False
+        sr, er = span
+        removed: dict[int, int] = {}
+        for row in range(sr, er + 1):
+            line = self.lines[row]
+            if line.startswith("\t"):
+                cut = 1
+            else:
+                cut = len(line) - len(line.lstrip(" "))
+                cut = min(cut, width)
+            if cut:
+                removed[row] = cut
+        if not removed:
+            return False
+        self._save_undo()
+        for row, cut in removed.items():
+            self.lines[row] = self.lines[row][cut:]
+        if self.sel_start_row in removed and self.sel_start_col:
+            self.sel_start_col = max(0, self.sel_start_col - removed[self.sel_start_row])
+        if self.sel_end_row in removed and self.sel_end_col:
+            self.sel_end_col = max(0, self.sel_end_col - removed[self.sel_end_row])
+        if self.cursor_row in removed and self.cursor_col:
+            self.cursor_col = max(0, self.cursor_col - removed[self.cursor_row])
+        self.modified = True
+        return True
+
     def paste(self, fallback: str = "") -> None:
         system_text = _paste_from_system()
         if system_text:

@@ -5388,6 +5388,19 @@ class DundersApp(App):
             except Exception:
                 pass
             return
+        # Block unindent: with text selected in an editor, Shift+Tab is the
+        # counterpart of Tab and pulls the block back one stop. The key is an
+        # app-level priority binding, so the editor never sees it on its own —
+        # it has to be handed over here, exactly like Tab in
+        # action_focus_other_panel. Without a selection nothing is consumed and
+        # Shift+Tab stays the window cycler.
+        unindent = getattr(self.focused, "action_unindent_tab", None)
+        if callable(unindent):
+            try:
+                if unindent():
+                    return
+            except Exception:
+                pass
         # If focus is on the CommandLine input, Shift+Tab moves to the
         # active panel (mirrors Tab — both keys yield to the panel from
         # the command line, far-style).

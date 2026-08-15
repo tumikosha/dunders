@@ -245,3 +245,139 @@ async def test_bracketed_paste_inserts_text():
         editor.on_paste(events.Paste("XY"))
         await pilot.pause()
         assert editor.buffer.lines == ["aXYb"]
+
+
+@pytest.mark.asyncio
+async def test_shift_end_selects_to_the_end_of_the_line():
+    content = EditorContent(initial_text="hello world\nsecond")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 6
+        await pilot.press("shift+end")
+        await pilot.pause()
+        assert editor.buffer.get_selected_text() == "world"
+        assert editor.buffer.cursor_col == len("hello world")
+
+
+@pytest.mark.asyncio
+async def test_shift_end_extends_an_existing_selection():
+    """Shift+End after Shift+Down keeps the anchor and stretches to line end."""
+    content = EditorContent(initial_text="alpha\nbeta gamma")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 0
+        await pilot.press("shift+down")
+        await pilot.press("shift+end")
+        await pilot.pause()
+        assert editor.buffer.selection_range() == ((0, 0), (1, len("beta gamma")))
+        assert editor.buffer.get_selected_text() == "alpha\nbeta gamma"
+
+
+@pytest.mark.asyncio
+async def test_shift_home_selects_back_to_the_line_start():
+    content = EditorContent(initial_text="hello world")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_col = 5
+        await pilot.press("shift+home")
+        await pilot.pause()
+        assert editor.buffer.get_selected_text() == "hello"
+        assert editor.buffer.cursor_col == 0
+
+
+@pytest.mark.asyncio
+async def test_tab_indents_every_selected_line():
+    content = EditorContent(initial_text="alpha\nbeta\ngamma")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 0
+        await pilot.press("shift+down", "shift+end")   # alpha + beta
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["    alpha", "    beta", "gamma"]
+        # The same text stays selected, so Tab can be pressed again.
+        assert editor.buffer.get_selected_text() == "    alpha\n    beta"
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["        alpha", "        beta", "gamma"]
+
+
+@pytest.mark.asyncio
+async def test_tab_without_a_selection_still_inserts_spaces():
+    content = EditorContent(initial_text="ab")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_col = 2
+        await pilot.press("tab")
+        await pilot.pause()
+        # Tab stops are every TAB_SIZE columns, so from column 2 it is 2 spaces.
+        assert editor.buffer.lines == ["ab  "]
+
+
+@pytest.mark.asyncio
+async def test_block_indent_is_one_undo_step():
+    content = EditorContent(initial_text="a\nb")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("shift+down", "shift+end", "tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["    a", "    b"]
+        editor.buffer.undo()
+        assert editor.buffer.lines == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_unindents_the_selected_block():
+    content = EditorContent(initial_text="        alpha\n        beta\ngamma")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        editor.buffer.cursor_row, editor.buffer.cursor_col = 0, 0
+        await pilot.press("shift+down", "shift+end")
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["    alpha", "    beta", "gamma"]
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert editor.buffer.lines == ["alpha", "beta", "gamma"]
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_without_a_selection_is_not_consumed():
+    """No selection → the editor declines, so the app can cycle windows."""
+    content = EditorContent(initial_text="    alpha")
+    app = _EditorApp(content)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = content._editor
+        editor.focus()
+        await pilot.pause()
+        assert editor.action_unindent_tab() is False
+        assert editor.buffer.lines == ["    alpha"]

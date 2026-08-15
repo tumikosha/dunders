@@ -190,3 +190,116 @@ class TestTextBufferSave:
         assert buf.modified is False
         buf.insert_char("X")
         assert buf.modified is True
+
+
+class TestTextBufferIndentSelection:
+    def test_indents_each_touched_line(self):
+        buf = TextBuffer.from_string("a\nb\nc")
+        buf.start_selection(0, 1)
+        buf.update_selection(1, 1)
+        assert buf.indent_selection() is True
+        assert buf.lines == ["    a", "    b", "c"]
+
+    def test_a_selection_ending_in_column_zero_leaves_that_line_alone(self):
+        """Dragging one line down must not indent the line below it."""
+        buf = TextBuffer.from_string("a\nb")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 0)
+        buf.indent_selection()
+        assert buf.lines == ["    a", "b"]
+
+    def test_a_single_line_selection_indents_that_line(self):
+        buf = TextBuffer.from_string("hello world")
+        buf.start_selection(0, 6)
+        buf.update_selection(0, 11)
+        buf.indent_selection()
+        assert buf.lines == ["    hello world"]
+        # The selected word travelled with the indent.
+        assert buf.get_selected_text() == "world"
+
+    def test_a_reversed_selection_indents_the_same_lines(self):
+        buf = TextBuffer.from_string("a\nb\nc")
+        buf.start_selection(2, 1)
+        buf.update_selection(1, 1)   # dragged upward
+        buf.indent_selection()
+        assert buf.lines == ["a", "    b", "    c"]
+
+    def test_column_zero_anchors_stay_put_so_whole_lines_stay_selected(self):
+        buf = TextBuffer.from_string("a\nbb")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 2)
+        buf.indent_selection()
+        assert buf.get_selected_text() == "    a\n    bb"
+
+    def test_without_a_selection_it_does_nothing(self):
+        buf = TextBuffer.from_string("a")
+        assert buf.indent_selection() is False
+        assert buf.lines == ["a"]
+        assert buf.modified is False
+
+    def test_undo_restores_the_whole_block(self):
+        buf = TextBuffer.from_string("a\nb")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 1)
+        buf.indent_selection()
+        buf.undo()
+        assert buf.lines == ["a", "b"]
+
+
+class TestTextBufferUnindentSelection:
+    def test_strips_one_stop_off_each_touched_line(self):
+        buf = TextBuffer.from_string("        a\n        b\nc")
+        buf.start_selection(0, 8)
+        buf.update_selection(1, 8)
+        assert buf.unindent_selection() is True
+        assert buf.lines == ["    a", "    b", "c"]
+
+    def test_a_short_indent_is_removed_whole(self):
+        buf = TextBuffer.from_string("  a\n      b")
+        buf.start_selection(0, 2)
+        buf.update_selection(1, 6)
+        buf.unindent_selection()
+        assert buf.lines == ["a", "  b"]
+
+    def test_a_leading_tab_counts_as_one_stop(self):
+        buf = TextBuffer.from_string("\ta\n\t\tb")
+        buf.start_selection(0, 1)
+        buf.update_selection(1, 2)
+        buf.unindent_selection()
+        assert buf.lines == ["a", "\tb"]
+
+    def test_flush_left_lines_do_not_block_the_rest(self):
+        buf = TextBuffer.from_string("a\n    b")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 5)
+        assert buf.unindent_selection() is True
+        assert buf.lines == ["a", "b"]
+
+    def test_nothing_to_strip_leaves_the_buffer_untouched(self):
+        buf = TextBuffer.from_string("a\nb")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 1)
+        assert buf.unindent_selection() is False
+        assert buf.modified is False
+
+    def test_anchors_follow_their_own_line(self):
+        """Lines can lose different amounts, so one shared shift would drift."""
+        buf = TextBuffer.from_string("        aaa\n  bbb")
+        buf.start_selection(0, 8)   # before "aaa"
+        buf.update_selection(1, 5)  # after "bbb"
+        buf.unindent_selection()
+        assert buf.lines == ["    aaa", "bbb"]
+        assert buf.get_selected_text() == "aaa\nbbb"
+
+    def test_undo_restores_the_whole_block(self):
+        buf = TextBuffer.from_string("    a\n    b")
+        buf.start_selection(0, 0)
+        buf.update_selection(1, 5)
+        buf.unindent_selection()
+        buf.undo()
+        assert buf.lines == ["    a", "    b"]
+
+    def test_without_a_selection_it_does_nothing(self):
+        buf = TextBuffer.from_string("    a")
+        assert buf.unindent_selection() is False
+        assert buf.lines == ["    a"]

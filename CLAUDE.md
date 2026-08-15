@@ -462,6 +462,18 @@ seeding its panels from the positional path.
   Search repeats moved off F3/Shift+F3 to Ctrl+L / Ctrl+Shift+L (Turbo Vision's
   "search again"), Replace All is menu-only, and Ctrl+Backslash keeps Split
   Horizontal via `action_split_h`.
+- **Tab / Shift+Tab reach the editor only by handover.** Both are app-level
+  `priority=True` bindings (panel switch / window cycle), so a focused editor
+  never sees them through its own `BINDINGS` inside the app. `action_focus_other_panel`
+  forwards Tab to the focused widget's `action_insert_tab`, and
+  `action_cycle_window` forwards Shift+Tab to `action_unindent_tab` — which
+  returns False when nothing is selected, so Shift+Tab stays the window cycler
+  unless there is a block to unindent. With a selection, Tab indents every
+  touched line and Shift+Tab pulls it back one stop (`TextBuffer.indent_selection`
+  / `unindent_selection`; a selection ending in column 0 does not touch that
+  line, column-0 anchors stay put so whole lines stay selected, and the whole
+  block is one undo step). `EditorWidget.BINDINGS` still declares both keys —
+  that is the standalone path (demo, plain-`App` tests).
 - **Ctrl+G = save & quit, no confirmation.** `save_quit` is registered by
   `_FocusableEditorContent.get_commands()` (focus-scoped, so the hex viewer's
   own `ctrl+g`/find-next is untouched) and handled by
@@ -488,7 +500,7 @@ seeding its panels from the positional path.
   from it and `Window.hit_test` walks it for the column ranges. They used to
   carry separate arithmetic (`1 <= x <= 3`, `base = 4 if close_box else 1`),
   which is the same drift-prone pairing as the editor F-keys and the status
-  bar. Editor windows with a file add `[⧉D]`/`[⧉N]`/`[⧉P]` — directory, file
+  bar. Editor windows with a file add `[⧉ D]`/`[⧉ N]`/`[⧉ P]` — directory, file
   name, full path — each posting `Window.CopyPartRequested(window, part)`,
   handled by `app.on_window_copy_part_requested`, which reads the path off
   `buffer.file_path` (not the window title, which is only the name and would
