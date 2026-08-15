@@ -54,7 +54,7 @@ async def test_copy_box_click_copies_cwd_and_notifies(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Editor title bar: [⧉D] directory, [⧉N] file name, [⧉P] full path
+# Editor title bar: [⧉ D] directory, [⧉ N] file name, [⧉ P] full path
 # ---------------------------------------------------------------------------
 
 def _editor_window(app):
@@ -95,14 +95,14 @@ async def test_hit_test_walks_the_three_boxes(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         win = _editor_window(app)
-        # [■][⧉D][⧉N][⧉P] — three cells for close, four for each copy button.
+        # [■][⧉ D][⧉ N][⧉ P] — three cells for close, five for each copy button.
         assert win.hit_test(Offset(2, 0)) == "close_box"
         assert win.hit_test(Offset(4, 0)) == "copy_dir_box"
-        assert win.hit_test(Offset(7, 0)) == "copy_dir_box"
-        assert win.hit_test(Offset(8, 0)) == "copy_name_box"
-        assert win.hit_test(Offset(11, 0)) == "copy_name_box"
-        assert win.hit_test(Offset(12, 0)) == "copy_path_box"
-        assert win.hit_test(Offset(15, 0)) == "copy_path_box"
+        assert win.hit_test(Offset(8, 0)) == "copy_dir_box"
+        assert win.hit_test(Offset(9, 0)) == "copy_name_box"
+        assert win.hit_test(Offset(13, 0)) == "copy_name_box"
+        assert win.hit_test(Offset(14, 0)) == "copy_path_box"
+        assert win.hit_test(Offset(18, 0)) == "copy_path_box"
 
 
 @pytest.mark.asyncio
@@ -230,14 +230,14 @@ async def test_hovering_a_copy_button_highlights_exactly_it(tmp_path):
         win = _editor_window(app)
         assert _reversed_text(win) == ""          # nothing hot to begin with
 
-        win._update_hover(Offset(9, 0))           # inside [⧉N]
+        win._update_hover(Offset(9, 0))           # inside [⧉ N]
         await pilot.pause()
         assert win._hover_target == "copy_name_box"
-        assert _reversed_text(win) == "[⧉N]"
+        assert _reversed_text(win) == "[⧉ N]"
 
-        win._update_hover(Offset(13, 0))          # moved on to [⧉P]
+        win._update_hover(Offset(14, 0))          # moved on to [⧉ P]
         await pilot.pause()
-        assert _reversed_text(win) == "[⧉P]"
+        assert _reversed_text(win) == "[⧉ P]"
 
         win.on_leave(events.Leave(win))
         await pilot.pause()

@@ -122,12 +122,15 @@ def top_prefix_boxes(decorations: Decorations) -> list[tuple[str, str]]:
         boxes.append(("close_box", "[■]"))
     if decorations.copy_box:
         boxes.append(("copy_box", "[⧉]"))
+    # The space after ⧉ is not cosmetic: U+29C9 is East-Asian *ambiguous*, so
+    # plenty of Linux terminal fonts draw it double-width and it bleeds over
+    # the letter that follows. One padding cell keeps the label readable.
     if decorations.copy_dir_box:
-        boxes.append(("copy_dir_box", "[⧉D]"))
+        boxes.append(("copy_dir_box", "[⧉ D]"))
     if decorations.copy_name_box:
-        boxes.append(("copy_name_box", "[⧉N]"))
+        boxes.append(("copy_name_box", "[⧉ N]"))
     if decorations.copy_path_box:
-        boxes.append(("copy_path_box", "[⧉P]"))
+        boxes.append(("copy_path_box", "[⧉ P]"))
     return boxes
 
 
