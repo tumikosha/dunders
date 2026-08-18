@@ -931,6 +931,9 @@ class ProgressDialog(WindowContent):
         # count instead made the block teleport (count % width jumps by big,
         # irregular amounts) — "jumping like crazy".
         self._anim = 0
+        # Mouse is over [ Cancel ]: without this the button painted one fixed
+        # style and gave no feedback at all on hover, so it read as dead.
+        self._hover_cancel = False
         self.cancel_event = threading.Event()
 
     def set_progress(self, current: int, total: int) -> None:
@@ -1053,24 +1056,60 @@ class ProgressDialog(WindowContent):
         """Left column of the centred Cancel button."""
         return max(2, (width - len(self._CANCEL_LABEL)) // 2)
 
+    def _get_palette(self) -> "Palette | None":
+        try:
+            for anc in self.ancestors_with_self:
+                pal = getattr(anc, "palette", None)
+                if isinstance(pal, Palette):
+                    return pal
+        except Exception:
+            return None
+        return None
+
+    def _cancel_style(self) -> RichStyle:
+        """Reverse-video pill, brightened while the mouse is over it: the
+        theme's ``menu.item.active`` — the same hover look as a panel action
+        icon — falling back to an underline when no palette is reachable
+        (bare-host tests), since plain reverse is already the resting style."""
+        if not self._hover_cancel:
+            return RichStyle(bold=True, reverse=True)
+        pal = self._get_palette()
+        if pal is not None:
+            role = pal.get("menu.item.active")
+            if role.fg is not None or role.bg is not None:
+                return role.to_rich() + RichStyle(bold=True)
+        return RichStyle(bold=True, reverse=True, underline=True)
+
     def _render_cancel(self, width: int) -> Strip:
         start = self._cancel_x(width)
         before = " " * start
         after = " " * max(0, width - start - len(self._CANCEL_LABEL))
-        btn = RichStyle(bold=True, reverse=True)
         return Strip([
             Segment(before),
-            Segment(self._CANCEL_LABEL, btn),
+            Segment(self._CANCEL_LABEL, self._cancel_style()),
             Segment(after),
         ])
 
+    def _over_cancel(self, x: int, y: int) -> bool:
+        if y != self._cancel_y:
+            return False
+        start = self._cancel_x(self.size.width)
+        return start <= x < start + len(self._CANCEL_LABEL)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        hover = self._over_cancel(event.x, event.y)
+        if hover != self._hover_cancel:
+            self._hover_cancel = hover
+            self.refresh()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if self._hover_cancel:
+            self._hover_cancel = False
+            self.refresh()
+
     def on_click(self, event) -> None:
         """Mouse cancel: click on the centred [ Cancel ] button."""
-        if getattr(event, "y", -1) != self._cancel_y:
-            return
-        start = self._cancel_x(self.size.width)
-        x = getattr(event, "x", -1)
-        if start <= x < start + len(self._CANCEL_LABEL):
+        if self._over_cancel(getattr(event, "x", -1), getattr(event, "y", -1)):
             event.stop()
             self.action_cancel()
 
@@ -1129,6 +1168,7 @@ class FolderStatsDialog(WindowContent):
         self.window_title = "Folder statistics"
         self.cancel_event = threading.Event()
         self._done = False
+        self._hover_btn = False
         self._stats: "FolderStats | None" = None
 
     def set_stats(self, stats: "FolderStats", done: bool) -> None:
@@ -1219,6 +1259,18 @@ class FolderStatsDialog(WindowContent):
     def _btn_x(self, width: int) -> int:
         return max(2, (width - len(self._btn_label)) // 2)
 
+    def _button_style(self) -> RichStyle:
+        """Same hover contract as ``ProgressDialog``'s Cancel: reverse-video at
+        rest, ``menu.item.active`` under the mouse."""
+        if not self._hover_btn:
+            return RichStyle(bold=True, reverse=True)
+        pal = self._get_palette()
+        if pal is not None:
+            role = pal.get("menu.item.active")
+            if role.fg is not None or role.bg is not None:
+                return role.to_rich() + RichStyle(bold=True)
+        return RichStyle(bold=True, reverse=True, underline=True)
+
     def _render_button(self, width: int) -> Strip:
         label = self._btn_label
         start = self._btn_x(width)
@@ -1226,16 +1278,29 @@ class FolderStatsDialog(WindowContent):
         after = " " * max(0, width - start - len(label))
         return Strip([
             Segment(before),
-            Segment(label, RichStyle(bold=True, reverse=True)),
+            Segment(label, self._button_style()),
             Segment(after),
         ])
 
-    def on_click(self, event) -> None:
-        if getattr(event, "y", -1) != self._BTN_Y:
-            return
+    def _over_button(self, x: int, y: int) -> bool:
+        if y != self._BTN_Y:
+            return False
         start = self._btn_x(self.size.width)
-        x = getattr(event, "x", -1)
-        if start <= x < start + len(self._btn_label):
+        return start <= x < start + len(self._btn_label)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        hover = self._over_button(event.x, event.y)
+        if hover != self._hover_btn:
+            self._hover_btn = hover
+            self.refresh()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if self._hover_btn:
+            self._hover_btn = False
+            self.refresh()
+
+    def on_click(self, event) -> None:
+        if self._over_button(getattr(event, "x", -1), getattr(event, "y", -1)):
             event.stop()
             self.action_primary()
 

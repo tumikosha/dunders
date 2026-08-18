@@ -113,7 +113,7 @@ from dunders.fm.markdown_viewer import MarkdownViewerContent, looks_markdown
 from dunders.fm.doc_converter import (
     MARKITDOWN_AVAILABLE,
     ConvertError,
-    convert_to_markdown,
+    convert_to_markdown_subprocess,
     looks_office,
 )
 from dunders.fm import associations_loader
@@ -4350,9 +4350,14 @@ class DundersApp(App):
         self._mount_maximized_content(content, title=title, win_id=win_id)
 
     def _convert_office_async(self, name: str, source, fallback_factory) -> None:
-        """Convert a document to Markdown in a worker (markitdown is blocking),
-        showing a Converting… modal, then mount the Markdown viewer. On failure
-        mount ``fallback_factory()`` content (the hex viewer)."""
+        """Convert a document to Markdown, showing a Converting… modal, then
+        mount the Markdown viewer. On failure mount ``fallback_factory()``
+        content (the hex viewer).
+
+        The conversion runs in a **child process** (driven from a worker
+        thread), not just off the UI thread: markitdown is pure-Python and
+        CPU-bound, so in-thread it holds the GIL and the modal's Cancel button
+        goes dead on a big PDF. See ``convert_to_markdown_subprocess``."""
         if self.desktop is None:
             return
         self._remember_active_panel_id()
@@ -4360,11 +4365,21 @@ class DundersApp(App):
         show_modal(self.desktop, progress, title="Converting", size=(64, 9))
         self.call_after_refresh(progress.focus)
 
+        def _tick() -> None:
+            # Indeterminate bar: each call advances the marquee one step, so
+            # the modal visibly stays alive for the whole conversion.
+            self.call_from_thread(progress.set_progress, 0, 0)
+
         def _worker() -> None:
             md: str | None = None
             error: Exception | None = None
             try:
-                md = convert_to_markdown(source, name)
+                md = convert_to_markdown_subprocess(
+                    source,
+                    name,
+                    cancel_event=progress.cancel_event,
+                    on_tick=_tick,
+                )
             except ConvertError as exc:
                 error = exc
             self.call_from_thread(

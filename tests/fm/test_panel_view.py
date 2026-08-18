@@ -1,5 +1,8 @@
 from pathlib import Path
 import stat
+import unicodedata
+
+from rich.cells import cell_len
 
 from dunders.core.vfs import VfsPath
 from dunders.fm.file_entry import FileEntry
@@ -156,3 +159,52 @@ def test_name_prefix_ignores_provider_glyph():
 
 def test_default_prefix_when_no_glyph():
     assert _name_prefix(_docker_entry(extra={})) == "/"  # is_dir → "/"
+
+
+# --- terminal-cell widths (NFD / wide chars) ---------------------------------
+#
+# macOS stores filenames in NFD, so "й" is "и" + U+0306: two code points, one
+# cell. Rows padded with str.ljust came out one cell short per combining mark
+# and the column separator drifted left on exactly those rows.
+
+
+_NFD_NAME = unicodedata.normalize(
+    "NFD", "Макс Вебер - Хозяйство и общество.pdf"
+)
+
+
+def test_nfd_name_is_two_code_points_wider_than_it_is_cells():
+    """Guards the premise: without it the rest of these tests prove nothing."""
+    assert len(_NFD_NAME) == cell_len(_NFD_NAME) + 1
+
+
+def test_row_text_single_is_exactly_width_cells_for_an_nfd_name():
+    for mode in (
+        PanelViewMode.FULL,
+        PanelViewMode.SHORT,
+        PanelViewMode.DETAILED,
+        PanelViewMode.DESCRIPTION,
+    ):
+        text = pv.row_text_single(mode, _entry(_NFD_NAME), 58)
+        assert cell_len(text) == 58, mode
+
+
+def test_separator_lands_in_the_same_cell_for_nfd_and_ascii_names():
+    """The reported bug: the Name|Size border drifted left on NFD rows."""
+    def sep_cell(text: str) -> int:
+        return cell_len(text[: text.index(pv.COL_SEP)])
+
+    ascii_row = pv.row_text_single(PanelViewMode.FULL, _entry("plain.pdf"), 58)
+    nfd_row = pv.row_text_single(PanelViewMode.FULL, _entry(_NFD_NAME), 58)
+    assert sep_cell(nfd_row) == sep_cell(ascii_row)
+
+
+def test_wide_chars_do_not_overrun_the_name_column():
+    """The mirror-image failure: len() undercounts a 2-cell CJK/emoji char."""
+    wide = pv.row_text_single(PanelViewMode.FULL, _entry("日本語" * 20), 58)
+    assert cell_len(wide) == 58
+
+
+def test_format_cell_pads_an_nfd_name_to_exact_cells():
+    assert cell_len(pv.format_cell(_entry(_NFD_NAME), 20)) == 20
+    assert cell_len(pv.format_cell(_entry("ascii.txt"), 20)) == 20

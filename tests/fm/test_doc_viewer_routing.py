@@ -26,7 +26,9 @@ async def test_pdf_opens_in_markdown_viewer(tmp_path, monkeypatch):
     pdf.write_bytes(b"%PDF-1.4 fake")
     monkeypatch.setattr(app_mod, "MARKITDOWN_AVAILABLE", True)
     monkeypatch.setattr(
-        app_mod, "convert_to_markdown", lambda source, name: "# Hello\n\nfrom pdf\n"
+        app_mod,
+        "convert_to_markdown_subprocess",
+        lambda source, name, **kw: "# Hello\n\nfrom pdf\n",
     )
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
@@ -40,11 +42,11 @@ async def test_conversion_failure_falls_back_to_hex(tmp_path, monkeypatch):
     pdf = tmp_path / "doc.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
 
-    def _boom(source, name):
+    def _boom(source, name, **kw):
         raise ConvertError("nope")
 
     monkeypatch.setattr(app_mod, "MARKITDOWN_AVAILABLE", True)
-    monkeypatch.setattr(app_mod, "convert_to_markdown", _boom)
+    monkeypatch.setattr(app_mod, "convert_to_markdown_subprocess", _boom)
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         app._open_editor_window(pdf, read_only=True)
@@ -59,7 +61,9 @@ async def test_member_pdf_opens_in_markdown_viewer(tmp_path, monkeypatch):
         zf.writestr("doc.pdf", b"%PDF-1.4 fake")
     monkeypatch.setattr(app_mod, "MARKITDOWN_AVAILABLE", True)
     monkeypatch.setattr(
-        app_mod, "convert_to_markdown", lambda source, name: "# Member\n\nok\n"
+        app_mod,
+        "convert_to_markdown_subprocess",
+        lambda source, name, **kw: "# Member\n\nok\n",
     )
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:

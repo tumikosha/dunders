@@ -1,4 +1,5 @@
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
 
 from dunders.fm.dialogs import ConfirmDialog
@@ -692,3 +693,69 @@ async def test_gdrive_consent_dialog_copy_and_cancel(monkeypatch):
         await pilot.pause()
         assert ev.is_set()               # aborts the loopback wait
         assert len(cancelled) == 1       # app is told to close the modal
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_cancel_button_highlights_on_hover():
+    """The Cancel pill must visibly change under the mouse — with no hover
+    state it rendered one fixed style and read as a dead control."""
+    dlg = ProgressDialog(title="Converting big.pdf", total=0)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        y = dlg._cancel_y
+        x = dlg._cancel_x(dlg.size.width)
+        resting = dlg._cancel_style()
+
+        # Real pointer motion, not a synthetic post_message: this also proves
+        # Textual actually routes MouseMove to the dialog.
+        await pilot.hover(ProgressDialog, offset=(x + 1, y))
+        assert dlg._hover_cancel is True
+        assert dlg._cancel_style() != resting
+
+        # Off the button (same row, far left) → back to the resting style.
+        await pilot.hover(ProgressDialog, offset=(0, y))
+        assert dlg._hover_cancel is False
+        assert dlg._cancel_style() == resting
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_leave_clears_the_hover():
+    dlg = ProgressDialog(title="Converting big.pdf", total=0)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        dlg._hover_cancel = True
+        dlg.post_message(events.Leave(dlg))
+        await pilot.pause()
+        assert dlg._hover_cancel is False
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_button_highlights_on_hover():
+    """Same button, same contract as ProgressDialog's Cancel."""
+    dlg = FolderStatsDialog("some-dir")
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        resting = dlg._button_style()
+        await pilot.hover(
+            FolderStatsDialog, offset=(dlg._btn_x(dlg.size.width) + 1, dlg._BTN_Y)
+        )
+        assert dlg._hover_btn is True
+        assert dlg._button_style() != resting
+        dlg.post_message(events.Leave(dlg))
+        await pilot.pause()
+        assert dlg._hover_btn is False

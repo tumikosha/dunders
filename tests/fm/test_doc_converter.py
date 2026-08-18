@@ -1,6 +1,7 @@
 import pytest
 
 from dunders.fm.doc_converter import (
+    ConvertCancelled,
     ConvertError,
     MARKITDOWN_AVAILABLE,
     OFFICE_SUFFIXES,
@@ -99,3 +100,75 @@ def test_real_markitdown_smoke():
     # rather than raising. Document that contract with the real library.
     out = convert_to_markdown(b"%PDF-1.4 not a real pdf", "broken.pdf")
     assert isinstance(out, str) and out
+
+
+class TestSubprocessConversion:
+    """``convert_to_markdown_subprocess`` runs markitdown in a child process so
+    the GIL stays free and Cancel actually kills the work."""
+
+    def test_child_process_matches_in_process_conversion(self, tmp_path):
+        """End-to-end through a real child: same input, same Markdown. The
+        child re-imports this module, so patching the parent proves nothing."""
+        import dunders.fm.doc_converter as dc
+
+        if not dc.MARKITDOWN_AVAILABLE:
+            with pytest.raises(ConvertError):
+                dc.convert_to_markdown_subprocess(b"x", "a.pdf")
+            return
+        src = tmp_path / "a.pdf"
+        src.write_bytes(b"%PDF-1.4 not a real pdf")
+        assert dc.convert_to_markdown_subprocess(src, src.name) == (
+            dc.convert_to_markdown(src, src.name)
+        )
+
+    def test_missing_extra_raises_before_spawning(self, monkeypatch):
+        import dunders.fm.doc_converter as dc
+
+        monkeypatch.setattr(dc, "MARKITDOWN_AVAILABLE", False)
+        with pytest.raises(ConvertError):
+            dc.convert_to_markdown_subprocess(b"x", "a.pdf")
+
+    def test_cancel_kills_the_child(self, tmp_path, monkeypatch):
+        """A set cancel_event stops the wait loop promptly and raises
+        ConvertCancelled instead of blocking until markitdown finishes."""
+        import threading
+
+        import dunders.fm.doc_converter as dc
+
+        monkeypatch.setattr(dc, "MARKITDOWN_AVAILABLE", True)
+        # Stand in for markitdown: a child that just sleeps.
+        real_popen = dc.subprocess.Popen
+
+        def _slow_popen(cmd, **kwargs):
+            return real_popen(
+                [cmd[0], "-c", "import time; time.sleep(30)"], **kwargs
+            )
+
+        monkeypatch.setattr(dc.subprocess, "Popen", _slow_popen)
+        cancel = threading.Event()
+        cancel.set()
+        src = tmp_path / "a.pdf"
+        src.write_bytes(b"%PDF-1.4")
+        with pytest.raises(ConvertCancelled):
+            dc.convert_to_markdown_subprocess(src, src.name, cancel_event=cancel)
+
+    def test_on_tick_animates_while_the_child_runs(self, tmp_path, monkeypatch):
+        import dunders.fm.doc_converter as dc
+
+        monkeypatch.setattr(dc, "MARKITDOWN_AVAILABLE", True)
+        real_popen = dc.subprocess.Popen
+
+        def _brief_popen(cmd, **kwargs):
+            out = cmd[-1]
+            code = f"import pathlib; pathlib.Path({out!r}).write_text('# ok\\n')"
+            return real_popen([cmd[0], "-c", code], **kwargs)
+
+        monkeypatch.setattr(dc.subprocess, "Popen", _brief_popen)
+        ticks = []
+        src = tmp_path / "a.pdf"
+        src.write_bytes(b"%PDF-1.4")
+        out = dc.convert_to_markdown_subprocess(
+            src, src.name, on_tick=lambda: ticks.append(1), poll=0.01
+        )
+        assert out == "# ok\n"
+        assert ticks  # the modal got at least one animation step

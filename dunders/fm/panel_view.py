@@ -1,7 +1,16 @@
 """Panel view modes: layout + formatting helpers for FilePanel.
 
-Pure module — no Textual imports. FilePanel owns all Strip/segment styling
-and calls these helpers for text content, column widths, and descriptions.
+Pure module — no Textual imports (``rich.cells`` only, for terminal-cell
+widths). FilePanel owns all Strip/segment styling and calls these helpers for
+text content, column widths, and descriptions.
+
+**Widths are measured in terminal CELLS, never in code points.** macOS stores
+filenames in NFD, so a Cyrillic "й" arrives as "и" + U+0306: two code points,
+one cell. Padding such a name with ``str.ljust`` produced a row one cell SHORT
+per combining mark and the column separator drifted left on exactly those rows.
+The mirror-image failure is a wide char (CJK, emoji), which ``len`` undercounts
+and which used to overrun the column. ``cell_len``/``set_cell_size`` get both
+right.
 
 Far-Manager-style modes:
   BRIEF       names only, 2 columns
@@ -15,6 +24,8 @@ from __future__ import annotations
 
 import stat
 from enum import Enum
+
+from rich.cells import cell_len, set_cell_size
 
 from dunders.fm.file_entry import (
     FileEntry,
@@ -153,16 +164,16 @@ def column_width(width: int, k: int) -> int:
 
 def _fit_name(name: str, field: int) -> str:
     """Truncate `name` to fit a `field`-wide cell that also holds a 1-char
-    prefix; appends '…' when cut. Mirrors the historical FilePanel logic."""
-    if len(name) > field - 1:
-        name = name[: max(0, field - 2)] + "…"
+    prefix; appends '…' when cut. Measured in cells, not code points."""
+    if cell_len(name) > field - 1:
+        name = set_cell_size(name, max(0, field - 2)) + "…"
     return name
 
 
 def format_cell(entry: FileEntry, col_w: int) -> str:
-    """Names-only cell (prefix + truncated name) padded to `col_w`."""
+    """Names-only cell (prefix + truncated name) padded to `col_w` cells."""
     name = _fit_name(entry.name, col_w)
-    return (_name_prefix(entry) + name).ljust(col_w)[:col_w]
+    return set_cell_size(_name_prefix(entry) + name, col_w)
 
 
 def row_text_single(mode: PanelViewMode, entry: FileEntry, width: int) -> str:
@@ -173,7 +184,7 @@ def row_text_single(mode: PanelViewMode, entry: FileEntry, width: int) -> str:
     """
     ncol = name_col_width(mode, width)
     name = _fit_name(entry.name, ncol)
-    name_field = (_name_prefix(entry) + name).ljust(ncol)
+    name_field = set_cell_size(_name_prefix(entry) + name, ncol)
 
     if mode is PanelViewMode.DETAILED:
         size = _size_text(entry).rjust(_SIZE_COL)
@@ -182,8 +193,8 @@ def row_text_single(mode: PanelViewMode, entry: FileEntry, width: int) -> str:
         text = f"{name_field}{COL_SEP}{size}{COL_SEP}{date}{COL_SEP}{attr}"
     elif mode is PanelViewMode.DESCRIPTION:
         desc_col = max(1, width - ncol - _GUTTER)
-        desc = describe_entry(entry)[:desc_col]
-        text = f"{name_field}{COL_SEP}{desc.ljust(desc_col)}"
+        desc = set_cell_size(describe_entry(entry), desc_col)
+        text = f"{name_field}{COL_SEP}{desc}"
     elif mode is PanelViewMode.SHORT:
         size = _size_text(entry).rjust(_SIZE_COL)
         text = f"{name_field}{COL_SEP}{size}"
@@ -192,7 +203,7 @@ def row_text_single(mode: PanelViewMode, entry: FileEntry, width: int) -> str:
         date = format_mtime(entry.mtime).ljust(_DATE_COL)
         text = f"{name_field}{COL_SEP}{size}{COL_SEP}{date}"
 
-    return text[:width].ljust(width)
+    return set_cell_size(text, width)
 
 
 def empty_row_text(mode: PanelViewMode, width: int) -> str:

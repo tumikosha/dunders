@@ -1552,11 +1552,13 @@ class FilePanel(WindowContent):
         is_cursor = idx == self.cursor
         is_selected = entry.loc in self.selection
 
-        from dunders.fm.panel_view import name_col_width, row_text_single
+        from dunders.fm.panel_view import _fit_name, name_col_width, row_text_single
         name_col = name_col_width(self.view_mode, width)
-        name = entry.name
-        if len(name) > name_col - 1:
-            name = name[: name_col - 2] + "…"
+        # Same truncation as the row text itself — call the shared helper rather
+        # than re-deriving it, so the quick-search highlighter can never align
+        # against a differently-cut name (and so both count CELLS, not code
+        # points: an NFD "й" is two code points wide but one cell).
+        name = _fit_name(entry.name, name_col)
         text = row_text_single(self.view_mode, entry, width)
 
         style = self._row_style(
