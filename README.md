@@ -1,25 +1,56 @@
 # dunders
 
-> **We ship the underscores. You write what goes between them.**
+**A Norton Commander–style file manager and editor for the terminal — and the
+prompt editor Claude Code is missing.**
 
-An open-source **terminal platform** built on
-[Textual](https://textual.textualize.io/), where _everything is a panel_. At its
-core it's a Norton Commander–style dual-pane manager with an embedded text
-editor and an LLM-agent CLI — but the bigger idea is the blank between the
-underscores: the core ships `__`, and you fill in the rest.
-
-Two panels aren't really about files. They're about any two sets of objects you
-can copy between — folders, archives, remote/cloud filesystems, containers,
-databases, API responses. `dunders` brings back the dual-pane workflow of `mc` /
-Far Manager — with a real windowing layer (Turbo Vision–inspired), code folding,
-recordable macros, a command palette, and an embedded LLM/agent CLI mode — and
-makes that surface extensible.
-
-The CLI command is **`__`** or **`dunders`** ; the `__` is the platform's blank,
-waiting to be filled.
+[![PyPI](https://img.shields.io/pypi/v/dunders.svg)](https://pypi.org/project/dunders/)
+[![Python](https://img.shields.io/pypi/pyversions/dunders.svg)](https://pypi.org/project/dunders/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > Status: **alpha**. Core file-manager and editor are usable; agent/CLI
 > mode is a stub.
+
+## Write your Claude Code prompts with the conversation in front of you
+
+<p align="center">
+  <img src="docs/assets/cc-edit-demo.svg" width="100%"
+       alt="In Claude Code, ctrl+x ctrl+e opens the prompt in __ — Project View on the left, the buffer on the right with the session transcript below a sentinel line — and the finished prompt is sent back without it.">
+</p>
+
+Press **Ctrl-X Ctrl-E** (or **Ctrl-G**) in any `claude` session and the prompt
+you were typing opens in `__` — the project tree on the left, your prompt at the
+top of the buffer, that session's transcript underneath a sentinel line. Scroll
+back through what was actually said, finish the prompt with the details you came
+looking for, and press **the same chord again**: everything from the sentinel
+down is discarded and Claude gets only what you typed.
+
+It is a real editor, so the prompt is not stuck on one line — press Enter and
+keep writing. Multi-line prompts, block indent, search and replace, folding and
+macros all work on the way to a better question.
+
+One command wires it up (`dunders --setup-claude`), it writes nothing outside
+`~/.claude`, and `dunders --remove-claude` undoes exactly what it wrote.
+
+
+## Everything is a panel
+
+<p align="center">
+  <img src="docs/assets/db-copy-demo.svg" width="100%"
+       alt="Two panels: the left one inside export-2026-08.zip, the right one a SQLite database. F5 copies customers.jsonl from the archive into a new table; the table then lists its records as .json files, and F3 opens the SQL console with SELECT * ready to run.">
+</p>
+
+Two panels aren't about files — they're about any two sets of objects you can
+copy between. Above, the left panel is **inside a `.zip`** and the right one is
+a **SQLite database**, where tables are directories and records are files.
+**F5** — the same copy key you would use for two folders — streams
+`customers.jsonl` out of the archive into a new table, and the panel comes back
+with `5` rows and `4` columns. Enter on that table lists every record as a
+`.json` file; `F3` opens the SQL console already prefilled.
+
+No export step, no second tool, no `jq`-into-`sqlite3` pipeline. The same
+transfer engine serves every provider — `zip:` / `7z:`, `ftp:` / `sftp:`,
+`gdrive:`, `docker:`, `db:` — and a plugin adds one more with a single
+`api.vfs.register(...)`.
 
 ## Quick install (any OS — one line)
 
@@ -33,13 +64,9 @@ into an isolated environment — no system Python needed.
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install --force "dunders[all] @ git+https://github.com/tumikosha/dunders.git" && dunders --setup-claude
 ```
-Run `__` in console. 
-Or start a new `claude` session and press **Ctrl-X + Ctrl-E** or **Ctrl-G**: your prompt opens in
-`__` with the session transcript below a sentinel line, and  **Ctrl-X + Ctrl-E** or **Ctrl-G** again sends
-back only what you typed. (`ctrl+x ctrl+e` is the same action, and works at
-both ends too.) The setup step writes nothing outside `~/.claude` — no shell
-profile, no plugin — and `dunders --remove-claude` undoes exactly what it
-wrote. Drop that last command if you only want the editor.
+Run `__` in a console. The trailing `dunders --setup-claude` wires up the
+prompt editor shown at the top of this page; drop it if you only want the
+editor, and `dunders --remove-claude` undoes exactly what it wrote.
 
 **Windows** (PowerShell) — editor only:
 
@@ -60,9 +87,29 @@ e.g. `dunders[db]` (database only), `dunders[sftp,db]`, or plain `dunders` for
 the base file manager + editor. Available extras: `sftp`, `db`, `image`,
 `office`, `all`.
 
+## Why another file manager
+
+> **We ship the underscores. You write what goes between them.**
+
+`dunders` is an open-source **terminal platform** built on
+[Textual](https://textual.textualize.io/). At its core it's a Norton
+Commander–style dual-pane manager with an embedded text editor — but the bigger
+idea is the blank between the underscores: the core ships `__`, and you fill in
+the rest. Archives, remote and cloud filesystems, containers, databases, API
+responses — anything that can be listed can be a panel, and anything that can be
+a panel can be copied into anything else.
+
+It brings back the dual-pane workflow of `mc` / Far Manager with a real
+windowing layer (Turbo Vision–inspired), code folding, recordable macros, a
+command palette and an embedded LLM/agent CLI mode — and makes that surface
+extensible: a plugin is a Python object with a `register(api)` method.
+
+The CLI command is **`__`** or **`dunders`**; the `__` is the platform's blank,
+waiting to be filled.
+
 ## Features
 
-- **Dual-pane file manager** powered by AI with sort, multi-select, quick-search, and
+- **Dual-pane file manager** with sort, multi-select, quick-search, and
   the classic NC F-key bar (F3 view, F4 edit, F5 copy, F6 move, F7 mkdir,
   F8 delete, F9 menu, F10 quit).
 - **Embedded text editor** with split view, search & replace, fold-by-indent,
@@ -76,7 +123,10 @@ the base file manager + editor. Available extras: `sftp`, `db`, `image`,
 - **Mouse support** everywhere, including the menu bar and status bar.
 - **LLM agent / CLI mode** (in progress) — bring your own model.
 
-## Install
+## Install — other ways
+
+<details>
+<summary>uvx (no install), pipx, pip, upgrade and uninstall</summary>
 
 ### Zero-Python install via [uv](https://docs.astral.sh/uv/) (recommended)
 
@@ -121,6 +171,8 @@ pip install dunders
 ```
 
 Requires Python 3.12+ in any path above.
+
+</details>
 
 ## Usage
 
@@ -169,16 +221,15 @@ Inside the app:
 Editor-scoped keys (Save, Find/Replace, Split, Fold, Record macro) appear in
 the status bar when an editor window has focus.
 
-## Claude Code integration
+## Claude Code integration — reference
 
-**`Ctrl+G` — the whole loop, one key.** In Claude Code it opens your prompt in
-`__` with the session transcript below it; in `__` it saves and exits, sending
-only what you typed.
+The loop itself is at the [top of this page](#write-your-claude-code-prompts-with-the-conversation-in-front-of-you);
+this section is the detail: what the buffer looks like, the two ways to install
+the wiring, and what it touches.
 
-Use `__` as [Claude Code](https://claude.com/claude-code)'s external editor, with
-the current session's transcript loaded alongside your prompt. `Ctrl+X Ctrl+E`
-is the same Claude Code action (`chat:externalEditor`) if you have remapped
-`Ctrl+G` in your own `keybindings.json`. The editor opens like this:
+`Ctrl+G` and `Ctrl+X Ctrl+E` are the same Claude Code action
+(`chat:externalEditor`), so either works at both ends even if you have remapped
+one in your own `keybindings.json`. The buffer opens like this:
 
 ```
 ▌cursor here — write your prompt
@@ -308,6 +359,10 @@ python -m dunders.windowing.demo
 
 ## Project layout
 
+<details>
+<summary>Where things live in the source tree</summary>
+
+
 The PyPI distribution is named **`dunders`**; the importable Python package and
 the CLI command are both **`dunders`**.
 
@@ -332,7 +387,13 @@ shipped with the project, currently `setup` (see
 See [`CLAUDE.md`](./CLAUDE.md) for an architecture deep-dive aimed at
 contributors and AI coding assistants.
 
+</details>
+
 ## Terminal limitations on macOS
+
+<details>
+<summary>Terminal.app quirks (Alt keys, mouse, true colour) and what to use instead</summary>
+
 
 macOS **Terminal.app** does not report several modifier+key combinations to
 the application, so some editor shortcuts can't reach `dunders` there:
@@ -367,6 +428,8 @@ is being dropped.
 the editor and command line use `Ctrl+C` to copy instead — in the command line
 `Ctrl+C` copies the current selection and otherwise cancels/clears, like a
 shell.
+
+</details>
 
 ## License
 

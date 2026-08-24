@@ -21,8 +21,11 @@ htmlcov/
 .idea/
 .vscode/
 
-# Project-specific
-docs/
+# Project-specific — docs/ stays private (drafts, roadmap, posts), except the
+# assets the public README points at. Git cannot re-include a path under an
+# excluded directory, so the directory itself must not be excluded outright.
+docs/*
+!docs/assets/
 .superpowers/
 .omc/
 vibe/
