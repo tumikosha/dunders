@@ -2,7 +2,8 @@
 
 Opened with Alt+H (app-level command ``cmd.history``). Lists past commands
 newest-first; Enter / click recalls the selected one into the command line;
-Esc / Close dismisses. Callback-driven and palette-themed, like the other
+Esc / Close dismisses and hands focus back to the command line (the popup
+belongs to it, mc-style). Callback-driven and palette-themed, like the other
 dunder dialogs (mirrors ``SqlHistoryDialog``).
 """
 
@@ -35,11 +36,18 @@ class CommandHistoryDialog(Container, WindowContent):
                                        margin-top: 1; }
     """
 
-    def __init__(self, entries: Sequence[str], *, on_pick: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        entries: Sequence[str],
+        *,
+        on_pick: Callable[[str], None],
+        on_cancel: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self.window_title = "Command history"
         self._entries = list(entries)  # newest-first
         self._on_pick = on_pick
+        self._on_cancel = on_cancel
         self._table = DataTable(id="ch-table", cursor_type="row", zebra_stripes=False)
 
     def compose(self):
@@ -91,12 +99,24 @@ class CommandHistoryDialog(Container, WindowContent):
     def on_shadow_button_pressed(self, event: ShadowButton.Pressed) -> None:
         event.stop()
         if (event.button.id or "") == "ch-close":
-            self._dismiss()
+            self._cancel()
 
     def on_key(self, event) -> None:
         if event.key == "escape":
             event.stop()
-            self._dismiss()
+            self._cancel()
+
+    def _cancel(self) -> None:
+        """Dismiss without recalling anything, but still return focus.
+
+        Closing the modal leaves Textual focus on whatever the desktop
+        restores (the active panel), which is wrong here: the history popup
+        is an extension of the command line, so Esc must land the caret back
+        in it exactly as picking an entry does.
+        """
+        if self._on_cancel is not None:
+            self._on_cancel()
+        self._dismiss()
 
     def _dismiss(self) -> None:
         node = self

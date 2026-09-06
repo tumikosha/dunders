@@ -63,3 +63,39 @@ async def test_history_chip_opens_popup(tmp_path):
         app.command_line.post_message(CommandLine.HistoryRequested())
         await pilot.pause()
         assert app.query_one(CommandHistoryDialog)
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_popup_and_refocuses_command_line(tmp_path):
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.command_history.append("ls -la")
+        app.action_show_command_history()
+        await pilot.pause()
+        assert app.query_one(CommandHistoryDialog)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert not app.query(CommandHistoryDialog)
+        # Esc must not recall anything, but the caret goes back to the cmdline.
+        assert app.command_line.text == ""
+        assert app.focused is app.command_line._input
+
+
+@pytest.mark.asyncio
+async def test_close_button_refocuses_command_line(tmp_path):
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        app.command_history.append("pwd")
+        app.action_show_command_history()
+        await pilot.pause()
+        dialog = app.query_one(CommandHistoryDialog)
+        dialog._cancel()
+        await pilot.pause()
+        await pilot.pause()
+        assert not app.query(CommandHistoryDialog)
+        assert app.focused is app.command_line._input

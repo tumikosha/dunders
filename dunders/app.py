@@ -780,8 +780,10 @@ class DundersApp(App):
         self, event: CopyMoveDialog.Submitted
     ) -> None:
         ctx = event.dialog.context
-        # Read the "Skip existing" checkbox before the dialog is torn down.
+        # Read the "Skip existing" checkbox and the exclusion masks before the
+        # dialog is torn down.
         skip = bool(getattr(event.dialog, "skip_existing", False))
+        exclude = tuple(getattr(event.dialog, "exclude_masks", ()) or ())
         self._close_modal(event.dialog)
         if not isinstance(ctx, CopyMoveRequest):
             return
@@ -795,7 +797,7 @@ class DundersApp(App):
                 if table:
                     root = VfsPath(scheme="db", root=ctx.dest_loc.root, parts=())
                     self._run_copy_into_target(ctx, root, rename_to=f"{table}.jsonl",
-                                               skip_existing=skip)
+                                               skip_existing=skip, exclude=exclude)
                     return
             # A real remote filesystem (sftp/ftp): honour the edited destination
             # path so a single file can be renamed on the way in. Parse the typed
@@ -806,13 +808,13 @@ class DundersApp(App):
                     ctx.dest_loc, raw, single=len(ctx.targets) == 1
                 )
                 self._run_copy_into_target(ctx, target, rename_to=rename,
-                                           skip_existing=skip)
+                                           skip_existing=skip, exclude=exclude)
                 return
             # Copy/move INTO a browsed archive at its current sub-path; the
             # typed value is ignored (append-only, no path editing). Checked
             # before the provider-prefix path since the prefill is a "<scheme>://"
             # URI which would otherwise match the prefix dispatch.
-            self._run_copy_into_archive(ctx, skip_existing=skip)
+            self._run_copy_into_archive(ctx, skip_existing=skip, exclude=exclude)
             return
         # Provider prefix: "<scheme>:<spec>" (e.g. zip:backup.zip, ftp:host/path)
         # hands <spec> to that provider, which creates the target archive/
@@ -821,10 +823,10 @@ class DundersApp(App):
         if target is not None:
             dest_panel = self._opposite_panel(self._active_panel())
             self._run_copy_into_target(ctx, target, open_in=dest_panel,
-                                       skip_existing=skip)
+                                       skip_existing=skip, exclude=exclude)
             return
         user_dest = Path(raw).expanduser() if raw else ctx.dest
-        self._run_copy_move(ctx, user_dest, skip_existing=skip)
+        self._run_copy_move(ctx, user_dest, skip_existing=skip, exclude=exclude)
 
     def _resolve_prefixed_target(self, raw: str, *, base: VfsPath) -> VfsPath | None:
         """Map a typed ``<scheme>:<spec>`` destination to a write-target locator
@@ -884,13 +886,15 @@ class DundersApp(App):
         return _on_status
 
     def _run_copy_into_archive(self, ctx: CopyMoveRequest, *,
-                               skip_existing: bool = False) -> None:
+                               skip_existing: bool = False,
+                               exclude: tuple[str, ...] = ()) -> None:
         """Copy/move the selection into the browsed archive (ctx.dest_loc)."""
-        self._run_copy_into_target(ctx, ctx.dest_loc, skip_existing=skip_existing)
+        self._run_copy_into_target(ctx, ctx.dest_loc, skip_existing=skip_existing,
+                                   exclude=exclude)
 
     def _run_copy_into_target(
         self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None, rename_to=None,
-        skip_existing: bool = False,
+        skip_existing: bool = False, exclude: tuple[str, ...] = (),
     ) -> None:
         """Copy/move the selection into ``target`` via the transfer engine.
 
@@ -922,6 +926,7 @@ class DundersApp(App):
                 on_status=_on_status,
                 cancel_event=progress.cancel_event,
                 skip_existing=skip_existing,
+                exclude=exclude,
             )
             self.call_from_thread(
                 self._finish_into_target, ctx.op, progress, result, target, open_in
@@ -940,7 +945,8 @@ class DundersApp(App):
         self._close_modal(event.dialog)
 
     def _run_copy_move(self, req: CopyMoveRequest, user_dest: Path, *,
-                       skip_existing: bool = False) -> None:
+                       skip_existing: bool = False,
+                       exclude: tuple[str, ...] = ()) -> None:
         if self.desktop is None:
             return
         source_name = req.targets[0].name if len(req.targets) == 1 else None
@@ -966,6 +972,7 @@ class DundersApp(App):
                 on_status=_on_status,
                 cancel_event=progress.cancel_event,
                 skip_existing=skip_existing,
+                exclude=exclude,
             )
             self.call_from_thread(self._finish_op, req.op, progress, result)
 
@@ -1476,6 +1483,7 @@ class DundersApp(App):
             id="key-probe",
         )
         self.desktop.add_window(win)
+        self._claim_post_menu_focus(win)
         self.call_after_refresh(content.focus)
 
     def action_help_show(self) -> None:
@@ -1508,7 +1516,9 @@ class DundersApp(App):
         try:
             ver = version("dunders")
         except PackageNotFoundError:
-            ver = "0.1.0"
+            # Not installed (running from a source checkout): fall back to the
+            # version declared in pyproject.toml. Keep the two in sync.
+            ver = "0.2.2"
         text = (
             "dunders\n\n"
             f"Version {ver}\n\n"
@@ -3116,7 +3126,11 @@ class DundersApp(App):
             return
         from dunders.fm.cmd_history_dialog import CommandHistoryDialog
 
-        dialog = CommandHistoryDialog(entries, on_pick=self._recall_command)
+        dialog = CommandHistoryDialog(
+            entries,
+            on_pick=self._recall_command,
+            on_cancel=self._cancel_command_history,
+        )
         w = min(90, max(36, max(len(e) for e in entries) + 6))
         h = min(len(entries) + 4, 22)
         self._remember_active_panel_id()
@@ -3132,7 +3146,25 @@ class DundersApp(App):
     def _recall_command(self, cmd: str) -> None:
         if self.command_line is not None:
             self.command_line.set_text(cmd)
-        self.call_after_refresh(self._focus_command_line)
+        self._focus_command_line_after_close()
+
+    def _cancel_command_history(self) -> None:
+        """Esc / Close in the history popup: leave the command line as it was
+        but put the caret back into it, like recalling an entry does."""
+        self._focus_command_line_after_close()
+
+    def _focus_command_line_after_close(self) -> None:
+        """Focus the command line once the history popup has finished closing.
+
+        The popup dismisses itself by posting ``Window.Closed``, and
+        ``Desktop.remove_window`` then focuses the new topmost window — a file
+        panel — which undoes a focus set on the same tick. The two are queued
+        independently, so a single ``call_after_refresh`` wins or loses by
+        timing; nesting one more refresh puts this strictly after the close.
+        """
+        self.call_after_refresh(
+            lambda: self.call_after_refresh(self._focus_command_line)
+        )
 
     def on_bookmarks_dialog_open(self, event: BookmarksDialog.Open) -> None:
         self._close_modal(event.dialog)
@@ -3401,6 +3433,7 @@ class DundersApp(App):
         win._saved_rect = (Offset(2, 1), Size(max(1, dw - 4), max(1, dh - 2)))
         win.maximized = True
         self.desktop.add_window(win)
+        self._claim_post_menu_focus(win)
         self.call_after_refresh(content.focus)
 
         def _worker() -> None:
@@ -3768,7 +3801,7 @@ class DundersApp(App):
                 op=op, targets=targets, dest=dest, base=panel.cwd, dest_loc=dest_loc
             ),
         )
-        show_modal(self.desktop, dialog, title=verb, size=(72, 12))
+        show_modal(self.desktop, dialog, title=verb, size=(72, 14))
         self.call_after_refresh(dialog.focus_input)
 
     def action_edit(self) -> None:
@@ -4212,6 +4245,20 @@ class DundersApp(App):
         # the file listing immediately (the editor stays open on the right).
         self.desktop.focus_window(tree_win)
 
+    def _claim_post_menu_focus(self, win: Window) -> None:
+        """Redirect the post-menu focus restore at `win`.
+
+        A menu item that opens a *window* (rather than a modal) races the
+        restore in `_on_menu_active_index_changed`: that handler raises the
+        window that was focused before the menu opened, which is normally the
+        FilePanel — so the freshly opened window ends up buried under the
+        panels. Every action reachable from the menu bar that calls
+        `desktop.add_window` must claim the restore for its own window.
+        """
+        if self._pre_menu_focus is not None or self._pre_menu_window is not None:
+            self._pre_menu_window = win
+            self._pre_menu_focus = None
+
     def _mount_maximized_content(self, content, *, title: str, win_id: str) -> None:
         """Wrap a WindowContent in a born-maximized Window and add it.
 
@@ -4236,9 +4283,7 @@ class DundersApp(App):
         # the post-menu restore in `_on_menu_active_index_changed` would
         # otherwise raise the original FilePanel back on top of the new
         # editor. Redirect the restore target to the window we just made.
-        if self._pre_menu_focus is not None or self._pre_menu_window is not None:
-            self._pre_menu_window = win
-            self._pre_menu_focus = None
+        self._claim_post_menu_focus(win)
 
     def _read_member_bytes(self, entry) -> bytes | None:
         """Read a VFS member (archive/SFTP/FTP/…) through its provider, returning
@@ -4745,9 +4790,7 @@ class DundersApp(App):
                 )
                 win.maximized = True
                 self.desktop.add_window(win)
-                if self._pre_menu_focus is not None or self._pre_menu_window is not None:
-                    self._pre_menu_window = win
-                    self._pre_menu_focus = None
+                self._claim_post_menu_focus(win)
                 return
         self._mount_maximized_content(content, title=title, win_id=win_id)
 

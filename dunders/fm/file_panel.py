@@ -409,6 +409,9 @@ class FilePanel(WindowContent):
         self.selection &= live
         self._ensure_cursor_visible()
         self.window_title = self._cwd_display()
+        # Entries just changed, so the file/folder split behind the count did
+        # too — and pruning above may have emptied the selection entirely.
+        self._update_subtitle()
         self._loading = False
         self._return_to = None  # this listing succeeded; no fallback pending
         self._return_sort = None
@@ -583,10 +586,42 @@ class FilePanel(WindowContent):
                 changed = True
         self.move_cursor(delta)
         if changed:
+            self._update_subtitle()
             self.post_message(FilePanel.SelectionChanged(self))
 
     def clear_selection(self) -> None:
         self.selection.clear()
+        self._update_subtitle()
+
+    def _selection_summary(self) -> str | None:
+        """Bottom-border text for the current selection, or None when empty.
+
+        Counted from ``entries`` rather than ``selection`` because only the
+        listing knows which locs are directories, and a selection is pruned to
+        the live listing on every refresh anyway.
+        """
+        if not self.selection:
+            return None
+        files = dirs = 0
+        for entry in self.entries:
+            if entry.loc not in self.selection:
+                continue
+            if entry.is_dir:
+                dirs += 1
+            else:
+                files += 1
+        parts = []
+        if files:
+            parts.append(f"{files} file" if files == 1 else f"{files} files")
+        if dirs:
+            parts.append(f"{dirs} folder" if dirs == 1 else f"{dirs} folders")
+        if not parts:
+            return None
+        return "Selected: " + ", ".join(parts)
+
+    def _update_subtitle(self) -> None:
+        """Publish the selection summary on the window's bottom border."""
+        self.window_subtitle = self._selection_summary()
 
     def selected_paths(self) -> list[Path]:
         """Selection in current listing order (deterministic for ops).
@@ -1995,7 +2030,7 @@ class FilePanel(WindowContent):
             return fn if callable(fn) else None
 
         cmds = [
-            WindowCommand(id="panel.new",    label="New",    handler=_bind("new")),
+            WindowCommand(id="panel.new",    label="New",    handler=_bind("new"), hotkey="shift+f4"),
             WindowCommand(id="panel.project_view", label="Project View", handler=_bind("project_view"), hotkey="f9"),
             WindowCommand(id="panel.user_menu", label="User menu", handler=_bind("user_menu"), hotkey="f2"),
             WindowCommand(id="panel.view",   label="View",   handler=_bind("view"),   hotkey="f3"),

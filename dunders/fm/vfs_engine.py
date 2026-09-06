@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 from typing import Literal
 
+from dunders.fm.exclude import is_excluded
 from dunders.core.vfs import VfsPath, VfsRegistry
 from dunders.core.vfs.provider import ProgressCallback, VfsProvider
 from dunders.fm.actions import CopyStatus, OpError, OpResult, StatusCallback
@@ -170,6 +171,7 @@ def transfer(
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
     skip_existing: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> OpResult:
     """Copy or move ``sources`` into ``dest_dir``.
 
@@ -180,13 +182,23 @@ def transfer(
     UI wires it up so a big single file animates the bar. ``on_progress`` is
     the legacy whole-item counter still used by move. ``skip_existing`` leaves a
     destination file untouched when it already exists (per-file).
+
+    ``exclude`` is a tuple of fnmatch patterns from the copy dialog: any file or
+    directory whose basename matches one is left out, a directory taking its
+    whole subtree with it. Only a provider advertising ``supports_exclude`` gets
+    the masks handed to its intra-scheme fast path; for the rest an active mask
+    forces the generic streaming walk, which applies the filter itself. A *move*
+    with an active mask always takes the generic path: the fast path renames a
+    whole tree, which cannot leave the excluded members behind.
     """
     if not sources:
         return OpResult()
 
     if all(s.scheme == dest_dir.scheme for s in sources):
         provider = registry.resolve(dest_dir)
-        if mode == "copy":
+        fast_ok = not exclude or getattr(provider, "supports_exclude", False)
+        if mode == "copy" and fast_ok:
+            kwargs = {"exclude": exclude} if exclude else {}
             result = provider.copy_within(
                 sources,
                 dest_dir,
@@ -195,8 +207,9 @@ def transfer(
                 on_status=on_status,
                 cancel_event=cancel_event,
                 skip_existing=skip_existing,
+                **kwargs,
             )
-        else:
+        elif mode == "move" and not exclude:
             result = provider.move_within(
                 sources,
                 dest_dir,
@@ -204,6 +217,8 @@ def transfer(
                 on_progress=on_progress,
                 cancel_event=cancel_event,
             )
+        else:
+            result = None
         if result is not None:
             return result
         # Provider has no intra-scheme fast path -> fall through to streaming.
@@ -218,6 +233,7 @@ def transfer(
         on_status=on_status,
         cancel_event=cancel_event,
         skip_existing=skip_existing,
+        exclude=exclude,
     )
 
 
@@ -232,9 +248,16 @@ def _generic_transfer(
     on_status: StatusCallback | None,
     cancel_event: threading.Event | None,
     skip_existing: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> OpResult:
     result = OpResult()
     single_rename = rename_to if (rename_to and len(sources) == 1) else None
+    # A top-level source matching the mask never starts: nothing to measure,
+    # nothing to copy, and in move mode nothing to delete.
+    if exclude:
+        sources = [s for s in sources if not is_excluded(s.name, exclude)]
+        if not sources:
+            return result
 
     # Measure once so the bar has a denominator. When sizes are available
     # (local/zip listings carry st_size) we drive the bar by BYTES so a single
@@ -255,7 +278,8 @@ def _generic_transfer(
     if not lazy:
         try:
             for s in sources:
-                f, b = _measure(registry, s, cancel_event=cancel_event)
+                f, b = _measure(registry, s, cancel_event=cancel_event,
+                                exclude=exclude)
                 total_files += f
                 total_bytes += b
         except _Cancelled:
@@ -320,7 +344,8 @@ def _generic_transfer(
                 result.succeeded.append(dst.to_local() if dst.scheme == "file" else dst)
                 continue  # exported sources are copy-only even in move mode (data-safe; the table is not deleted)
             _copy_tree(registry, src, dest, size=None, skip_existing=skip_existing,
-                       prog=prog, result=result, cancel_event=cancel_event)
+                       prog=prog, result=result, cancel_event=cancel_event,
+                       exclude=exclude)
         except _Cancelled:
             result.cancelled = True
             return result
@@ -334,12 +359,56 @@ def _generic_transfer(
             # Source removal can be unsupported (read-only zip) — record it as
             # an error rather than crash the worker; the copy already landed.
             try:
-                registry.resolve(src).delete([src], cancel_event=cancel_event)
+                if exclude:
+                    # Deleting the source wholesale would destroy the very files
+                    # the mask kept out of the copy. Remove only what was
+                    # transferred, leaving excluded entries (and the directories
+                    # holding them) in place.
+                    _prune_source(registry, src, exclude, cancel_event)
+                else:
+                    registry.resolve(src).delete([src], cancel_event=cancel_event)
             except OSError as exc:
                 result.errors.append(
                     OpError(loc=src, reason=f"copied but not removed: {exc}")
                 )
     return result
+
+
+def _prune_source(
+    registry: VfsRegistry,
+    src: VfsPath,
+    exclude: tuple[str, ...],
+    cancel_event: threading.Event | None,
+) -> bool:
+    """Delete the part of ``src`` a masked move actually transferred.
+
+    Returns True when something under ``src`` survived, so the caller keeps the
+    enclosing directory. A plain ``delete([src])`` after a masked move would
+    destroy the very files the mask kept OUT of the copy — they exist nowhere
+    else. Excluded entries stay put, and a directory is removed only once
+    everything below it is gone, so survivors keep their original path.
+    """
+    provider = registry.resolve(src)
+    if not provider.is_dir(src):
+        provider.delete([src], cancel_event=cancel_event)
+        return False
+    try:
+        children = provider.scan(src, include_parent=False, show_hidden=True)
+    except OSError:
+        # Can't inspect it -> leave it alone rather than delete blind.
+        return True
+    survivors = False
+    for child in children:
+        if _cancelled(cancel_event):
+            raise _Cancelled
+        if is_excluded(child.name, exclude):
+            survivors = True
+            continue
+        if _prune_source(registry, child.loc, exclude, cancel_event):
+            survivors = True
+    if not survivors:
+        provider.delete([src], cancel_event=cancel_event)
+    return survivors
 
 
 def _copy_tree(
@@ -352,6 +421,7 @@ def _copy_tree(
     prog: "_CopyProgress",
     result: OpResult,
     cancel_event: threading.Event | None,
+    exclude: tuple[str, ...] = (),
 ) -> None:
     if _cancelled(cancel_event):
         raise _Cancelled
@@ -367,9 +437,14 @@ def _copy_tree(
         # child.size is carried straight into the recursion so per-file progress
         # needs no extra stat round trip.
         for child in src_p.scan(src, include_parent=False, show_hidden=True):
+            # An excluded name is pruned here, so an excluded directory never
+            # gets created at the destination either.
+            if is_excluded(child.name, exclude):
+                continue
             _copy_tree(registry, child.loc, dest.child(child.name),
                        size=child.size, skip_existing=skip_existing,
-                       prog=prog, result=result, cancel_event=cancel_event)
+                       prog=prog, result=result, cancel_event=cancel_event,
+                       exclude=exclude)
     else:
         fsize = size if size is not None else _size_of(src_p, src)
         if skip_existing and _dest_exists(dst_p, dest):
@@ -419,6 +494,7 @@ def _measure(
     loc: VfsPath,
     *,
     cancel_event: threading.Event | None = None,
+    exclude: tuple[str, ...] = (),
 ) -> tuple[int, int]:
     """``(file_count, total_bytes)`` under ``loc`` from directory listings.
 
@@ -458,8 +534,13 @@ def _measure(
     for child in children:
         if _cancelled(cancel_event):
             raise _Cancelled
+        # Same filter as _copy_tree, or the bar's denominator counts files the
+        # copy never touches and the transfer finishes short of 100%.
+        if is_excluded(child.name, exclude):
+            continue
         if child.is_dir:
-            f, b = _measure(registry, child.loc, cancel_event=cancel_event)
+            f, b = _measure(registry, child.loc, cancel_event=cancel_event,
+                            exclude=exclude)
             files += f
             total += b
         else:

@@ -24,6 +24,7 @@ from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
 from dunders.fm.actions import CopyStatus
+from dunders.fm.exclude import DEFAULT_EXCLUDE, parse_exclude_masks
 from dunders.fm.file_entry import format_size
 from dunders.windowing.content import WindowContent
 from dunders.windowing.helpers import ModalWindow
@@ -603,6 +604,21 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
     CopyMoveDialog #cm-skip {
         margin-top: 1;
     }
+    CopyMoveDialog #cm-exclude-on {
+        margin-top: 1;
+    }
+    CopyMoveDialog #cm-exclude {
+        margin: 0 1;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $boost;
+    }
+    CopyMoveDialog #cm-exclude:focus {
+        background: $accent;
+        color: $text;
+        border: none;
+    }
     CopyMoveDialog #cm-buttons {
         height: 1;
         align: center middle;
@@ -642,6 +658,13 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         self.context = context
         self.window_title = title
         self._input = Input(value=initial, id="cm-input")
+        # Prefilled but inert until the checkbox is ticked: the common case is
+        # "skip dotfiles, keep .gitignore", and a "-" prefix marks an exception.
+        self._exclude_input = Input(
+            value=DEFAULT_EXCLUDE,
+            placeholder="e.g. node_modules;*.pyc;-.gitignore",
+            id="cm-exclude",
+        )
 
     @staticmethod
     def _auto_ok_hotkey(label: str) -> str:
@@ -660,6 +683,11 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             label_markup="Skip existing (don't overwrite)",
             checked=False, id="cm-skip",
         )
+        yield _PermCheckbox(
+            label_markup="Exclude names matching:",
+            checked=False, id="cm-exclude-on",
+        )
+        yield self._exclude_input
         with Horizontal(id="cm-buttons"):
             yield ShadowButton(
                 self._ok_label,
@@ -679,6 +707,8 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             return [
                 self._input,
                 self.query_one("#cm-skip", _PermCheckbox),
+                self.query_one("#cm-exclude-on", _PermCheckbox),
+                self._exclude_input,
                 self.query_one("#cm-ok", ShadowButton),
                 self.query_one("#cm-cancel", ShadowButton),
             ]
@@ -692,6 +722,21 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             return self.query_one("#cm-skip", _PermCheckbox).checked
         except Exception:
             return False
+
+    @property
+    def exclude_masks(self) -> tuple[str, ...]:
+        """Masks to skip, read at submit; ``()`` when the checkbox is off.
+
+        The checkbox is the on/off switch the field alone cannot be: a mask the
+        user typed and then thought better of stays visible in the box without
+        silently dropping files from the copy.
+        """
+        try:
+            if not self.query_one("#cm-exclude-on", _PermCheckbox).checked:
+                return ()
+        except Exception:
+            return ()
+        return parse_exclude_masks(self._exclude_input.value)
 
     def get_value(self) -> str:
         return self._input.value

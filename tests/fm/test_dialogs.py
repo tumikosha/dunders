@@ -447,20 +447,18 @@ async def test_copymove_dialog_tab_chain():
         await pilot.pause()
         harness.dialog.focus_input()
         await pilot.pause()
-        # input -> skip-checkbox -> ok -> cancel -> input
-        await pilot.press("tab")
-        await pilot.pause()
-        assert harness.focused.id == "cm-skip"
-        await pilot.press("tab")
-        await pilot.pause()
-        assert harness.focused.id == "cm-ok"
-        await pilot.press("tab")
-        await pilot.pause()
-        assert harness.focused.id == "cm-cancel"
+        # input -> skip -> exclude-checkbox -> exclude-field -> ok -> cancel
+        for expected in ("cm-skip", "cm-exclude-on", "cm-exclude",
+                         "cm-ok", "cm-cancel"):
+            await pilot.press("tab")
+            await pilot.pause()
+            assert harness.focused.id == expected
+        # …and back round to the destination input.
         await pilot.press("tab")
         await pilot.pause()
         from textual.widgets import Input
         assert isinstance(harness.focused, Input)
+        assert harness.focused.id == "cm-input"
 
 
 @pytest.mark.asyncio

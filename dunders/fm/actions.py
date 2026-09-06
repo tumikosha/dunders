@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from dunders.core.vfs import VfsPath
+from dunders.fm.exclude import is_excluded
 
 
 __all__ = [
@@ -206,6 +207,8 @@ def _measure_local(
     paths: list[Path],
     cancel_event: threading.Event | None,
     on_tick: Callable[[int], None] | None = None,
+    *,
+    exclude: tuple[str, ...] = (),
 ) -> tuple[int, int]:
     """One cancellable pass returning ``(file_count, total_bytes)``.
 
@@ -221,12 +224,22 @@ def _measure_local(
     for root in paths:
         if _check_cancelled(cancel_event):
             raise _Cancelled
+        if is_excluded(root.name, exclude):
+            continue
         try:
             if root.is_dir() and not root.is_symlink():
-                for dirpath, _dirnames, filenames in os.walk(root):
+                for dirpath, dirnames, filenames in os.walk(root):
                     if _check_cancelled(cancel_event):
                         raise _Cancelled
+                    # Prune in place so os.walk never descends into an excluded
+                    # directory — the copy walk skips it the same way, and the
+                    # two must agree or the bar's denominator is wrong.
+                    if exclude:
+                        dirnames[:] = [d for d in dirnames
+                                       if not is_excluded(d, exclude)]
                     for name in filenames:
+                        if is_excluded(name, exclude):
+                            continue
                         files += 1
                         try:
                             total += (Path(dirpath) / name).lstat().st_size
@@ -308,6 +321,7 @@ def _copy_recursive(
     skip: Callable[[int, Path], None],
     skip_existing: bool,
     cancel_event: threading.Event | None,
+    exclude: tuple[str, ...] = (),
 ) -> None:
     if _check_cancelled(cancel_event):
         raise _Cancelled
@@ -318,8 +332,13 @@ def _copy_recursive(
         # `dest/front` raised "File exists" instead of updating it.
         dst.mkdir(parents=True, exist_ok=True)
         for child in src.iterdir():
+            # An excluded directory is pruned with its whole subtree: the
+            # target dir is never created, so nothing of it reaches the copy.
+            if is_excluded(child.name, exclude):
+                continue
             _copy_recursive(child, dst / child.name, file_start, on_bytes,
-                            file_done, skip, skip_existing, cancel_event)
+                            file_done, skip, skip_existing, cancel_event,
+                            exclude)
     else:
         if skip_existing and dst.exists():
             try:
@@ -341,12 +360,17 @@ def copy_paths(
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
     skip_existing: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> OpResult:
     """Copy each source path into `dest_dir`, in chunks, with byte progress.
 
     `rename_to` is honoured only when `paths` has exactly one entry — it
     overrides the destination basename so the user can copy-with-rename.
     `skip_existing` leaves a destination file untouched when it already exists.
+    `exclude` is a tuple of fnmatch patterns; any file or directory whose
+    basename matches one is left out (a directory prunes its whole subtree).
+    The measure pass applies the same filter, so the bar's denominator matches
+    what actually gets copied.
 
     The rich `on_status` (:class:`CopyStatus`) channel carries BOTH the overall
     byte progress and the current file's own byte progress + a file counter, so
@@ -362,7 +386,8 @@ def copy_paths(
         if on_status is not None:
             on_status(CopyStatus(n, 0, "Measuring…", is_bytes=False))
     try:
-        files_total, total_bytes = _measure_local(paths, cancel_event, _measure_tick)
+        files_total, total_bytes = _measure_local(
+            paths, cancel_event, _measure_tick, exclude=exclude)
     except _Cancelled:
         result.cancelled = True
         return result
@@ -413,13 +438,15 @@ def copy_paths(
         if _check_cancelled(cancel_event):
             result.cancelled = True
             return result
+        if is_excluded(src.name, exclude):
+            continue
         dest_name = single_rename or src.name
         target = dest_dir / dest_name
         try:
             if src.parent == dest_dir and dest_name == src.name:
                 raise OSError("source and destination are the same directory")
             _copy_recursive(src, target, _file_start, _on_bytes, _file_done,
-                            _skip, skip_existing, cancel_event)
+                            _skip, skip_existing, cancel_event, exclude)
         except _Cancelled:
             result.cancelled = True
             return result

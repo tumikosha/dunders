@@ -12,8 +12,10 @@ to the next visual row and the cmdline grows in height to fit, capped at
   directly. These only work in terminals that send a distinct escape for
   the modifier (Ghostty, iTerm2, WezTerm, Kitty, Alacritty, …). In stock
   macOS Terminal use the ``\\``-Enter path instead.
-* Up/Down — navigate persistent history when the cursor is on the first /
-  last logical row; otherwise move the cursor between rows.
+* Up — step back through the persistent history when the cursor is on the
+  first logical row; otherwise move the cursor up a row.
+* Down — open the command-history popup when the cursor is on the last
+  logical row; otherwise move the cursor down a row.
 * Ctrl+C — send SIGINT to the running command (or clear the buffer if it's
   non-empty); same as a shell.
 * Ctrl+D — when the buffer is empty, send EOF (close the child's stdin).
@@ -188,8 +190,12 @@ class _CmdInput(TextArea):
         row, _col = self.cursor_location
         last = max(0, self.document.line_count - 1)
         if row >= last:
-            if not self._owner._route_nav(1):
-                self._owner.history_next()
+            # At the bottom of the buffer Down opens the mc-style history
+            # picker, exactly like Alt+H or the '▲' chip. This deliberately
+            # wins over both panel-cursor routing and stepping one entry
+            # forward: the picker shows the whole history at once, which is
+            # what the blind one-entry-at-a-time step was standing in for.
+            self._owner.post_message(CommandLine.HistoryRequested())
         else:
             self.action_cursor_down()
 

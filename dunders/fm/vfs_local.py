@@ -35,6 +35,10 @@ class LocalProvider:
     # Make "Local files" an entry in the "_" dunder menu — a one-keystroke way
     # back to the local filesystem from any other dunder. Empty spec = home.
     display_name = "Local files"
+    # copy_within honours the copy dialog's exclusion masks, so the engine can
+    # keep using this fast path (shutil.copystat, single measure pass) instead
+    # of falling back to the generic streaming transfer when a mask is set.
+    supports_exclude = True
     accepts_empty_open = True
     open_placeholder = "path (empty = home directory)"
 
@@ -108,6 +112,7 @@ class LocalProvider:
         on_status: actions.StatusCallback | None = None,
         cancel_event: threading.Event | None = None,
         skip_existing: bool = False,
+        exclude: tuple[str, ...] = (),
     ) -> actions.OpResult:
         return actions.copy_paths(
             [s.to_local() for s in sources],
@@ -117,6 +122,7 @@ class LocalProvider:
             on_status=on_status,
             cancel_event=cancel_event,
             skip_existing=skip_existing,
+            exclude=exclude,
         )
 
     def move_within(
