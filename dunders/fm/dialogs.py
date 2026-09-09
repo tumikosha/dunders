@@ -42,6 +42,7 @@ __all__ = [
     "ChangeAttributesDialog",
     "ConfirmDialog",
     "CopyMoveDialog",
+    "DEFAULT_EXCLUDE_MASKS",
     "DockerRunDialog",
     "FindFileDialog",
     "InputDialog",
@@ -1698,11 +1699,24 @@ class ChangeAttributesDialog(FocusChainMixin, Container, WindowContent):
         self.post_message(ChangeAttributesDialog.Cancelled(self))
 
 
+# Folders nobody wants in a "Find file" hit list. Prefilled into the
+# dialog's exclude field; the user is free to clear it. Parsed by
+# dunders.fm.exclude, so a "-" prefix marks an exception here too.
+DEFAULT_EXCLUDE_MASKS = ".venv;.omc"
+
+
 class FindFileDialog(FocusChainMixin, Container, WindowContent):
     """Far Manager-style "Find file" dialog.
 
-    Two text inputs (mask, contains-text) plus five checkboxes plus
-    Find / Cancel buttons. Posts :class:`Submitted` with a fully-built
+    Three text inputs (mask, exclude-mask, contains-text) plus five
+    checkboxes plus Find / Cancel buttons. The exclude mask is the
+    "don't look here" filter — several patterns separated by ``;`` (a
+    comma or a space works too), each pruning a folder subtree or a file
+    by name, with the same ``-`` exception syntax the copy/move dialog
+    uses (:mod:`dunders.fm.exclude`). It defaults to
+    :data:`DEFAULT_EXCLUDE_MASKS` so a search in a project root does not
+    descend into the virtualenv.
+    Posts :class:`Submitted` with a fully-built
     :class:`FindOptions` value when Find is pressed (or Enter while a
     text input is focused). Pressing Find with an empty mask is a no-op
     so the user cannot accidentally start a "match-everything" search;
@@ -1770,6 +1784,7 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
         *,
         start_dir,
         initial_mask: str = "*",
+        initial_exclude: str = DEFAULT_EXCLUDE_MASKS,
         initial_contains: str = "",
         case_sensitive_mask: bool = False,
         case_sensitive_text: bool = False,
@@ -1783,6 +1798,7 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
         self.context = context
         self.window_title = "Find file"
         self._initial_mask = initial_mask
+        self._initial_exclude = initial_exclude
         self._initial_contains = initial_contains
         self._initial_flags = {
             "ff-cs-mask":   case_sensitive_mask,
@@ -1792,12 +1808,19 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
             "ff-symlinks":  follow_symlinks,
         }
         self._mask_input = Input(id="ff-mask")
+        self._exclude_input = Input(id="ff-exclude")
         self._text_input = Input(id="ff-text")
         self._checkboxes: dict[str, _PermCheckbox] = {}
 
     def compose(self) -> ComposeResult:
         yield Static("A file [u]m[/u]ask or several file masks:", classes="ff-label", markup=True)
         yield self._mask_input
+        yield Static(
+            "Skip files and fol[u]d[/u]ers matching (; separated):",
+            classes="ff-label",
+            markup=True,
+        )
+        yield self._exclude_input
         yield Static("Cont[u]a[/u]ining text:", classes="ff-label", markup=True)
         yield self._text_input
         with Container(id="ff-checks"):
@@ -1844,6 +1867,7 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
 
     def on_mount(self) -> None:
         self._mask_input.value = self._initial_mask
+        self._exclude_input.value = self._initial_exclude
         self._text_input.value = self._initial_contains
         # Snapshot the per-id checkboxes so _build_options / focus chain
         # see them in deterministic order.
@@ -1862,6 +1886,9 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
     def get_mask_text(self) -> str:
         return self._mask_input.value
 
+    def get_exclude_text(self) -> str:
+        return self._exclude_input.value
+
     def get_contains_text(self) -> str:
         return self._text_input.value
 
@@ -1870,7 +1897,11 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
         return bool(box and box.checked)
 
     def _focusables(self) -> list[Widget]:
-        chain: list[Widget] = [self._mask_input, self._text_input]
+        chain: list[Widget] = [
+            self._mask_input,
+            self._exclude_input,
+            self._text_input,
+        ]
         for key in ("ff-cs-mask", "ff-cs-text", "ff-whole", "ff-folders", "ff-symlinks"):
             box = self._checkboxes.get(key)
             if box is not None:
@@ -1896,6 +1927,7 @@ class FindFileDialog(FocusChainMixin, Container, WindowContent):
             whole_words=self.is_checked("ff-whole"),
             search_for_folders=self.is_checked("ff-folders"),
             follow_symlinks=self.is_checked("ff-symlinks"),
+            exclude_masks=parse_exclude_masks(self._exclude_input.value),
         )
 
     def action_submit(self) -> None:

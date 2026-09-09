@@ -613,6 +613,10 @@ class DundersApp(App):
         self.command_runner: CommandRunner | None = None
         self._pre_console_focus = None
         self._console_default_window = None
+        # Last submitted Find file options, so re-opening the dialog (and the
+        # results window's "New search") starts from what the user typed
+        # instead of the defaults. Session-only; never persisted to disk.
+        self._last_find_options: FindOptions | None = None
         self._user_menu_ctx: MacroContext | None = None
         self._user_menu_pending: dict | None = None
         self._editor_seq = 0
@@ -3400,15 +3404,39 @@ class DundersApp(App):
         if panel is None or self.desktop is None:
             return
         self._remember_active_panel_id()
-        dialog = FindFileDialog(start_dir=panel.cwd)
-        show_modal(self.desktop, dialog, title="Find file", size=(72, 16))
+        dialog = FindFileDialog(start_dir=panel.cwd, **self._find_dialog_prefs())
+        show_modal(self.desktop, dialog, title="Find file", size=(72, 18))
         self.call_after_refresh(dialog.focus_input)
+
+    def _find_dialog_prefs(self) -> dict:
+        """Dialog kwargs seeded from the previous search, or {} on first use.
+
+        FindOptions carries every field the dialog shows, so the last
+        submitted value is the whole memory — no separate prefs record.
+        Masks round-trip through a join on a separator parse_masks
+        splits on; the exclude field uses ``;`` to match the default it
+        is seeded with.
+        """
+        prev = self._last_find_options
+        if prev is None:
+            return {}
+        return {
+            "initial_mask": " ".join(prev.masks),
+            "initial_exclude": ";".join(prev.exclude_masks),
+            "initial_contains": prev.contains,
+            "case_sensitive_mask": prev.case_sensitive_mask,
+            "case_sensitive_text": prev.case_sensitive_text,
+            "whole_words": prev.whole_words,
+            "search_for_folders": prev.search_for_folders,
+            "follow_symlinks": prev.follow_symlinks,
+        }
 
     def on_find_file_dialog_submitted(
         self, event: FindFileDialog.Submitted
     ) -> None:
         dialog = event.dialog
         start_dir = dialog.start_dir
+        self._last_find_options = event.options
         self._close_modal(dialog)
         self._start_search(event.options, start_dir)
 

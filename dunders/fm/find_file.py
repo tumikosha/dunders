@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from dunders.fm.exclude import split_masks
+
 
 __all__ = [
     "FindOptions",
@@ -49,6 +51,19 @@ class FindOptions:
 
     `contains` is the substring the file must contain. Empty string
     disables the content filter (match files by name only).
+
+    `exclude_masks` is the opposite filter, and follows the copy/move
+    exclusion rules in :mod:`dunders.fm.exclude`: any file **or
+    directory** whose name matches one of the patterns is skipped, an
+    excluded directory is not descended into at all (so ``.venv`` prunes
+    the whole subtree instead of merely hiding the folder itself), and a
+    ``-`` prefix marks an **exception** that wins over every exclusion
+    (``.*;-.gitignore`` — skip dotfiles, still find .gitignore).
+    Matching is case-sensitive there and here, deliberately: an
+    over-eager exclusion silently hides hits, which is worse than one
+    that matches nothing. The one addition on top of the copy rules is
+    that a pattern containing a path separator (``build/*.py``) matches
+    the path relative to the search root instead of the bare name.
     """
 
     masks: tuple[str, ...]
@@ -58,6 +73,7 @@ class FindOptions:
     whole_words: bool
     search_for_folders: bool
     follow_symlinks: bool
+    exclude_masks: tuple[str, ...] = ()
 
 
 @dataclass
@@ -96,6 +112,37 @@ def _name_matches(name: str, masks: tuple[str, ...], case_sensitive: bool) -> bo
         return any(fnmatch.fnmatchcase(name, m) for m in masks)
     name_l = name.lower()
     return any(fnmatch.fnmatchcase(name_l, m.lower()) for m in masks)
+
+
+def _bucket_patterns(patterns: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split patterns into (name patterns, relative-path patterns).
+
+    A pattern containing ``/`` (or the platform separator) is matched
+    against the path relative to the search root; everything else is
+    matched against the bare entry name — which is all
+    :func:`dunders.fm.exclude.is_excluded` ever looks at.
+    """
+    names: list[str] = []
+    paths: list[str] = []
+    for pattern in patterns:
+        pattern = pattern.replace(os.sep, "/").rstrip("/")
+        if not pattern:
+            continue
+        (paths if "/" in pattern else names).append(pattern)
+    return tuple(names), tuple(paths)
+
+
+def _any_match(
+    name: str,
+    rel_path: str,
+    name_patterns: tuple[str, ...],
+    path_patterns: tuple[str, ...],
+) -> bool:
+    if any(fnmatch.fnmatchcase(name, p) for p in name_patterns):
+        return True
+    return bool(rel_path) and any(
+        fnmatch.fnmatchcase(rel_path, p) for p in path_patterns
+    )
 
 
 def _content_matches(
@@ -185,9 +232,37 @@ def walk(
     Symlinks: a symlink to a directory is descended only when
     ``options.follow_symlinks`` is True; cycles are detected via the
     real-path of every visited directory.
+
+    Exclude masks (``options.exclude_masks``) prune before anything else:
+    an excluded directory is never entered, so its whole subtree costs
+    nothing. ``-`` exceptions are honoured exactly as in
+    :func:`dunders.fm.exclude.is_excluded`.
     """
     result = FindResult()
     visited_realpaths: set[str] = set()
+    drop, keep = split_masks(options.exclude_masks)
+    drop_names, drop_paths = _bucket_patterns(drop)
+    keep_names, keep_paths = _bucket_patterns(keep)
+    wants_rel = bool(drop_paths or keep_paths)
+    root_str = str(root)
+
+    def _rel(path: Path) -> str:
+        """Path relative to the search root, POSIX-style, for exclude paths."""
+        if not wants_rel:
+            return ""
+        try:
+            return os.path.relpath(str(path), root_str).replace(os.sep, "/")
+        except ValueError:
+            return str(path).replace(os.sep, "/")
+
+    def _excluded(name: str, path: Path) -> bool:
+        """Whether the exclude masks filter this entry out."""
+        if not drop_names and not drop_paths:
+            return False
+        rel = _rel(path)
+        if not _any_match(name, rel, drop_names, drop_paths):
+            return False
+        return not _any_match(name, rel, keep_names, keep_paths)
 
     def _emit_progress(d: Path) -> None:
         if on_progress is not None:
@@ -227,6 +302,9 @@ def walk(
 
                 child = Path(entry.path)
                 name = entry.name
+
+                if _excluded(name, child):
+                    continue
 
                 if is_dir:
                     if options.search_for_folders and _name_matches(

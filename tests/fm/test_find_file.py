@@ -18,6 +18,7 @@ def _opts(
     whole_words: bool = False,
     search_for_folders: bool = False,
     follow_symlinks: bool = False,
+    exclude_masks: tuple[str, ...] = (),
 ) -> FindOptions:
     return FindOptions(
         masks=masks,
@@ -27,6 +28,7 @@ def _opts(
         whole_words=whole_words,
         search_for_folders=search_for_folders,
         follow_symlinks=follow_symlinks,
+        exclude_masks=exclude_masks,
     )
 
 
@@ -248,3 +250,107 @@ def test_walk_symlink_cycle_protected(tmp_path: Path):
     # The walker terminates and finds f.py exactly once.
     assert len(res.matches) == 1
     assert res.matches[0].name == "f.py"
+
+
+# --- exclude masks --------------------------------------------------------
+
+def _tree(root: Path) -> None:
+    (root / ".venv" / "lib").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "build").mkdir()
+    (root / "src" / "a.py").write_text("pipe here\n")
+    (root / "build" / "a.py").write_text("pipe here\n")
+    (root / ".venv" / "lib" / "b.py").write_text("pipe here\n")
+
+
+def test_exclude_prunes_directory_subtree(tmp_path):
+    _tree(tmp_path)
+    res = walk(tmp_path, _opts(("*.py",), contains="pipe", exclude_masks=(".venv",)))
+    names = sorted(p.name for p in res.matches)
+    assert names == ["a.py", "a.py"]
+    assert all(".venv" not in p.parts for p in res.matches)
+    # The pruned subtree is never entered, so its folders are not counted.
+    assert res.folders_scanned == 3
+
+
+def test_exclude_matches_files_too(tmp_path):
+    _tree(tmp_path)
+    res = walk(tmp_path, _opts(("*.py",), exclude_masks=("b.*", "build")))
+    assert sorted(str(p.relative_to(tmp_path)) for p in res.matches) == [
+        "src/a.py"
+    ]
+
+
+def test_exclude_relative_path_pattern(tmp_path):
+    _tree(tmp_path)
+    res = walk(tmp_path, _opts(("*.py",), exclude_masks=("build/*.py",)))
+    got = sorted(str(p.relative_to(tmp_path)) for p in res.matches)
+    assert got == [".venv/lib/b.py", "src/a.py"]
+
+
+def test_exclude_is_always_case_sensitive(tmp_path):
+    """Same rule as copy/move: an over-eager exclusion hides hits silently."""
+    _tree(tmp_path)
+    res = walk(tmp_path, _opts(("*.py",), exclude_masks=(".VENV", "BUILD")))
+    assert len(res.matches) == 3
+    # ...and the mask case flag does not loosen it either.
+    res = walk(
+        tmp_path,
+        _opts(("*.py",), case_sensitive_mask=False, exclude_masks=(".venv",)),
+    )
+    assert sorted(str(p.relative_to(tmp_path)) for p in res.matches) == [
+        "build/a.py",
+        "src/a.py",
+    ]
+
+
+def test_no_exclude_masks_changes_nothing(tmp_path):
+    _tree(tmp_path)
+    assert len(walk(tmp_path, _opts(("*.py",))).matches) == 3
+
+
+def test_exclude_hides_folder_matches(tmp_path):
+    _tree(tmp_path)
+    res = walk(
+        tmp_path,
+        _opts(("*",), search_for_folders=True, exclude_masks=(".venv",)),
+    )
+    assert not any(p.name == ".venv" for p in res.matches)
+
+
+def test_exclude_dash_exception_beats_exclusion(tmp_path):
+    """`-pattern` keeps an entry a broader mask would have dropped."""
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "keep.py").write_text("pipe\n")
+    (tmp_path / ".cache").mkdir()
+    (tmp_path / ".cache" / "drop.py").write_text("pipe\n")
+    res = walk(tmp_path, _opts(("*.py",), exclude_masks=(".*", "-.config")))
+    assert sorted(str(p.relative_to(tmp_path)) for p in res.matches) == [
+        ".config/keep.py"
+    ]
+
+
+def test_exclude_exception_wins_regardless_of_order(tmp_path):
+    _tree(tmp_path)
+    ordered = walk(tmp_path, _opts(("*.py",), exclude_masks=("-b.py", "*.py")))
+    reversed_ = walk(tmp_path, _opts(("*.py",), exclude_masks=("*.py", "-b.py")))
+    assert [p.name for p in ordered.matches] == ["b.py"]
+    assert [p.name for p in reversed_.matches] == ["b.py"]
+
+
+def test_exclude_bare_dash_is_dropped(tmp_path):
+    _tree(tmp_path)
+    res = walk(tmp_path, _opts(("*.py",), exclude_masks=("-", "build")))
+    assert sorted(str(p.relative_to(tmp_path)) for p in res.matches) == [
+        ".venv/lib/b.py",
+        "src/a.py",
+    ]
+
+
+def test_exclude_exception_applies_to_path_patterns(tmp_path):
+    _tree(tmp_path)
+    res = walk(
+        tmp_path,
+        _opts(("*.py",), exclude_masks=("*.py", "-src/*.py")),
+    )
+    assert sorted(str(p.relative_to(tmp_path)) for p in res.matches) == ["src/a.py"]
