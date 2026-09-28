@@ -5588,12 +5588,47 @@ class DundersApp(App):
         panel = self._active_panel()
         if panel is None:
             return
+        self._insert_panel_entry(panel)
+
+    def _insert_panel_entry(self, panel) -> None:
+        """Insert ``panel``'s cursor entry into the command line at its cursor
+        (shell-quoted, trailing space): the name, or the current directory
+        path on the ".." row. Shared by Ctrl+N and the footer's >_ button."""
+        if self.command_line is None:
+            return
         if not (0 <= panel.cursor < len(panel.entries)):
             return
         entry = panel.entries[panel.cursor]
         raw = str(panel.cwd) if entry.is_parent else entry.path.name
         self.command_line.insert_at_cursor(shlex.quote(raw) + " ")
         self._focus_command_line()
+
+    def on_file_panel_footer_action(self, message: "FilePanel.FooterAction") -> None:
+        """Footer buttons of a file panel: ⧉ N copies the cursor entry's
+        name, ⧉ P its full path (VFS-aware, like the title-bar ⧉), >_
+        inserts the name into the command line. On the ".." row the name and
+        path are those of the current directory."""
+        if self._has_active_modal():
+            return
+        panel = message.panel
+        if message.action == "insert":
+            self._insert_panel_entry(panel)
+            return
+        if not (0 <= panel.cursor < len(panel.entries)):
+            return
+        entry = panel.entries[panel.cursor]
+        loc = panel.cwd_loc if entry.is_parent else entry.loc
+        full = loc.display()
+        if message.action == "copy_path":
+            text = full
+        elif message.action == "copy_name":
+            text = full.rstrip("/").rpartition("/")[2] if entry.is_parent else entry.name
+        else:
+            return
+        if not text:
+            return
+        clipboard.copy(text, app=self)
+        self.notify(f"copied {text}")
 
     def _focused_editor_content(self):
         """Return the focused EditorContent, or None."""

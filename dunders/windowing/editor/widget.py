@@ -390,29 +390,41 @@ class EditorWidget(ScrollView):
         gutter = self._gutter_width()
         n = len(line)
 
-        # Per-column style array; index n is a slot for a cursor/marker past EOL.
-        col_styles: list[RichStyle] = [base] * (n + 1)
+        # Only the horizontally visible window [lo, hi) of the line is styled
+        # and rendered. Building styles and a Rich Text for the whole line cost
+        # O(line length) per row per repaint — seconds per keystroke on
+        # minified files with 100k+ character lines.
+        scroll_x = self.scroll_offset.x
+        body_width = max(0, self._content_width() - gutter)
+        lo = min(scroll_x, n)
+        hi = min(n, scroll_x + body_width)
+
+        # Per-column style array for line[lo:hi].
+        col_styles: list[RichStyle] = [base] * (hi - lo)
+
+        def paint(s: int, e: int, style: RichStyle) -> None:
+            for i in range(max(lo, s), min(e, hi)):
+                col_styles[i - lo] = style
 
         # Layer 0: syntax base.
         syntax_style_cache: dict[str, RichStyle] = {}
         for s, e, role in self._syntax_spans_rendered(buf_row):
+            if e <= lo or s >= hi:
+                continue
             style = syntax_style_cache.get(role)
             if style is None:
                 style = self._rich_style(role)
                 syntax_style_cache[role] = style
-            for i in range(max(0, s), min(e, n)):
-                col_styles[i] = style
+            paint(s, e, style)
 
         # Layer 1: fold placeholders.
         fold_style = self._rich_style("editor.fold_marker")
         for s, e in self._get_fold_placeholders_on_row(buf_row):
-            for i in range(max(0, s), min(e, n)):
-                col_styles[i] = fold_style
+            paint(s, e, fold_style)
 
         # Layer 2: search matches.
         for s, e, sstyle in self._get_search_spans_on_row(buf_row):
-            for i in range(max(0, s), min(e, n)):
-                col_styles[i] = sstyle
+            paint(s, e, sstyle)
 
         # Layer 3: selection.
         sel = self.buffer.selection_range()
@@ -430,9 +442,7 @@ class EditorWidget(ScrollView):
                     sel_start_vis = self._buffer_col_to_rendered_col(buf_row, sc) if buf_row == sr else 0
                     sel_end_vis = self._buffer_col_to_rendered_col(buf_row, ec) if buf_row == er else n
         if has_sel_on_line:
-            sel_style = self._rich_style("editor.selection")
-            for i in range(max(0, sel_start_vis), min(sel_end_vis, n)):
-                col_styles[i] = sel_style
+            paint(sel_start_vis, sel_end_vis, self._rich_style("editor.selection"))
 
         # Layer 4: cursor (only within the line; EOL handled by the marker below).
         vis_col = -1
@@ -441,22 +451,23 @@ class EditorWidget(ScrollView):
             in_sel = has_sel_on_line and sel_start_vis <= vis_col < sel_end_vis
             cur_role = "editor.selection_cursor" if in_sel else "editor.cursor"
             if 0 <= vis_col < n:
-                col_styles[vis_col] = self._rich_style(cur_role)
+                paint(vis_col, vis_col + 1, self._rich_style(cur_role))
 
         # Trailing marker for a cursor past EOL and/or a selection continuing
-        # onto the next line. Sets the style for the n-th (past-EOL) column.
+        # onto the next line: styles the n-th (past-EOL) column.
         cursor_at_eol = buf_row == self.buffer.cursor_row and vis_col >= n
         sel_spans_newline = has_sel_on_line and er >= 0 and buf_row < er
+        marker_style: RichStyle | None = None
         if cursor_at_eol:
             marker_role = "editor.selection_cursor" if sel_spans_newline else "editor.cursor"
-            col_styles[n] = self._rich_style(marker_role)
+            marker_style = self._rich_style(marker_role)
         elif sel_spans_newline:
-            col_styles[n] = self._rich_style("editor.selection")
+            marker_style = self._rich_style("editor.selection")
 
-        # Build the Text: gutter, then run-length grouped body (over the string),
-        # then the optional trailing marker space. Plain columns carry ``base``
-        # (the widget's theme style) so they render identically to the old plain
-        # branch.
+        # Build the Text: gutter, then run-length grouped body (over the
+        # visible slice), then the optional trailing marker space. Plain columns
+        # carry ``base`` (the widget's theme style) so they render identically
+        # to the old plain branch.
         # The gutter (line numbers) stays pinned; only the body scrolls
         # horizontally with ``scroll_offset.x``.
         gutter_text = Text(style=base)
@@ -465,25 +476,23 @@ class EditorWidget(ScrollView):
             gutter_text.append(f"{line_num} ", style=self._rich_style("editor.line_numbers"))
 
         body_text = Text(style=base)
+        width = hi - lo
         i = 0
-        while i < n:
+        while i < width:
             st = col_styles[i]
             j = i + 1
-            while j < n and col_styles[j] == st:
+            while j < width and col_styles[j] == st:
                 j += 1
-            body_text.append(line[i:j], style=st)
+            body_text.append(line[lo + i:lo + j], style=st)
             i = j
 
-        if cursor_at_eol or sel_spans_newline:
-            body_text.append(" ", style=col_styles[n])
+        if marker_style is not None and scroll_x <= n < scroll_x + body_width:
+            body_text.append(" ", style=marker_style)
 
         try:
             console = self.app.console
             gutter_strip = Strip(gutter_text.render(console))
             body_strip = Strip(body_text.render(console))
-            scroll_x = self.scroll_offset.x
-            body_width = max(0, self._content_width() - gutter)
-            body_strip = body_strip.crop(scroll_x, scroll_x + body_width)
             body_strip = body_strip.adjust_cell_length(body_width, base)
             return Strip.join([gutter_strip, body_strip])
         except Exception:
@@ -521,9 +530,10 @@ class EditorWidget(ScrollView):
         if buf_row < 0 or buf_row >= len(self._syntax_spans):
             return []
         out: list[tuple[int, int, str]] = []
+        folds = self._inline_folds_on_row(buf_row)
         for s in self._syntax_spans[buf_row]:
-            start = self._buffer_col_to_rendered_col(buf_row, s.start)
-            end = self._buffer_col_to_rendered_col(buf_row, s.end)
+            start = self._buffer_col_to_rendered_col(buf_row, s.start, folds)
+            end = self._buffer_col_to_rendered_col(buf_row, s.end, folds)
             if end > start:
                 out.append((start, end, f"editor.syntax.{s.role}"))
         return out
@@ -813,22 +823,40 @@ class EditorWidget(ScrollView):
         self._snap_cursor_past_folds()
         self._post_cursor_update()
 
-    def _buffer_col_to_rendered_col(self, row: int, buf_col: int) -> int:
+    def _inline_folds_on_row(self, row: int) -> list[FoldRegion]:
+        """Collapsed single-line fold regions on ``row``, ordered by start column.
+
+        The sort is stable, so among regions sharing a start column the first
+        in ``_fold_regions`` wins — the same one a left-to-right walk would take.
+        """
+        return sorted(
+            (r for r in self._fold_regions
+             if r.collapsed and not r.is_block and r.start_row == row),
+            key=lambda r: r.start_col,
+        )
+
+    def _buffer_col_to_rendered_col(
+        self, row: int, buf_col: int, folds: list[FoldRegion] | None = None,
+    ) -> int:
+        # Jumps from fold to fold instead of walking the line: on a minified
+        # file with 100k+ columns per line, a per-character walk called for
+        # every syntax span froze the editor. ``folds`` lets a caller that
+        # maps many columns on one row compute the row's folds once.
+        line = self.buffer.lines[row] if row < len(self.buffer.lines) else ""
+        limit = min(buf_col, len(line))
+        if folds is None:
+            folds = self._inline_folds_on_row(row)
         vis_col = 0
         pos = 0
-        line = self.buffer.lines[row] if row < len(self.buffer.lines) else ""
-        while pos < buf_col and pos < len(line):
-            skipped = False
-            for region in self._fold_regions:
-                if (region.collapsed and not region.is_block
-                        and region.start_row == row and region.start_col == pos):
-                    vis_col += len(region.rule.placeholder)
-                    pos = region.end_col + 1
-                    skipped = True
-                    break
-            if not skipped:
-                pos += 1
-                vis_col += 1
+        for region in folds:
+            if region.start_col < pos:
+                continue  # hidden inside a fold already skipped
+            if region.start_col >= limit:
+                break
+            vis_col += region.start_col - pos + len(region.rule.placeholder)
+            pos = region.end_col + 1
+        if pos < limit:
+            vis_col += limit - pos
         return vis_col
 
     def _snap_cursor_past_folds(self) -> None:
@@ -842,21 +870,21 @@ class EditorWidget(ScrollView):
                 return
 
     def _rendered_col_to_buffer_col(self, row: int, rendered_col: int) -> int:
+        line = self.buffer.lines[row] if row < len(self.buffer.lines) else ""
         buf_col = 0
         vis_col = 0
-        line = self.buffer.lines[row] if row < len(self.buffer.lines) else ""
-        while buf_col < len(line) and vis_col < rendered_col:
-            skipped = False
-            for region in self._fold_regions:
-                if (region.collapsed and not region.is_block
-                        and region.start_row == row and region.start_col == buf_col):
-                    vis_col += len(region.rule.placeholder)
-                    buf_col = region.end_col + 1
-                    skipped = True
-                    break
-            if not skipped:
-                buf_col += 1
-                vis_col += 1
+        for region in self._inline_folds_on_row(row):
+            if region.start_col < buf_col:
+                continue  # hidden inside a fold already skipped
+            if region.start_col >= len(line):
+                break
+            gap = region.start_col - buf_col
+            if vis_col + gap >= rendered_col:
+                break  # target lies in the plain text before this fold
+            vis_col += gap + len(region.rule.placeholder)
+            buf_col = region.end_col + 1
+        if vis_col < rendered_col:
+            buf_col += min(rendered_col - vis_col, max(0, len(line) - buf_col))
         return buf_col
 
     def action_document_start(self) -> None:

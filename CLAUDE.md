@@ -505,6 +505,28 @@ seeding its panels from the positional path.
   handled by `app.on_window_copy_part_requested`, which reads the path off
   `buffer.file_path` (not the window title, which is only the name and would
   go stale after Save As). An untitled buffer gets no buttons.
+- **Emoji widths are calibrated per terminal.** Rich sizes glyphs from the
+  latest Unicode tables, but macOS Terminal.app draws `⭐`/`⚡` (BMP emoji,
+  wide only since Unicode 9) in one cell and `🗣` (text-presentation SMP
+  pictograph) in two — every mismatch shifted the window's right border on
+  that row. `windowing/cell_widths.calibrate()` runs in `main` before the app
+  takes the screen: it prints group representatives, reads `ESC[6n` replies,
+  and patches `rich.cells.load_cell_table` for any group whose probes all
+  disagree with Rich (VS16 handling via `narrow_to_wide` too). Silent terminal
+  / no tty → no change; `DUNDERS_CELL_PROBE=0` disables it.
+  **Known unfixable case — PyCharm's terminal (JediTerm,
+  `TERMINAL_EMULATOR=JetBrains-JediTerm`):** every non-BMP character (`🔌 👯
+  🧠 📨`, any UTF-16 surrogate pair) takes 2 columns in JediTerm's buffer —
+  which is what it reports to `ESC[6n` and what cursor addressing uses — but
+  is painted in 1 cell. So everything to its right on that row, including
+  chops Textual positions absolutely (the window's right border), is drawn
+  one cell left per such character. No width value in Rich can fix a
+  buffer/screen mismatch inside the terminal; verified 2026-09-28 by
+  replaying captured Textual output in JediTerm (border shift = −1 × number
+  of non-BMP chars on the row, identical with and without SGR codes). Left
+  as is by decision; the only workaround would be substituting non-BMP chars
+  on output when running under JediTerm. BMP emoji (`⭐ ⚡`) are fine there:
+  calibration measures them as 1 and JediTerm paints them in 1 cell.
 - **Modal gating.** Almost every `action_*` calls `_has_active_modal()` first
   and bails so dialogs keep keyboard focus. New actions must do the same.
 - **Worker threads must marshal back to the UI thread** via

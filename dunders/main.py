@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dunders.app import DundersApp
 from dunders.mcp import run_stdio
+from dunders.windowing import cell_widths
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -155,6 +156,8 @@ def main() -> None:
     project_dir = _resolve_project_dir(
         args.pd, launch_mode, initial_path if launch_mode == "editor" else None
     )
+    # Before the app takes the screen: match emoji widths to this terminal.
+    cell_widths.calibrate()
     DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,
@@ -223,6 +226,8 @@ def main_we() -> None:
     launch_mode, initial_path, file_paths, terminal_mode, project_dir = (
         _resolve_we_args(sys.argv[1:])
     )
+    # Before the app takes the screen: match emoji widths to this terminal.
+    cell_widths.calibrate()
     DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,
@@ -237,6 +242,8 @@ def main_wew() -> None:
     launch_mode, initial_path, file_paths, terminal_mode, project_dir = (
         _resolve_we_args(["--suspend", *sys.argv[1:]])
     )
+    # Before the app takes the screen: match emoji widths to this terminal.
+    cell_widths.calibrate()
     DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,

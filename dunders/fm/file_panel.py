@@ -94,6 +94,28 @@ class FilePanel(WindowContent):
             self.new_scheme = new_scheme
             super().__init__()
 
+    class FooterAction(Message):
+        """A footer button was clicked; ``action`` is one of the targets in
+        ``FOOTER_BUTTONS`` ("copy_name", "copy_path", "insert")."""
+
+        def __init__(self, panel: "FilePanel", action: str) -> None:
+            self.panel = panel
+            self.action = action
+            super().__init__()
+
+    # Footer buttons before the cursor entry's name: copy the name, copy the
+    # full path, insert the name into the command line. One list feeds both
+    # the renderer and the click hit test (see ``_footer_button_spans``).
+    # The space after ⧉ keeps the letter readable where U+29C9 (East-Asian
+    # ambiguous) is drawn double-width — same as the editor title bar.
+    FOOTER_BUTTONS: tuple[tuple[str, str], ...] = (
+        ("copy_name", "⧉ N"),
+        ("copy_path", "⧉ P"),
+        ("insert", ">_"),
+    )
+    # Below this width the buttons would eat most of the name; hide them.
+    _FOOTER_BUTTONS_MIN_WIDTH = 30
+
     BINDINGS = [
         Binding("up", "cursor_up", show=False),
         Binding("down", "cursor_down", show=False),
@@ -128,6 +150,8 @@ class FilePanel(WindowContent):
         # Action icon the mouse is hovering, as ``(row_idx, span_start)`` or None.
         # Drives the hover highlight painted by the two action-cluster renderers.
         self._hover_action: tuple[int, int] | None = None
+        # Footer button under the mouse (its ``FOOTER_BUTTONS`` action) or None.
+        self._hover_footer: str | None = None
         self.sort_order: SortOrder = SortOrder.NAME
         self.sort_descending: bool = default_descending(SortOrder.NAME)
         # Active provider-layout sort: a (id, key) pair used instead of
@@ -968,16 +992,52 @@ class FilePanel(WindowContent):
             return self._render_multicol_row(y - 1, width)
         return self._render_entry_row(y - 1 + self.row_offset, width)
 
+    def _footer_button_spans(self, width: int) -> list[tuple[int, int, str, str]]:
+        """``(start, end, action, glyph)`` for each footer button, in cells.
+
+        Empty when there is no cursor entry or the panel is too narrow.
+        """
+        if not (0 <= self.cursor < len(self.entries)):
+            return []
+        if width < self._FOOTER_BUTTONS_MIN_WIDTH:
+            return []
+        spans = []
+        x = 1  # leading pad cell
+        for action, glyph in self.FOOTER_BUTTONS:
+            spans.append((x, x + len(glyph), action, glyph))
+            x += len(glyph) + 1  # one bar-coloured gap cell between buttons
+        return spans
+
     def _render_footer(self, width: int) -> Strip:
-        """Bottom panel row: full, untruncated name of the cursor entry."""
+        """Bottom panel row: footer buttons, then the full, untruncated name
+        of the cursor entry."""
         if 0 <= self.cursor < len(self.entries):
             name = self.entries[self.cursor].name
         else:
             name = ""
-        text = (" " + name).ljust(width)[:width]
         # Reverse video for the footer bar, dimmed so its background reads as
         # less bright than a full-intensity reverse.
-        return Strip([Segment(text, self._base_style() + RichStyle(reverse=True, dim=True))])
+        bar = self._base_style() + RichStyle(reverse=True, dim=True)
+        buttons = self._footer_button_spans(width)
+        if not buttons:
+            text = (" " + name).ljust(width)[:width]
+            return Strip([Segment(text, bar)])
+        button_style = self._base_style() + RichStyle(reverse=True, bold=True)
+        hover_style = self._action_hover_style(self._base_style())
+        segments = []
+        for _s, _e, action, glyph in buttons:
+            segments.append(Segment(" ", bar))
+            style = hover_style if action == self._hover_footer else button_style
+            segments.append(Segment(glyph, style))
+        segments.append(Segment(" " + name, bar))
+        return Strip(segments).adjust_cell_length(width, bar)
+
+    def _footer_action_at(self, x: int) -> str | None:
+        width = self._panel_size[0] if self._panel_size else self.size.width
+        for start, end, action, _glyph in self._footer_button_spans(width):
+            if start <= x < end:
+                return action
+        return None
 
     def _render_qs_bar(self, width: int) -> Strip:
         """Bottom-of-panel indicator: 'Quick search: <query>_'.
@@ -1507,8 +1567,12 @@ class FilePanel(WindowContent):
             return
 
         h = self._panel_size[1] if self._panel_size else self.size.height
-        # Footer row is non-interactive.
+        # Footer row: only its buttons react.
         if event.y == h - 1:
+            action = self._footer_action_at(event.x)
+            if action is not None:
+                self.post_message(self.FooterAction(self, action))
+                event.stop()
             return
         # Quick-search bar (row above footer when active) — ignore.
         if self._qs_active and event.y == h - 2:
@@ -1545,14 +1609,18 @@ class FilePanel(WindowContent):
         Only repaints when the hovered icon actually changes (per-pixel moves
         within the same icon are cheap no-ops)."""
         hover = self._action_at(event.x, event.y)
-        if hover != self._hover_action:
+        h = self._panel_size[1] if self._panel_size else self.size.height
+        footer = self._footer_action_at(event.x) if event.y == h - 1 else None
+        if hover != self._hover_action or footer != self._hover_footer:
             self._hover_action = hover
+            self._hover_footer = footer
             self.refresh()
 
     def on_leave(self, event: events.Leave) -> None:
         """Clear the action hover highlight when the pointer leaves the panel."""
-        if self._hover_action is not None:
+        if self._hover_action is not None or self._hover_footer is not None:
             self._hover_action = None
+            self._hover_footer = None
             self.refresh()
 
     def _render_entry_row(self, idx: int, width: int) -> Strip:
