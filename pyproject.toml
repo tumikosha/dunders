@@ -39,6 +39,10 @@ dependencies = [
     "textual>=3.0.0",
     "ptyprocess>=0.7.0",
     "pyyaml>=6.0",
+    # Password-protected zip archives: AES-256 write + AES/ZipCrypto read
+    # (stdlib zipfile cannot write encrypted members). MIT; its only dependency
+    # pycryptodomex is BSD/public domain — still permissive-only.
+    "pyzipper>=0.3.6",
 ]
 
 [project.optional-dependencies]

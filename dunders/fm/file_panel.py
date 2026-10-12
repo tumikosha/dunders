@@ -94,6 +94,16 @@ class FilePanel(WindowContent):
             self.new_scheme = new_scheme
             super().__init__()
 
+    class UnlockRequired(Message):
+        """Navigation into ``loc`` was held back: it is an encrypted archive
+        whose password isn't known yet. The app prompts for it and, once the
+        provider accepts it, calls ``_change_cwd_loc(loc)`` again."""
+
+        def __init__(self, panel: "FilePanel", loc: VfsPath) -> None:
+            self.panel = panel
+            self.loc = loc
+            super().__init__()
+
     class FooterAction(Message):
         """A footer button was clicked; ``action`` is one of the targets in
         ``FOOTER_BUTTONS`` ("copy_name", "copy_path", "insert")."""
@@ -515,7 +525,25 @@ class FilePanel(WindowContent):
         """Back-compat Path entry point (host app / tests)."""
         self._change_cwd_loc(VfsPath.local(Path(new_cwd)))
 
+    def _needs_unlock(self, new_loc: VfsPath) -> bool:
+        """Entering (from outside) an encrypted archive with no known password.
+        Moving around inside an already-entered archive never re-asks."""
+        old = self.cwd_loc
+        if old.scheme == new_loc.scheme and old.root == new_loc.root:
+            return False
+        try:
+            provider = self._registry.resolve(new_loc)
+        except KeyError:
+            return False
+        needs = getattr(provider, "needs_unlock", None)
+        return callable(needs) and bool(needs(new_loc))
+
     def _change_cwd_loc(self, new_loc: VfsPath) -> None:
+        # The single gate for every way into a location (Enter, "_" menu,
+        # bookmarks, history): an encrypted archive asks for its password first.
+        if self._needs_unlock(new_loc):
+            self.post_message(FilePanel.UnlockRequired(self, new_loc))
+            return
         old = self.cwd_loc
         self.cwd_loc = new_loc
         # If listing new_loc fails, fall back here (atomic navigation) and

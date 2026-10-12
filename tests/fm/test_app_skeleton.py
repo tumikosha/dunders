@@ -1692,7 +1692,7 @@ async def test_open_dunder_empty_spec_opens_docker_but_not_ftp(monkeypatch, tmp_
         await pilot.pause()
         calls = []
         monkeypatch.setattr(app, "_do_open_dunder",
-                            lambda scheme, spec: calls.append((scheme, spec)))
+                            lambda scheme, spec, **kw: calls.append((scheme, spec)))
         monkeypatch.setattr(app, "_close_modal", lambda dlg: None)
 
         dlg = NewFileDialog(prompt="x", context=OpenDunderRequest(scheme="docker"))

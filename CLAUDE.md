@@ -156,6 +156,35 @@ NC-style panels and file ops, built on top of `windowing`.
     then opens via `from_path(owns_file=True)`. Temps live in `<tmp>/dunders/`,
     are unlinked immediately after mmap on POSIX (crash-proof) with an on_unmount
     fallback, and orphans are swept at startup (`_sweep_scratch`).
+- Password-protected zip (`providers/zip_provider.py`, **pyzipper** — a core
+  dependency, MIT + BSD pycryptodomex; stdlib `zipfile` can't write encrypted
+  members). The central directory is never encrypted, so listing needs no
+  password; reading does. Passwords live only in `ZipProvider._passwords`
+  (memory, keyed by `os.path.realpath`, never persisted); a read that fails
+  with a remembered password `forget_password`s it so re-entering asks again,
+  and pack remembers/forgets the password of the archive it (re)creates.
+  `check_password` probes at most 64 KiB of the smallest *non-empty* encrypted
+  member (an empty one can't expose a ZipCrypto false positive) and lets
+  `OSError`/`NotImplementedError` propagate as "cannot open", not "wrong
+  password". Once one is known every
+  write path (append, F4 overwrite, delete-rewrite, mkdir) AES-256-encrypts, and
+  writing into a still-locked encrypted archive raises `ZipPasswordRequired`
+  instead of adding an unencrypted member. **Entering**: `FilePanel._change_cwd_loc`
+  is the single gate — a provider whose `needs_unlock(loc)` is true holds the
+  navigation back and posts `FilePanel.UnlockRequired`; `app._prompt_archive_password`
+  shows a masked `InputDialog` (`ArchiveUnlockRequest`), a wrong password
+  notifies and re-asks, blank/Cancel stays put, a right one `set_password`s and
+  re-enters. **Creating**: Create archive… (`pack_paths(password=)`), F5/F6 to
+  `zip:<name>` (`CopyMoveDialog` `#cm-password-row`, shown only while the value
+  starts with `zip:`) and the `_` menu (`NewFileDialog(password_field=True)` for
+  providers with `supports_password`) all carry a password field. Blank or
+  whitespace-only = no password — the one rule is `normalize_password`. A wrong
+  password for an existing archive in `resolve_target` raises `PermissionError`,
+  which `_resolve_prefixed_target` re-raises (so F5 reports it instead of
+  copying to a local file literally named `zip:…`); F5 into an existing
+  encrypted archive with no password is refused with one message. Known gap: a
+  new *empty* archive created with a password forgets it on restart (nothing
+  encrypted inside yet to detect). 7z passwords: not supported.
 - `line_source.py` — `LineSource`/`TextSource`/`MmapSource`: random-access lines
   without materialising the whole file (mmap + incremental newline index).
   Shared by the lazy CSV viewer and the lazy Markdown huge-file tier.

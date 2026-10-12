@@ -620,6 +620,28 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         color: $text;
         border: none;
     }
+    CopyMoveDialog #cm-password-row {
+        height: 1;
+        margin: 1 1 0 1;
+    }
+    CopyMoveDialog #cm-password-row.-hidden {
+        display: none;
+    }
+    CopyMoveDialog #cm-password-label {
+        width: 11;
+    }
+    CopyMoveDialog #cm-password {
+        width: 1fr;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $boost;
+    }
+    CopyMoveDialog #cm-password:focus {
+        background: $accent;
+        color: $text;
+        border: none;
+    }
     CopyMoveDialog #cm-buttons {
         height: 1;
         align: center middle;
@@ -647,11 +669,18 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         ok_hotkey: str | None = None,
         title: str = "Copy",
         context: object | None = None,
+        password_field: bool = False,
     ) -> None:
         super().__init__()
         self.prompt = prompt
         self._initial = initial
         self._ok_label = ok_label
+        # Password for a NEW archive named with the `zip:` prefix; the row is
+        # shown only while the destination starts with "zip:".
+        self._password_field = password_field
+        self._password_input = Input(
+            password=True, placeholder="empty = no password", id="cm-password"
+        )
         # Cancel always claims 'c'. If the OK label also starts with 'c'
         # (e.g. "Copy"), pick the first non-'c' alpha char so they don't
         # collide. Caller can override via ok_hotkey.
@@ -689,6 +718,10 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             checked=False, id="cm-exclude-on",
         )
         yield self._exclude_input
+        if self._password_field:
+            with Horizontal(id="cm-password-row", classes=self._password_row_class()):
+                yield Static("Password:", id="cm-password-label")
+                yield self._password_input
         with Horizontal(id="cm-buttons"):
             yield ShadowButton(
                 self._ok_label,
@@ -710,6 +743,7 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
                 self.query_one("#cm-skip", _PermCheckbox),
                 self.query_one("#cm-exclude-on", _PermCheckbox),
                 self._exclude_input,
+                *([self._password_input] if self._password_row_visible() else []),
                 self.query_one("#cm-ok", ShadowButton),
                 self.query_one("#cm-cancel", ShadowButton),
             ]
@@ -738,6 +772,33 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
         except Exception:
             return ()
         return parse_exclude_masks(self._exclude_input.value)
+
+    def _password_row_visible(self) -> bool:
+        return self._password_field and (
+            self._input.value.strip().lower().startswith("zip:")
+        )
+
+    def _password_row_class(self) -> str:
+        return "" if self._password_row_visible() else "-hidden"
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input is not self._input or not self._password_field:
+            return
+        try:
+            row = self.query_one("#cm-password-row")
+        except Exception:
+            return
+        row.set_class(not self._password_row_visible(), "-hidden")
+
+    @property
+    def password(self) -> str | None:
+        """Password for a new ``zip:`` archive, read at submit; ``None`` when
+        blank/whitespace or when the destination is not a ``zip:`` target."""
+        if not self._password_row_visible():
+            return None
+        from dunders.fm.providers.zip_provider import normalize_password
+
+        return normalize_password(self._password_input.value)
 
     def get_value(self) -> str:
         return self._input.value
@@ -814,6 +875,25 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
         color: $text;
         border: none;
     }
+    NewFileDialog #nf-password-row {
+        height: 1;
+        margin: 1 1 0 1;
+    }
+    NewFileDialog #nf-password-label {
+        width: 11;
+    }
+    NewFileDialog #nf-password {
+        width: 1fr;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $boost;
+    }
+    NewFileDialog #nf-password:focus {
+        background: $accent;
+        color: $text;
+        border: none;
+    }
     NewFileDialog #nf-buttons {
         height: 1;
         align: center middle;
@@ -842,10 +922,16 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
         title: str = "New",
         initial: str = "",
         placeholder: str = "",
+        password_field: bool = False,
     ) -> None:
         super().__init__()
         self.prompt = prompt
         self.context = context
+        # Optional masked "Password:" row (new archives); blank = no password.
+        self._password_input = (
+            Input(password=True, placeholder="empty = no password", id="nf-password")
+            if password_field else None
+        )
         self.window_title = title
         self._submit_label = submit_label
         # Reuse CopyMoveDialog's policy: Cancel claims 'c'; if the
@@ -860,6 +946,10 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
     def compose(self) -> ComposeResult:
         yield Static(self.prompt, id="nf-prompt")
         yield self._input
+        if self._password_input is not None:
+            with Horizontal(id="nf-password-row"):
+                yield Static("Password:", id="nf-password-label")
+                yield self._password_input
         with Horizontal(id="nf-buttons"):
             yield ShadowButton(
                 self._submit_label,
@@ -882,11 +972,22 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
         try:
             return [
                 self._input,
+                *([self._password_input] if self._password_input is not None else []),
                 self.query_one("#nf-create", ShadowButton),
                 self.query_one("#nf-cancel", ShadowButton),
             ]
         except Exception:
             return [self._input]
+
+    @property
+    def password(self) -> str | None:
+        """The password field's value, read at submit; ``None`` when the
+        dialog has no field or it is blank/whitespace."""
+        if self._password_input is None:
+            return None
+        from dunders.fm.providers.zip_provider import normalize_password
+
+        return normalize_password(self._password_input.value)
 
     def get_value(self) -> str:
         return self._input.value

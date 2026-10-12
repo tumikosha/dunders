@@ -576,8 +576,11 @@ def pack_paths(
     base: Path,
     on_progress: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
+    password: str | None = None,
 ) -> OpResult:
     """Pack ``sources`` into a new ``dest_zip`` (ZIP_DEFLATED).
+
+    A ``password`` (blank/whitespace = none) AES-256-encrypts every member.
 
     Arcnames are computed relative to ``base`` (the panel cwd) so a selection
     packs by its visible names (``dir/sub/f.txt``, ``a.txt``), not by absolute
@@ -604,7 +607,7 @@ def pack_paths(
         on_progress(0, total)
 
     try:
-        with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        with _open_pack_zip(dest_zip, password) as zf:
             for src in sources:
                 if _check_cancelled(cancel_event):
                     raise _Cancelled
@@ -624,6 +627,18 @@ def pack_paths(
         result.cancelled = True
         dest_zip.unlink(missing_ok=True)
     return result
+
+
+def _open_pack_zip(dest_zip: Path, password: str | None) -> zipfile.ZipFile:
+    if password is None or not password.strip():
+        return zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED)
+    import pyzipper
+
+    zf = pyzipper.AESZipFile(
+        dest_zip, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
+    )
+    zf.setpassword(password.encode("utf-8"))
+    return zf
 
 
 def _pack_one(

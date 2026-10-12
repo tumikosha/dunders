@@ -294,6 +294,15 @@ class PackRequest:
 
 
 @dataclass(frozen=True)
+class ArchiveUnlockRequest:
+    """Masked password prompt for entering an encrypted archive; on success
+    the panel navigates into ``loc`` (see ``FilePanel.UnlockRequired``)."""
+
+    panel: "FilePanel"
+    loc: VfsPath
+
+
+@dataclass(frozen=True)
 class OpenDunderRequest:
     """Open a dunder (provider) in the active panel from the "_" menu: prompt
     for a spec, then resolve_target it and navigate the panel into the result."""
@@ -788,6 +797,7 @@ class DundersApp(App):
         # dialog is torn down.
         skip = bool(getattr(event.dialog, "skip_existing", False))
         exclude = tuple(getattr(event.dialog, "exclude_masks", ()) or ())
+        password = getattr(event.dialog, "password", None)
         self._close_modal(event.dialog)
         if not isinstance(ctx, CopyMoveRequest):
             return
@@ -823,8 +833,22 @@ class DundersApp(App):
         # Provider prefix: "<scheme>:<spec>" (e.g. zip:backup.zip, ftp:host/path)
         # hands <spec> to that provider, which creates the target archive/
         # connection; we copy the selection in and open it in the dest panel.
-        target = self._resolve_prefixed_target(raw, base=ctx.dest_loc)
+        try:
+            target = self._resolve_prefixed_target(
+                raw, base=ctx.dest_loc, password=password
+            )
+        except PermissionError as exc:  # e.g. wrong password for an archive
+            self.notify(str(exc), severity="error")
+            return
         if target is not None:
+            needs = getattr(self._vfs_registry.resolve(target), "needs_unlock", None)
+            if callable(needs) and needs(target):
+                self.notify(
+                    f"{Path(target.root).name} is password-protected — "
+                    "type its password in the Password field",
+                    severity="error",
+                )
+                return
             dest_panel = self._opposite_panel(self._active_panel())
             self._run_copy_into_target(ctx, target, open_in=dest_panel,
                                        skip_existing=skip, exclude=exclude)
@@ -832,13 +856,17 @@ class DundersApp(App):
         user_dest = Path(raw).expanduser() if raw else ctx.dest
         self._run_copy_move(ctx, user_dest, skip_existing=skip, exclude=exclude)
 
-    def _resolve_prefixed_target(self, raw: str, *, base: VfsPath) -> VfsPath | None:
+    def _resolve_prefixed_target(
+        self, raw: str, *, base: VfsPath, password: str | None = None
+    ) -> VfsPath | None:
         """Map a typed ``<scheme>:<spec>`` destination to a write-target locator
         via the matching provider's ``resolve_target`` (its declared prefix).
 
         Returns None when there is no ``<scheme>:`` prefix for a registered
         provider that implements the optional resolver — the caller then treats
-        the value as an ordinary local path.
+        the value as an ordinary local path. A ``PermissionError`` (wrong
+        archive password) propagates so it is reported instead of silently
+        falling back to a local path literally named ``zip:…``.
         """
         scheme, sep, spec = raw.partition(":")
         if not sep or scheme not in self._vfs_registry.schemes():
@@ -848,7 +876,12 @@ class DundersApp(App):
         if resolver is None:
             return None
         try:
-            return resolver(spec.strip(), base=base)
+            # Only pass a password when there is one, so third-party resolvers
+            # written against the older (spec, *, base) signature keep working.
+            extra = {"password": password} if password is not None else {}
+            return resolver(spec.strip(), base=base, **extra)
+        except PermissionError:
+            raise
         except Exception:
             return None
 
@@ -1010,7 +1043,14 @@ class DundersApp(App):
 
         self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
 
-    def _run_pack(self, targets: list[Path], dest_zip: Path, base: Path) -> None:
+    def _run_pack(
+        self,
+        targets: list[Path],
+        dest_zip: Path,
+        base: Path,
+        *,
+        password: str | None = None,
+    ) -> None:
         if self.desktop is None:
             return
         progress = ProgressDialog(title="Packing", total=len(targets))
@@ -1027,7 +1067,15 @@ class DundersApp(App):
                 base=base,
                 on_progress=_on_progress,
                 cancel_event=progress.cancel_event,
+                password=password,
             )
+            # The fresh archive replaces whatever was at that path: remember
+            # its password (or drop a stale one) so entering it is consistent.
+            zp = self._vfs_registry.for_scheme("zip")
+            if password and not result.errors and not result.cancelled:
+                zp.set_password(str(dest_zip), password)
+            else:
+                zp.forget_password(str(dest_zip))
             self.call_from_thread(self._finish_op, "pack", progress, result)
 
         self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
@@ -1074,6 +1122,10 @@ class DundersApp(App):
                 target = Path(raw).expanduser()
                 if not target.is_dir():
                     self._open_editor_window(target, read_only=False)
+            return
+        if isinstance(ctx, ArchiveUnlockRequest):
+            self._close_modal(event.dialog)
+            self._unlock_archive(ctx, event.value)
             return
         if isinstance(ctx, DunderPasswordRequest):
             self._close_modal(event.dialog)
@@ -2483,8 +2535,9 @@ class DundersApp(App):
             context=PackRequest(targets=targets, base=panel.cwd),
             submit_label="Pack",
             title="Create archive",
+            password_field=True,
         )
-        show_modal(self.desktop, dialog, title="Create archive", size=(60, 7))
+        show_modal(self.desktop, dialog, title="Create archive", size=(60, 9))
         self.call_after_refresh(dialog.focus_input)
 
     def _open_dunder(self, scheme: str) -> None:
@@ -2521,11 +2574,15 @@ class DundersApp(App):
             title=label,
             initial=initial,
             placeholder=placeholder,
+            # Archive providers take an optional password for a new archive
+            # (blank = none); it also unlocks an existing encrypted one.
+            password_field=bool(getattr(provider, "supports_password", False)),
         )
         # Wider than the default modal so a provider's hint (e.g. Docker's
         # ssh:// URL form) fits in the input placeholder without truncation.
         width = max(60, len(placeholder) + 8) if placeholder else 60
-        show_modal(self.desktop, dialog, title=label, size=(width, 7))
+        height = 9 if getattr(provider, "supports_password", False) else 7
+        show_modal(self.desktop, dialog, title=label, size=(width, height))
         self.call_after_refresh(dialog.focus_input)
 
     def _open_tree_dunder(self) -> None:
@@ -3657,6 +3714,8 @@ class DundersApp(App):
         self, event: NewFileDialog.Submitted
     ) -> None:
         ctx = event.dialog.context
+        # Read the optional password field before the dialog is torn down.
+        password = getattr(event.dialog, "password", None)
         self._close_modal(event.dialog)
         if isinstance(ctx, MkdirRequest):
             name = event.value.strip()
@@ -3684,7 +3743,8 @@ class DundersApp(App):
                 return
             if not name.lower().endswith(".zip"):
                 name += ".zip"
-            self._run_pack(ctx.targets, ctx.base / name, ctx.base)
+            self._run_pack(ctx.targets, ctx.base / name, ctx.base,
+                           password=password)
             return
         if isinstance(ctx, OpenDunderRequest):
             spec = event.value.strip()
@@ -3693,7 +3753,7 @@ class DundersApp(App):
             # (FTP/SFTP) it stays a no-op. Providers opt in via
             # ``accepts_empty_open``.
             if spec or self._scheme_accepts_empty_open(ctx.scheme):
-                self._do_open_dunder(ctx.scheme, spec)
+                self._do_open_dunder(ctx.scheme, spec, password=password)
             return
         if isinstance(ctx, NewFileRequest):
             name = event.value.strip()
@@ -3828,8 +3888,12 @@ class DundersApp(App):
             context=CopyMoveRequest(
                 op=op, targets=targets, dest=dest, base=panel.cwd, dest_loc=dest_loc
             ),
+            # A local destination may be retyped as `zip:<name>` (new archive);
+            # the password row appears only while the value has that prefix.
+            password_field=not into_archive,
         )
-        show_modal(self.desktop, dialog, title=verb, size=(72, 14))
+        show_modal(self.desktop, dialog, title=verb,
+                   size=(72, 14 if into_archive else 16))
         self.call_after_refresh(dialog.focus_input)
 
     def action_edit(self) -> None:
@@ -5181,6 +5245,50 @@ class DundersApp(App):
         ):
             self._last_focused_panel_window = message.current
         message.stop()
+
+    def on_file_panel_unlock_required(self, message: "FilePanel.UnlockRequired") -> None:
+        """Ask for an encrypted archive's password before the panel enters it."""
+        message.stop()
+        self._prompt_archive_password(message.panel, message.loc)
+
+    def _prompt_archive_password(self, panel: "FilePanel", loc: VfsPath) -> None:
+        if self._has_active_modal() or self.desktop is None:
+            return
+        self._remember_active_panel_id()
+        name = Path(loc.root).name
+        dialog = InputDialog(
+            f"Password for {name}:",
+            context=ArchiveUnlockRequest(panel=panel, loc=loc),
+            password=True,
+        )
+        show_modal(self.desktop, dialog, title="Password", size=(60, 5))
+        self.call_after_refresh(dialog.focus_input)
+
+    def _unlock_archive(self, ctx: ArchiveUnlockRequest, value: str) -> None:
+        """Validate a typed archive password; enter on success, re-ask on a
+        wrong one. Blank (see ``normalize_password``) behaves like Cancel."""
+        from dunders.fm.providers.zip_provider import normalize_password
+
+        password = normalize_password(value)
+        if password is None:
+            return
+        try:
+            provider = self._vfs_registry.resolve(ctx.loc)
+        except KeyError:
+            return
+        try:
+            ok = provider.check_password(ctx.loc.root, password)
+        except (OSError, NotImplementedError) as exc:
+            self.notify(f"Cannot open {Path(ctx.loc.root).name}: {exc}",
+                        severity="error")
+            return
+        if not ok:
+            self.notify("Wrong password", severity="error")
+            # Defer past the closing modal so the modal guard lets it through.
+            self.call_after_refresh(self._prompt_archive_password, ctx.panel, ctx.loc)
+            return
+        provider.set_password(ctx.loc.root, password)
+        ctx.panel._change_cwd_loc(ctx.loc)
 
     def on_file_panel_scheme_changed(self, message: "FilePanel.SchemeChanged") -> None:
         # A panel navigated into/out of a provider (e.g. db:) — its provider-scoped
