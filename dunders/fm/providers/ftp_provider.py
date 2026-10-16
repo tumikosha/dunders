@@ -198,6 +198,9 @@ class _FtpWriter(io.RawIOBase):
         try:
             self._conn.voidcmd("TYPE I")
             self._sock = self._conn.transfercmd(f"STOR {self._remote}")
+        except (ftplib.Error, EOFError) as exc:
+            self._lock.release()
+            raise OSError(f"{self._remote}: {exc}") from exc
         except BaseException:
             self._lock.release()
             raise
@@ -223,6 +226,11 @@ class _FtpWriter(io.RawIOBase):
                 finally:
                     self._sock = None
                     self._lock.release()
+        except (ftplib.Error, EOFError) as exc:
+            # A server-side failure (``451 Failure writing to local file`` on a
+            # full disk, ``552`` quota, …) is a failed copy, not a crash: the
+            # engine reports OSError per file, anything else kills the app.
+            raise OSError(f"{self._remote}: {exc}") from exc
         finally:
             super().close()
 
@@ -430,18 +438,23 @@ class FtpProvider:
                     raise FileExistsError(f"{remote} already exists on server")
                 except ftplib.error_perm:
                     pass  # not found -> ok to write
+                except (ftplib.Error, EOFError) as exc:
+                    raise OSError(f"{remote}: {exc}") from exc
         return _FtpWriter(conn, lock, remote)
 
     def mkdir(self, parent: VfsPath, name: str) -> OpResult:
         conn = self._conn(parent.root)
         lock = self._lock_for(parent.root)
         remote = "/" + "/".join((*parent.parts, name))
+        result = OpResult()
         with lock:
             try:
                 conn.mkd(remote)
             except ftplib.error_perm:
                 pass  # already exists / tolerated, like zip/7z mkdir
-        return OpResult()
+            except (ftplib.Error, EOFError) as exc:
+                result.errors.append(OpError(loc=parent.child(name), reason=str(exc)))
+        return result
 
     def delete(
         self,

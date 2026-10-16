@@ -487,3 +487,38 @@ def test_connection_password_returns_login_secret(ftp_server):
     p.resolve_target(f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/"))
     assert p.connection_password(root) == "secret"
     assert p.connection_password("unknown@nope:21") is None
+
+
+class _FailingStorConn:
+    """Fake control connection: STOR opens, the server then replies 451."""
+
+    def __init__(self, fail_on: str) -> None:
+        self.fail_on = fail_on
+
+    def voidcmd(self, cmd):
+        return "200 ok"
+
+    def transfercmd(self, cmd):
+        if self.fail_on == "start":
+            raise ftplib.error_temp("451 Failure writing to local file.")
+        a, b = socket.socketpair()
+        self._peer = b
+        return a
+
+    def voidresp(self):
+        raise ftplib.error_temp("451 Failure writing to local file.")
+
+
+@pytest.mark.parametrize("fail_on", ["start", "close"])
+def test_upload_server_451_is_oserror_not_a_crash(fail_on):
+    """A server-side write failure (disk full on the FTP host) used to escape
+    as ftplib.error_temp, which the engine does not catch — the app crashed.
+    It must surface as OSError, and the connection lock must be released."""
+    from dunders.fm.providers.ftp_provider import _FtpWriter
+
+    lock = threading.Lock()
+    w = _FtpWriter(_FailingStorConn(fail_on), lock, "/x.bin")
+    with pytest.raises(OSError, match="451"):
+        w.write(b"data")
+        w.close()
+    assert not lock.locked()
