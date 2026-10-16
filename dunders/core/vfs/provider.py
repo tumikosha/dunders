@@ -180,7 +180,7 @@ class VfsProvider(Protocol):
         on_progress: ProgressCallback | None = None,
         on_status: "Callable | None" = None,
         cancel_event: threading.Event | None = None,
-        skip_existing: bool = False,
+        skip_existing: bool | str = False,
     ) -> OpResult | None: ...
 
     def move_within(

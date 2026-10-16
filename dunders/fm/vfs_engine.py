@@ -23,7 +23,9 @@ from typing import Literal
 from dunders.fm.exclude import is_excluded
 from dunders.core.vfs import VfsPath, VfsRegistry
 from dunders.core.vfs.provider import ProgressCallback, VfsProvider
-from dunders.fm.actions import CopyStatus, OpError, OpResult, StatusCallback
+from dunders.fm.actions import (
+    CopyStatus, OpError, OpResult, StatusCallback, should_skip,
+)
 
 
 __all__ = ["transfer"]
@@ -110,6 +112,8 @@ class _CopyProgress:
         self.cur_label = ""
         self.cur_done = 0
         self.cur_total = 0
+        self.read_bytes = 0      # pulled from the source
+        self.written_bytes = 0   # accepted by the destination
 
     def emit(self) -> None:
         if self.on_status is None:
@@ -125,6 +129,7 @@ class _CopyProgress:
             file_done=self.cur_done, file_total=self.cur_total,
             files_done=self.done_files,
             files_total=0 if self.indeterminate else self.total_files,
+            read_bytes=self.read_bytes, written_bytes=self.written_bytes,
         ))
 
     def file_start(self, name: str, size: int) -> None:
@@ -133,9 +138,16 @@ class _CopyProgress:
         self.cur_done = 0
         self.emit()
 
+    def read(self, n: int) -> None:
+        self.read_bytes += n
+        self.emit()
+
     def chunk(self, n: int) -> None:
+        """``n`` bytes reached the destination: the bars move on WRITTEN bytes,
+        never on bytes merely read or handed to a buffering writer."""
         self.done_bytes += n
         self.cur_done += n
+        self.written_bytes += n
         self.emit()
 
     def _advance_file(self) -> None:
@@ -170,7 +182,7 @@ def transfer(
     on_progress: ProgressCallback | None = None,
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
-    skip_existing: bool = False,
+    skip_existing: bool | str = False,
     exclude: tuple[str, ...] = (),
 ) -> OpResult:
     """Copy or move ``sources`` into ``dest_dir``.
@@ -181,7 +193,9 @@ def transfer(
     ``on_status`` is the rich copy channel (current file + byte progress); the
     UI wires it up so a big single file animates the bar. ``on_progress`` is
     the legacy whole-item counter still used by move. ``skip_existing`` leaves a
-    destination file untouched when it already exists (per-file).
+    destination file untouched when it already exists (per-file); passing
+    ``SKIP_SAME_SIZE`` instead keeps it only when its size equals the source's,
+    so an interrupted copy can be re-run to redo just the torn file.
 
     ``exclude`` is a tuple of fnmatch patterns from the copy dialog: any file or
     directory whose basename matches one is left out, a directory taking its
@@ -247,7 +261,7 @@ def _generic_transfer(
     on_progress: ProgressCallback | None,
     on_status: StatusCallback | None,
     cancel_event: threading.Event | None,
-    skip_existing: bool = False,
+    skip_existing: bool | str = False,
     exclude: tuple[str, ...] = (),
 ) -> OpResult:
     result = OpResult()
@@ -291,6 +305,9 @@ def _generic_transfer(
         total_bytes=total_bytes, total_files=total_files,
         use_bytes=total_bytes > 0, indeterminate=lazy,
     )
+    # Destination listings for the size policy, one per directory: comparing
+    # sizes file-by-file would otherwise cost a remote round trip per file.
+    dest_sizes: dict[VfsPath, dict[str, int]] = {}
     prog.emit()  # initial 0%
     if on_progress is not None and on_status is None and not lazy:
         on_progress(0, total_files)
@@ -317,7 +334,10 @@ def _generic_transfer(
                     out_name += suffix
                 dst = dest_dir.child(out_name)
                 dst_p = registry.resolve(dst)
-                if skip_existing and _dest_exists(dst_p, dst):
+                # An export's size is unknown up front, so the size policy
+                # never matches it: the table is exported again.
+                if skip_existing and _dest_exists(dst_p, dst) and should_skip(
+                        skip_existing, None, lambda: None):
                     reader.close()
                     prog.skip(0)
                     result.skipped.append(dst.to_local() if dst.scheme == "file" else dst)
@@ -334,6 +354,7 @@ def _generic_transfer(
                             chunk = reader.read(_CHUNK)
                             if not chunk:
                                 break
+                            prog.read(len(chunk))
                             writer.write(chunk)
                             if not owns:
                                 prog.chunk(len(chunk))
@@ -345,7 +366,7 @@ def _generic_transfer(
                 continue  # exported sources are copy-only even in move mode (data-safe; the table is not deleted)
             _copy_tree(registry, src, dest, size=None, skip_existing=skip_existing,
                        prog=prog, result=result, cancel_event=cancel_event,
-                       exclude=exclude)
+                       exclude=exclude, dest_sizes=dest_sizes)
         except _Cancelled:
             result.cancelled = True
             return result
@@ -417,14 +438,17 @@ def _copy_tree(
     dest: VfsPath,
     *,
     size: int | None,
-    skip_existing: bool,
+    skip_existing: bool | str,
     prog: "_CopyProgress",
     result: OpResult,
     cancel_event: threading.Event | None,
     exclude: tuple[str, ...] = (),
+    dest_sizes: dict[VfsPath, dict[str, int]] | None = None,
 ) -> None:
     if _cancelled(cancel_event):
         raise _Cancelled
+    if dest_sizes is None:
+        dest_sizes = {}
     src_p = registry.resolve(src)
     dst_p = registry.resolve(dest)
     if src_p.is_dir(src):
@@ -444,10 +468,12 @@ def _copy_tree(
             _copy_tree(registry, child.loc, dest.child(child.name),
                        size=child.size, skip_existing=skip_existing,
                        prog=prog, result=result, cancel_event=cancel_event,
-                       exclude=exclude)
+                       exclude=exclude, dest_sizes=dest_sizes)
     else:
         fsize = size if size is not None else _size_of(src_p, src)
-        if skip_existing and _dest_exists(dst_p, dest):
+        if skip_existing and _dest_exists(dst_p, dest) and should_skip(
+                skip_existing, fsize,
+                lambda: _dest_size(dst_p, dest, dest_sizes)):
             prog.skip(fsize)
             result.skipped.append(dest.to_local() if dest.scheme == "file" else dest)
             return
@@ -470,6 +496,7 @@ def _copy_tree(
                     chunk = reader.read(_CHUNK)
                     if not chunk:
                         break
+                    prog.read(len(chunk))
                     writer.write(chunk)
                     if not owns:
                         prog.chunk(len(chunk))
@@ -547,6 +574,35 @@ def _measure(
             files += 1
             total += max(child.size, 0)
     return files, total
+
+
+def _dest_size(provider: VfsProvider, loc: VfsPath,
+               cache: dict[VfsPath, dict[str, int]]) -> int | None:
+    """Size of an existing destination file, or None if it can't be read.
+
+    Local files are stat'ed directly; any other scheme lists the parent once
+    and caches the ``{name: size}`` map, so a resumed copy of a big remote tree
+    costs one listing per directory, not one per file."""
+    if loc.scheme == "file":
+        try:
+            return loc.to_local().stat().st_size
+        except OSError:
+            return None
+    parent = loc.parent
+    if parent is None:
+        return None
+    sizes = cache.get(parent)
+    if sizes is None:
+        try:
+            sizes = {
+                e.name: e.size
+                for e in provider.scan(parent, include_parent=False,
+                                       show_hidden=True)
+            }
+        except OSError:
+            sizes = {}
+        cache[parent] = sizes
+    return sizes.get(loc.name)
 
 
 def _size_of(provider: VfsProvider, loc: VfsPath) -> int:

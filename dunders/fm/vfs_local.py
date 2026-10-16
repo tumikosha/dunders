@@ -111,7 +111,7 @@ class LocalProvider:
         on_progress: ProgressCallback | None = None,
         on_status: actions.StatusCallback | None = None,
         cancel_event: threading.Event | None = None,
-        skip_existing: bool = False,
+        skip_existing: bool | str = False,
         exclude: tuple[str, ...] = (),
     ) -> actions.OpResult:
         return actions.copy_paths(

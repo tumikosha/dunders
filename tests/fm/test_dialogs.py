@@ -210,6 +210,69 @@ async def test_progress_dialog_two_bars_for_copy():
         assert "5.0M/20.0M" in overall and "25%" in overall
         file_bar = "".join(seg.text for seg in dlg.render_line(dlg._FILE_BAR_Y))
         assert "256.0K/1.0M" in file_bar and "25%" in file_bar
+        # Labelled, so a single-file copy's two identical bars are told apart.
+        assert overall.lstrip().startswith("Total")
+        assert file_bar.lstrip().startswith("File")
+        assert overall.index("[") == file_bar.index("[")
+
+
+@pytest.mark.asyncio
+async def test_progress_dialog_shows_read_and_written():
+    """Bytes read and bytes written are shown apart, so a destination still
+    flushing at the end reads as 'writing', not as a hang at 100%."""
+    from dunders.fm.actions import CopyStatus
+    dlg = ProgressDialog(title="Copying", total=1)
+
+    class _PHarness(App):
+        def compose(self) -> ComposeResult:
+            yield dlg
+
+    async with _PHarness().run_test() as pilot:
+        await pilot.pause()
+        dlg.set_copy_status(CopyStatus(
+            done=1024 * 1024, total=8 * 1024 * 1024, label="a.bin",
+            is_bytes=True, read_bytes=8 * 1024 * 1024,
+            written_bytes=1024 * 1024,
+        ))
+        await pilot.pause()
+        io_line = "".join(seg.text for seg in dlg.render_line(dlg._IO_Y))
+        io2_line = "".join(seg.text for seg in dlg.render_line(dlg._IO2_Y))
+        assert "Read:" in io_line and "8.0M" in io_line
+        assert "Written:" in io2_line and "1.0M" in io2_line
+        assert "/s" in io_line and "/s" in io2_line
+        assert "avg " in io_line and "avg " in io2_line
+        assert "Elapsed: 00:0" in io_line
+        assert dlg._cancel_y > dlg._IO2_Y
+        dlg._started -= 3725  # 1h 2m 5s ago
+        io_line = "".join(seg.text for seg in dlg.render_line(dlg._IO_Y))
+        assert "Elapsed: 1:02:0" in io_line
+        # Overall bar: 1/8 written (█), up to 8/8 read (▓), nothing left (░).
+        segs = list(dlg.render_line(dlg._BAR_Y))
+        bar = "".join(seg.text for seg in segs)
+        assert dlg._BAR_FILLED in bar and dlg._BAR_READ in bar
+        assert dlg._BAR_EMPTY not in bar
+        styles = {seg.style for seg in segs if dlg._BAR_READ in seg.text}
+        assert styles == {dlg._READ_STYLE}
+
+
+def test_progress_dialog_speed_follows_recent_window(monkeypatch):
+    """Speed is the delta across the last samples, so a stall shows 0/s
+    instead of a whole-run average that hides it."""
+    import dunders.fm.dialogs as dialogs_mod
+    clock = [100.0]
+    monkeypatch.setattr(dialogs_mod.time, "monotonic", lambda: clock[0])
+    dlg = ProgressDialog(title="Copying", total=1)
+    dlg.read_bytes = dlg.written_bytes = 0
+    dlg._tick_clock()
+    clock[0] += 1
+    dlg.read_bytes, dlg.written_bytes = 4 << 20, 2 << 20
+    dlg._tick_clock()
+    assert dlg._speeds() == (4 << 20, 2 << 20)
+    # Writer stalls for 4 s while reading is done: written speed drops to 0.
+    for _ in range(4):
+        clock[0] += 1
+        dlg._tick_clock()
+    assert dlg._speeds() == (0.0, 0.0)
 
 
 @pytest.mark.asyncio
@@ -448,7 +511,7 @@ async def test_copymove_dialog_tab_chain():
         harness.dialog.focus_input()
         await pilot.pause()
         # input -> skip -> exclude-checkbox -> exclude-field -> ok -> cancel
-        for expected in ("cm-skip", "cm-exclude-on", "cm-exclude",
+        for expected in ("cm-skip", "cm-skip-size", "cm-exclude-on", "cm-exclude",
                          "cm-ok", "cm-cancel"):
             await pilot.press("tab")
             await pilot.pause()
@@ -476,6 +539,17 @@ async def test_copymove_dialog_skip_existing_checkbox():
         await pilot.press("space")          # toggle on
         await pilot.pause()
         assert harness.dialog.skip_existing is True
+        await pilot.press("tab")            # -> "overwrite if size differs"
+        await pilot.pause()
+        assert harness.focused.id == "cm-skip-size"
+        await pilot.press("space")
+        await pilot.pause()
+        assert harness.dialog.skip_existing == "same_size"
+        await pilot.press("shift+tab")      # back to skip, untick it
+        await pilot.press("space")
+        await pilot.pause()
+        # The refinement alone means nothing: no skipping -> overwrite all.
+        assert harness.dialog.skip_existing is False
 
 
 @pytest.mark.asyncio

@@ -35,11 +35,21 @@ class _DriveWriter(io.BytesIO):
         super().__init__()
         self._on_close = on_close
         self._done = False
+        self._report = None
+
+    def attach_progress(self, report) -> bool:
+        """The upload happens in ``close``: own the byte counter so the copy bar
+        counts bytes as written only once Drive accepted them."""
+        self._report = report
+        return True
 
     def close(self) -> None:
         if not self._done:
             self._done = True
-            self._on_close(self.getvalue())
+            data = self.getvalue()
+            self._on_close(data)
+            if self._report is not None and data:
+                self._report(len(data))
         super().close()
 
 

@@ -282,6 +282,40 @@ class TestTransfer:
         assert not res.errors
         assert (root / "up.txt").read_text() == "uploaded"
 
+    def test_upload_streams_so_written_tracks_the_server(self, ftp_server, tmp_path):
+        """Each chunk must reach the server as it is written. The old writer
+        buffered the whole file and uploaded in close, so the bar said 100%
+        while the server had nothing yet, then the dialog froze."""
+        _host, port, root = ftp_server
+        reg = default_registry()
+        reg.for_scheme("ftp").resolve_target(
+            f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/")
+        )
+        local = tmp_path / "big.bin"
+        data = bytes(range(256)) * (3 * 1024 * 1024 // 256 + 7)  # > 3 chunks
+        local.write_bytes(data)
+        statuses = []
+        res = transfer(reg, [VfsPath.local(local)], _root_loc(port), mode="copy",
+                       on_status=statuses.append)
+        assert not res.errors
+        assert (root / "big.bin").read_bytes() == data
+        last = statuses[-1]
+        assert last.read_bytes == last.written_bytes == len(data)
+        # Written grew alongside reading, not in one jump at the end.
+        assert any(0 < s.written_bytes < len(data) for s in statuses)
+
+    def test_upload_empty_file(self, ftp_server, tmp_path):
+        _host, port, root = ftp_server
+        reg = default_registry()
+        reg.for_scheme("ftp").resolve_target(
+            f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/")
+        )
+        local = tmp_path / "empty.txt"
+        local.write_bytes(b"")
+        res = transfer(reg, [VfsPath.local(local)], _root_loc(port), mode="copy")
+        assert not res.errors
+        assert (root / "empty.txt").read_bytes() == b""
+
 
 @_needs_server
 class TestMutations:

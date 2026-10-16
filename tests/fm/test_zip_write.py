@@ -203,3 +203,60 @@ class TestFileIntoZip:
         assert len(res.skipped) == 1
         with zipfile.ZipFile(archive) as zf:
             assert zf.read("existing.txt") == b"old"
+
+
+class TestCopyProgress:
+    def test_new_member_streams_on_copy(self, tmp_path):
+        """A copy opens every writer with overwrite=True. A NEW member must still
+        stream per chunk (written grows with read); buffering it made the bar
+        say 100% and then freeze while close rebuilt the whole archive."""
+        archive = _make_zip(tmp_path / "a.zip")
+        src = tmp_path / "big.bin"
+        data = bytes(range(256)) * (3 * 1024 * 1024 // 256 + 7)
+        src.write_bytes(data)
+        statuses = []
+        res = transfer(default_registry(), [VfsPath.local(src)], _root(archive),
+                       mode="copy", on_status=statuses.append)
+        assert not res.errors
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.read("big.bin") == data
+        assert any(0 < s.written_bytes < len(data) for s in statuses)
+        assert statuses[-1].written_bytes == statuses[-1].read_bytes == len(data)
+
+    def test_overwritten_member_reports_written_at_close(self, tmp_path):
+        """Replacing an existing member still buffers (zipfile cannot edit in
+        place), so written stays behind read until the rebuild is done."""
+        archive = _make_zip(tmp_path / "a.zip")  # existing.txt
+        src = tmp_path / "existing.txt"
+        src.write_bytes(b"new contents")
+        statuses = []
+        res = transfer(default_registry(), [VfsPath.local(src)], _root(archive),
+                       mode="copy", on_status=statuses.append)
+        assert not res.errors
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.read("existing.txt") == b"new contents"
+        assert any(s.read_bytes == 12 and s.written_bytes == 0 for s in statuses)
+        assert statuses[-1].written_bytes == 12
+
+
+class TestResumeSameSize:
+    def test_only_the_torn_member_is_rewritten(self, tmp_path):
+        """SKIP_SAME_SIZE keeps a member whose size matches and redoes one whose
+        size differs — re-running an interrupted copy into an archive."""
+        from dunders.fm.actions import SKIP_SAME_SIZE
+        archive = tmp_path / "a.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("done.txt", b"XXXXX")   # same size as source, kept
+            zf.writestr("torn.txt", b"par")     # shorter: interrupted
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "done.txt").write_bytes(b"hello")
+        (src / "torn.txt").write_bytes(b"partial-no-more")
+        res = transfer(default_registry(),
+                       [VfsPath.local(src / "done.txt"), VfsPath.local(src / "torn.txt")],
+                       _root(archive), mode="copy", skip_existing=SKIP_SAME_SIZE)
+        assert not res.errors
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.read("done.txt") == b"XXXXX"
+            assert zf.read("torn.txt") == b"partial-no-more"
+        assert len(res.skipped) == 1

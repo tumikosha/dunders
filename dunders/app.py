@@ -795,7 +795,9 @@ class DundersApp(App):
         ctx = event.dialog.context
         # Read the "Skip existing" checkbox and the exclusion masks before the
         # dialog is torn down.
-        skip = bool(getattr(event.dialog, "skip_existing", False))
+        # False / True / SKIP_SAME_SIZE (resume: redo only files whose size
+        # differs) — kept as-is, not bool()-ed, so the size policy survives.
+        skip = getattr(event.dialog, "skip_existing", False)
         exclude = tuple(getattr(event.dialog, "exclude_masks", ()) or ())
         password = getattr(event.dialog, "password", None)
         self._close_modal(event.dialog)
@@ -923,7 +925,7 @@ class DundersApp(App):
         return _on_status
 
     def _run_copy_into_archive(self, ctx: CopyMoveRequest, *,
-                               skip_existing: bool = False,
+                               skip_existing: bool | str = False,
                                exclude: tuple[str, ...] = ()) -> None:
         """Copy/move the selection into the browsed archive (ctx.dest_loc)."""
         self._run_copy_into_target(ctx, ctx.dest_loc, skip_existing=skip_existing,
@@ -931,7 +933,7 @@ class DundersApp(App):
 
     def _run_copy_into_target(
         self, ctx: CopyMoveRequest, target: VfsPath, *, open_in=None, rename_to=None,
-        skip_existing: bool = False, exclude: tuple[str, ...] = (),
+        skip_existing: bool | str = False, exclude: tuple[str, ...] = (),
     ) -> None:
         """Copy/move the selection into ``target`` via the transfer engine.
 
@@ -982,7 +984,7 @@ class DundersApp(App):
         self._close_modal(event.dialog)
 
     def _run_copy_move(self, req: CopyMoveRequest, user_dest: Path, *,
-                       skip_existing: bool = False,
+                       skip_existing: bool | str = False,
                        exclude: tuple[str, ...] = ()) -> None:
         if self.desktop is None:
             return
@@ -3893,7 +3895,7 @@ class DundersApp(App):
             password_field=not into_archive,
         )
         show_modal(self.desktop, dialog, title=verb,
-                   size=(72, 14 if into_archive else 16))
+                   size=(72, 15 if into_archive else 17))
         self.call_after_refresh(dialog.focus_input)
 
     def action_edit(self) -> None:
@@ -4587,7 +4589,7 @@ class DundersApp(App):
         os.close(fd)
         tmp = Path(tmp_name)
         progress = ProgressDialog(title=f"Loading {entry.name}", total=max(entry.size, 1))
-        show_modal(self.desktop, progress, title="Loading", size=(64, 9))
+        show_modal(self.desktop, progress, title="Loading", size=(64, 11))
         self.call_after_refresh(progress.focus)
         on_status = self._status_marshaller(progress)
 
@@ -4607,7 +4609,8 @@ class DundersApp(App):
                         writer.write(chunk)
                         done += len(chunk)
                         on_status(
-                            CopyStatus(done, max(entry.size, 1), entry.name, is_bytes=True)
+                            CopyStatus(done, max(entry.size, 1), entry.name, is_bytes=True,
+                                       read_bytes=done, written_bytes=done)
                         )
             except OSError as exc:
                 error = exc

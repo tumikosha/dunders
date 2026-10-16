@@ -115,6 +115,12 @@ class CopyStatus:
     file_total: int = 0    # size of the current file (0 if unknown)
     files_done: int = 0    # files completed so far
     files_total: int = 0   # total files in the operation
+    # Raw I/O counters: bytes read from the source vs bytes the destination
+    # has actually accepted. They differ when a writer buffers or does its real
+    # work late (7z compresses on close, Drive/docker upload on close): the
+    # dialog shows both so a long wait at the end is visibly "still writing".
+    read_bytes: int = 0
+    written_bytes: int = 0
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -312,6 +318,30 @@ def _copy_one_file(
     shutil.copystat(src, dst, follow_symlinks=False)
 
 
+# "Skip existing" policy value that skips only a destination of the SAME size as
+# its source and overwrites one that differs — re-running an interrupted copy
+# then redoes the torn file and keeps the finished ones. The plain policy is a
+# bool (True = skip anything that exists), so callers pass this in its place.
+SKIP_SAME_SIZE = "same_size"
+
+
+def should_skip(policy, src_size: int | None,
+                dst_size: Callable[[], int | None]) -> bool:
+    """Decide "Skip existing" for a destination that already EXISTS.
+
+    ``policy`` is False (overwrite), True (skip) or :data:`SKIP_SAME_SIZE`.
+    ``dst_size`` is called lazily — only the size policy needs it, and on a
+    remote provider it may cost a listing. An unknown size on either side
+    never matches, so the file is copied again rather than wrongly kept."""
+    if not policy:
+        return False
+    if policy != SKIP_SAME_SIZE:
+        return True
+    if src_size is None or src_size < 0:
+        return False
+    return dst_size() == src_size
+
+
 def _copy_recursive(
     src: Path,
     dst: Path,
@@ -319,7 +349,7 @@ def _copy_recursive(
     on_bytes: Callable[[int], None],
     file_done: Callable[[], None],
     skip: Callable[[int, Path], None],
-    skip_existing: bool,
+    skip_existing: bool | str,
     cancel_event: threading.Event | None,
     exclude: tuple[str, ...] = (),
 ) -> None:
@@ -344,9 +374,17 @@ def _copy_recursive(
             try:
                 size = src.stat().st_size
             except OSError:
-                size = 0
-            skip(size, dst)
-            return
+                size = None
+
+            def _dst_size() -> int | None:
+                try:
+                    return dst.stat().st_size
+                except OSError:
+                    return None
+
+            if should_skip(skip_existing, size, _dst_size):
+                skip(size or 0, dst)
+                return
         _copy_one_file(src, dst, file_start, on_bytes, cancel_event)
         file_done()
 
@@ -359,7 +397,7 @@ def copy_paths(
     on_progress: ProgressCallback | None = None,
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
-    skip_existing: bool = False,
+    skip_existing: bool | str = False,
     exclude: tuple[str, ...] = (),
 ) -> OpResult:
     """Copy each source path into `dest_dir`, in chunks, with byte progress.
@@ -402,6 +440,7 @@ def copy_paths(
             st["done_bytes"], total_bytes, st["label"], is_bytes=True,
             file_done=st["cur_done"], file_total=st["cur_total"],
             files_done=st["done_files"], files_total=files_total,
+            read_bytes=st["done_bytes"], written_bytes=st["done_bytes"],
         ))
 
     def _advance_file() -> None:

@@ -9,6 +9,8 @@ closing the window after Result is received.
 from __future__ import annotations
 
 import threading
+import time
+from collections import deque
 from typing import TYPE_CHECKING
 
 from rich.segment import Segment
@@ -23,7 +25,7 @@ from textual import events
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
-from dunders.fm.actions import CopyStatus
+from dunders.fm.actions import SKIP_SAME_SIZE, CopyStatus
 from dunders.fm.exclude import DEFAULT_EXCLUDE, parse_exclude_masks
 from dunders.fm.file_entry import format_size
 from dunders.windowing.content import WindowContent
@@ -713,6 +715,12 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             label_markup="Skip existing (don't overwrite)",
             checked=False, id="cm-skip",
         )
+        # Refines "Skip existing" for resuming an interrupted copy: the torn
+        # file (size differs) is copied again, finished ones are kept.
+        yield _PermCheckbox(
+            label_markup="  …but overwrite if size differs (resume)",
+            checked=False, id="cm-skip-size",
+        )
         yield _PermCheckbox(
             label_markup="Exclude names matching:",
             checked=False, id="cm-exclude-on",
@@ -741,6 +749,7 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             return [
                 self._input,
                 self.query_one("#cm-skip", _PermCheckbox),
+                self.query_one("#cm-skip-size", _PermCheckbox),
                 self.query_one("#cm-exclude-on", _PermCheckbox),
                 self._exclude_input,
                 *([self._password_input] if self._password_row_visible() else []),
@@ -751,10 +760,17 @@ class CopyMoveDialog(FocusChainMixin, Container, WindowContent):
             return [self._input]
 
     @property
-    def skip_existing(self) -> bool:
-        """Whether the 'Skip existing' checkbox is ticked (read at submit)."""
+    def skip_existing(self) -> bool | str:
+        """The "Skip existing" policy, read at submit: False (overwrite), True
+        (skip anything that exists) or ``SKIP_SAME_SIZE`` when the "overwrite
+        if size differs" refinement is ticked too. The refinement alone means
+        nothing — without skipping, every existing file is overwritten anyway."""
         try:
-            return self.query_one("#cm-skip", _PermCheckbox).checked
+            if not self.query_one("#cm-skip", _PermCheckbox).checked:
+                return False
+            if self.query_one("#cm-skip-size", _PermCheckbox).checked:
+                return SKIP_SAME_SIZE
+            return True
         except Exception:
             return False
 
@@ -1073,6 +1089,8 @@ class ProgressDialog(WindowContent):
         self.file_total = 0
         self.files_done = 0
         self.files_total = 0
+        self.read_bytes = 0
+        self.written_bytes = 0
         # Animation clock for indeterminate bars: advances one step per update so
         # the marquee sweeps SMOOTHLY. Seeding the slider with the raw byte/file
         # count instead made the block teleport (count % width jumps by big,
@@ -1082,6 +1100,43 @@ class ProgressDialog(WindowContent):
         # style and gave no feedback at all on hover, so it read as dead.
         self._hover_cancel = False
         self.cancel_event = threading.Event()
+        # Copy shows elapsed time only — no ETA: a big tree's total is often
+        # unknown (measured lazily or not at all), so a forecast would lie.
+        self._started = time.monotonic()
+        # (time, read_bytes, written_bytes) sampled by the 1 s clock; the speed
+        # is the delta across this short window, so it follows the CURRENT
+        # rate (a stalled flush drops to 0) instead of a whole-run average.
+        self._samples: deque[tuple[float, int, int]] = deque(maxlen=4)
+
+    def on_mount(self) -> None:
+        # Tick once a second so the clock keeps running while the worker is
+        # silent — exactly when a destination is flushing and it matters most.
+        self.set_interval(1.0, self._tick_clock)
+
+    def _tick_clock(self) -> None:
+        self._samples.append(
+            (time.monotonic(), self.read_bytes, self.written_bytes))
+        if self.two_bars:
+            self.refresh()
+
+    def _speeds(self) -> tuple[float, float]:
+        """``(read, written)`` bytes/s over the sample window; before two
+        samples exist, the average since the dialog opened."""
+        now = time.monotonic()
+        if len(self._samples) >= 2:
+            t0, r0, w0 = self._samples[0]
+        else:
+            t0, r0, w0 = self._started, 0, 0
+        dt = now - t0
+        if dt <= 0:
+            return 0.0, 0.0
+        return ((self.read_bytes - r0) / dt, (self.written_bytes - w0) / dt)
+
+    def _elapsed_text(self) -> str:
+        secs = int(time.monotonic() - self._started)
+        h, rem = divmod(secs, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
     def set_progress(self, current: int, total: int) -> None:
         self.current = current
@@ -1102,25 +1157,40 @@ class ProgressDialog(WindowContent):
         self.file_total = status.file_total
         self.files_done = status.files_done
         self.files_total = status.files_total
+        self.read_bytes = status.read_bytes
+        self.written_bytes = status.written_bytes
         self.two_bars = True
         self._anim += 1
         self.refresh()
 
     # Layout: y0 title, y1 blank, y2 current file. Single-bar: y3 bar. Two-bar
-    # (copy): y3 overall bar, y4 current-file bar. The Cancel button renders on
+    # (copy): y3 overall bar, y4 current-file bar, y5 read bytes + speed and
+    # the elapsed time, y6 written bytes + speed.
+    # The bars move on bytes the destination accepted; the y5 line shows how far
+    # reading got ahead, so a writer that is still flushing (7z compressing, a
+    # buffered upload) reads as "still writing" rather than a hang at 100%.
+    # The Cancel button renders on
     # the LAST inner row (computed from the height), so the modal border can
     # never push it off-screen.
     _LABEL_Y = 2
     _BAR_Y = 3
     _FILE_BAR_Y = 4
+    _IO_Y = 5
+    _IO2_Y = 6
     _CANCEL_LABEL = "[ Cancel ]"
 
     _BAR_FILLED = "█"
+    _BAR_READ = "▓"   # read from the source, not yet accepted by the destination
     _BAR_EMPTY = "░"
+    # Three-tone byte bar: written / read-ahead / remaining. Standard ANSI names
+    # follow the terminal's own palette, so they stay legible on light and dark
+    # themes; the distinct glyphs carry the meaning even without colour.
+    _WRITTEN_STYLE = RichStyle(color="green")
+    _READ_STYLE = RichStyle(color="yellow")
 
     @property
     def _cancel_y(self) -> int:
-        return max(self._FILE_BAR_Y + 1, self.size.height - 1)
+        return max(self._IO2_Y + 1, self.size.height - 1)
 
     def render_line(self, y: int) -> Strip:
         width = self.size.width
@@ -1135,9 +1205,16 @@ class ProgressDialog(WindowContent):
         if y == self._LABEL_Y:
             return self._render_label(width)
         if y == self._BAR_Y:
-            return self._bar_line(width, self.current, self.total, self.is_bytes)
+            read = (self.current + self._read_ahead) if self.is_bytes else 0
+            tag = self._TOTAL_TAG if self.two_bars else ""
+            return self._bar_line(width, self.current, self.total, self.is_bytes,
+                                  read=read, tag=tag)
         if self.two_bars and y == self._FILE_BAR_Y:
-            return self._bar_line(width, self.file_done, self.file_total, True)
+            return self._bar_line(width, self.file_done, self.file_total, True,
+                                  read=self.file_done + self._read_ahead,
+                                  tag=self._FILE_TAG)
+        if self.two_bars and y in (self._IO_Y, self._IO2_Y):
+            return self._render_io(width, y)
         return Strip([Segment(" " * width)])
 
     def _render_label(self, width: int) -> Strip:
@@ -1151,6 +1228,26 @@ class ProgressDialog(WindowContent):
             text = left.ljust(width)[:width]
         return Strip([Segment(text, RichStyle(dim=True))])
 
+    def _render_io(self, width: int, y: int) -> Strip:
+        """y5: read bytes + speed, elapsed on the right; y6: written + speed."""
+        left = ""
+        if self.read_bytes or self.written_bytes:
+            r_speed, w_speed = self._speeds()
+            n, speed, name = ((self.read_bytes, r_speed, "Read:")
+                              if y == self._IO_Y else
+                              (self.written_bytes, w_speed, "Written:"))
+            # Current rate (reacts to a stall at once) next to the whole-run
+            # average (what the copy has really sustained).
+            elapsed = time.monotonic() - self._started
+            avg = n / elapsed if elapsed > 0 else 0.0
+            left = (f"  {name:<8} {format_size(n):>7}"
+                    f"  {format_size(int(speed)) + '/s':>9}"
+                    f"  avg {format_size(int(avg))}/s")
+        right = f"Elapsed: {self._elapsed_text()} " if y == self._IO_Y else ""
+        pad = max(1, width - len(left) - len(right))
+        text = (left + " " * pad + right)[:width]
+        return Strip([Segment(text.ljust(width), RichStyle(dim=True))])
+
     @staticmethod
     def _ratio(done: int, total: int) -> float:
         if total > 0:
@@ -1163,9 +1260,22 @@ class ProgressDialog(WindowContent):
     # itself is then a constant width for a given dialog width, and the two bars
     # line up under each other.
     _COUNTER_W = 18
+    # Copy shows two bars that look identical for a single file; tag them so
+    # the whole operation and the current file are told apart. Equal widths
+    # keep the two bars aligned.
+    _TOTAL_TAG = "Total "
+    _FILE_TAG = "File  "
     _PCT_W = 4
 
-    def _bar_line(self, width: int, done: int, total: int, is_bytes: bool) -> Strip:
+    @property
+    def _read_ahead(self) -> int:
+        """Bytes read but not yet written. Every earlier file's writer has
+        closed (and reported) before the next one opens, so the whole gap
+        belongs to the current file."""
+        return max(0, self.read_bytes - self.written_bytes)
+
+    def _bar_line(self, width: int, done: int, total: int, is_bytes: bool,
+                  *, read: int = 0, tag: str = "") -> Strip:
         indet = total <= 0
         if is_bytes:
             counter = (format_size(done) if indet
@@ -1175,15 +1285,26 @@ class ProgressDialog(WindowContent):
         pct = "" if indet else f"{int(self._ratio(done, total) * 100)}%"
         counter = counter[:self._COUNTER_W].rjust(self._COUNTER_W)
         pct = pct[:self._PCT_W].rjust(self._PCT_W)
-        # Reserved: "  [" (3) + "]" (1) + " " + counter + " " + pct.
-        bar_width = max(1, width - 5 - self._COUNTER_W - self._PCT_W - 2)
+        head = f"  {tag}["
+        # Reserved: head + "]" (1) + " " + counter + " " + pct.
+        bar_width = max(1, width - len(head) - 2 - self._COUNTER_W - self._PCT_W - 2)
         if indet:
-            bar = self._sliding_bar(bar_width)
-        else:
-            filled = int(self._ratio(done, total) * bar_width)
-            bar = self._BAR_FILLED * filled + self._BAR_EMPTY * (bar_width - filled)
-        text = f"  [{bar}] {counter} {pct}".ljust(width)[:width]
-        return Strip([Segment(text)])
+            text = f"{head}{self._sliding_bar(bar_width)}] {counter} {pct}"
+            return Strip([Segment(text.ljust(width)[:width])])
+        filled = int(self._ratio(done, total) * bar_width)
+        ahead = max(filled, int(self._ratio(max(read, done), total) * bar_width))
+        tail = f"] {counter} {pct}"
+        segs = [
+            Segment(head),
+            Segment(self._BAR_FILLED * filled, self._WRITTEN_STYLE),
+            Segment(self._BAR_READ * (ahead - filled), self._READ_STYLE),
+            Segment(self._BAR_EMPTY * (bar_width - ahead)),
+            Segment(tail),
+        ]
+        used = len(head) + bar_width + len(tail)
+        if used < width:
+            segs.append(Segment(" " * (width - used)))
+        return Strip(segs).crop(0, width)
 
     def _sliding_bar(self, bar_width: int) -> str:
         """A block that sweeps smoothly back and forth, one cell per update

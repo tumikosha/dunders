@@ -109,23 +109,62 @@ def _parse_list_line(line: str) -> tuple[str, bool, int] | None:
     return name, is_dir, size
 
 
-class _FtpWriter(io.BytesIO):
-    """Buffers bytes and STORs them to the remote path on close."""
+class _FtpWriter(io.RawIOBase):
+    """Streams bytes to the remote path over one ``STOR`` data connection.
+
+    The data socket opens on the first ``write`` and every chunk is sent as it
+    arrives, so the copy bar tracks bytes that actually left for the server.
+    The old ``BytesIO`` writer buffered the whole file and uploaded it in
+    ``close``: the bar hit 100% while nothing had been sent, then the dialog
+    froze for the entire upload (and a multi-GB file sat in memory).
+
+    The connection lock is held from the first ``write`` until ``close`` — the
+    control channel is busy for the whole transfer. ``open_read`` returns a
+    fully-read buffer, so an ftp -> ftp copy never needs the lock mid-stream.
+    """
 
     def __init__(self, conn: ftplib.FTP, lock: threading.Lock, remote: str) -> None:
         super().__init__()
         self._conn = conn
         self._lock = lock
         self._remote = remote
-        self._flushed = False
+        self._sock = None
+
+    def writable(self) -> bool:
+        return True
+
+    def _start(self) -> None:
+        self._lock.acquire()
+        try:
+            self._conn.voidcmd("TYPE I")
+            self._sock = self._conn.transfercmd(f"STOR {self._remote}")
+        except BaseException:
+            self._lock.release()
+            raise
+
+    def write(self, b) -> int:
+        if self._sock is None:
+            self._start()
+        self._sock.sendall(b)
+        return len(b)
 
     def close(self) -> None:
-        if not self._flushed and not self.closed:
-            self._flushed = True
-            data = self.getvalue()
-            with self._lock:
-                self._conn.storbinary(f"STOR {self._remote}", io.BytesIO(data))
-        super().close()
+        if self.closed:
+            return
+        try:
+            if self._sock is None:
+                # Nothing written: an empty file still has to exist remotely.
+                with self._lock:
+                    self._conn.storbinary(f"STOR {self._remote}", io.BytesIO(b""))
+            else:
+                try:
+                    self._sock.close()
+                    self._conn.voidresp()
+                finally:
+                    self._sock = None
+                    self._lock.release()
+        finally:
+            super().close()
 
 
 class FtpProvider:

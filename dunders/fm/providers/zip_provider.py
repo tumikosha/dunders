@@ -172,10 +172,20 @@ class _ZipMemberWriter(io.RawIOBase):
         self._archive = archive
         self._pwd = pwd
         self._inner = inner
-        self._overwrite = overwrite
         self._buf: io.BytesIO | None = None
         self._zf: zipfile.ZipFile | None = None
         self._member: BinaryIO | None = None
+        self._report = None  # progress sink for the buffered overwrite path
+        # A copy passes overwrite=True for every file (it may clobber), but only
+        # a member that already exists needs the buffer-and-rebuild path. A new
+        # member streams like append: buffering it made the copy bar race to
+        # 100% and then freeze while the whole archive was rewritten in close.
+        if overwrite and Path(archive).exists():
+            with _open_zip(archive, "r", pwd) as zf:
+                overwrite = inner in zf.namelist()
+        else:
+            overwrite = False
+        self._overwrite = overwrite
         if overwrite:
             self._buf = io.BytesIO()
             return
@@ -195,6 +205,15 @@ class _ZipMemberWriter(io.RawIOBase):
             raise
         self._zf = zf
 
+    def attach_progress(self, report) -> bool:
+        """Buffered overwrite writes nothing until ``close`` rebuilds the
+        archive, so own the byte counter and report the member then; the
+        streaming path writes per chunk and lets the engine count."""
+        if not self._overwrite:
+            return False
+        self._report = report
+        return True
+
     def writable(self) -> bool:
         return True
 
@@ -209,9 +228,10 @@ class _ZipMemberWriter(io.RawIOBase):
         try:
             if self._overwrite:
                 if self._buf is not None:
-                    _replace_member(
-                        self._archive, self._inner, self._buf.getvalue(), self._pwd
-                    )
+                    data = self._buf.getvalue()
+                    _replace_member(self._archive, self._inner, data, self._pwd)
+                    if self._report is not None and data:
+                        self._report(len(data))
             else:
                 if self._member is not None:
                     self._member.close()
@@ -535,7 +555,7 @@ class ZipProvider:
         on_progress: ProgressCallback | None = None,
         on_status=None,
         cancel_event: threading.Event | None = None,
-        skip_existing: bool = False,
+        skip_existing: bool | str = False,
     ) -> OpResult | None:
         return None  # no intra-zip fast path; extraction is cross-provider
 

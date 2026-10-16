@@ -196,6 +196,14 @@ class _DockerWriter(io.BytesIO):
         self._provider = provider
         self._loc = loc
         self._flushed = False
+        self._report = None
+
+    def attach_progress(self, report) -> bool:
+        """Nothing reaches the container before ``close``: own the byte counter
+        so the copy bar shows the data as written only once ``docker cp`` ran,
+        instead of hitting 100% while it is merely buffered."""
+        self._report = report
+        return True
 
     def close(self):
         if not self._flushed and not self.closed:
@@ -212,6 +220,8 @@ class _DockerWriter(io.BytesIO):
                 tf.addfile(info, io.BytesIO(data))
             self._provider._run(["cp", "-", f"{container}:{parent}"],
                                 endpoint=loc.root, input=buf.getvalue())
+            if self._report is not None and data:
+                self._report(len(data))
         io.BytesIO.close(self)
 
 

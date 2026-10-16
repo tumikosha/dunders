@@ -356,3 +356,21 @@ def test_copy_cancellation_mid_tree(tmp_path: Path):
     # was honoured at the next file-boundary check.
     copied = list((dst / "big").iterdir()) if (dst / "big").exists() else []
     assert 0 < len(copied) < 50
+
+
+def test_copy_paths_skip_same_size_redoes_only_the_torn_file(tmp_path):
+    """Resume an interrupted local copy: same-size files stay, the torn one is
+    copied again; nested directories are walked too."""
+    from dunders.fm.actions import SKIP_SAME_SIZE, copy_paths
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.bin").write_bytes(b"12345")
+    (src / "sub" / "b.bin").write_bytes(b"0123456789")
+    dst = tmp_path / "dst"
+    (dst / "src" / "sub").mkdir(parents=True)
+    (dst / "src" / "a.bin").write_bytes(b"XXXXX")        # same size: kept
+    (dst / "src" / "sub" / "b.bin").write_bytes(b"012")  # torn: redone
+    res = copy_paths([src], dst, skip_existing=SKIP_SAME_SIZE)
+    assert not res.errors
+    assert (dst / "src" / "a.bin").read_bytes() == b"XXXXX"
+    assert (dst / "src" / "sub" / "b.bin").read_bytes() == b"0123456789"
