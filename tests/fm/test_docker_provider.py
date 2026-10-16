@@ -319,7 +319,8 @@ class TestFileOps:
     def test_open_read_uses_exec_cat(self):
         seen = {}
         p = DockerProvider()
-        p._run = lambda args, *, endpoint="", input=None: seen.update(args=args) or b"bytes"
+        # open_read streams a real process; stand docker in with printf.
+        p._cmd = lambda args, endpoint="": seen.update(args=args) or ["printf", "bytes"]
         assert p.open_read(_cfs("etc", "x")).read() == b"bytes"
         assert seen["args"] == ["exec", "web", "cat", "--", "/etc/x"]
 
@@ -397,6 +398,44 @@ class TestWrite:
         import io as _io, tarfile as _tar
         tf = _tar.open(fileobj=_io.BytesIO(seen["input"]))
         assert tf.getnames() == ["new.txt"]
+
+    def test_open_write_with_size_streams_a_tar(self, tmp_path):
+        """With the exact size known, bytes are piped to `docker cp -` as they
+        are written (no whole-file buffer); the result is a valid tar."""
+        import io as _io
+        import tarfile as _tar
+        out = tmp_path / "piped.tar"
+        seen = {}
+        p = DockerProvider()
+        p._cmd = lambda args, endpoint="": (
+            seen.update(args=args) or ["sh", "-c", f"cat > '{out}'"])
+        data = b"x" * 70_000
+        w = p.open_write(_cfs("etc", "new.txt"), overwrite=True, size_hint=len(data))
+        for i in range(0, len(data), 10_000):
+            w.write(data[i:i + 10_000])
+        w.close()
+        assert seen["args"] == ["cp", "-", "web:/etc"]
+        tf = _tar.open(fileobj=_io.BytesIO(out.read_bytes()))
+        assert tf.getnames() == ["new.txt"]
+        assert tf.extractfile("new.txt").read() == data
+
+    def test_streamed_write_short_is_abandoned(self, tmp_path):
+        """A cancel (fewer bytes than announced) kills docker instead of
+        finishing the tar, so no truncated file lands."""
+        p = DockerProvider()
+        p._cmd = lambda args, endpoint="": ["sh", "-c", "cat > /dev/null"]
+        w = p.open_write(_cfs("etc", "new.txt"), overwrite=True, size_hint=100)
+        w.write(b"x" * 10)
+        w.close()   # no error, process killed
+        assert w._proc.returncode != 0
+
+    def test_streamed_read_nonzero_exit_raises(self):
+        p = DockerProvider()
+        p._cmd = lambda args, endpoint="": ["sh", "-c", "echo boom >&2; exit 1"]
+        r = p.open_read(_cfs("etc", "x"))
+        assert r.read() == b""
+        with pytest.raises(OSError, match="boom"):
+            r.close()
 
 
 class TestWriteAndResolve:
@@ -809,7 +848,7 @@ class TestVolumeBrowse:
     def test_open_read_volume_argv(self):
         seen = {}
         p = DockerProvider()
-        p._run = lambda args, *, endpoint="", input=None: seen.update(args=args) or b"data"
+        p._cmd = lambda args, endpoint="": seen.update(args=args) or ["printf", "data"]
         assert p.open_read(_v("volumes", "volume:data", "a.txt")).read() == b"data"
         assert "cat" in seen["args"] and seen["args"][-1] == "/mnt/a.txt"
 

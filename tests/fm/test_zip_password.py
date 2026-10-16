@@ -16,7 +16,7 @@ import pytest
 
 from dunders.core.vfs import VfsPath
 from dunders.fm.actions import pack_paths
-from dunders.fm.dialogs import CopyMoveDialog, InputDialog, NewFileDialog
+from dunders.fm.dialogs import CopyMoveDialog, InputDialog, NewFileDialog, PackDialog
 from dunders.fm.file_panel import FilePanel
 from dunders.fm.providers.zip_provider import (
     ZipPasswordRequired,
@@ -366,7 +366,7 @@ async def test_pack_dialog_password(tmp_path):
         panel.cursor = next(i for i, e in enumerate(panel.entries) if e.name == "a.txt")
         app.action_pack()
         await pilot.pause()
-        dialog = app.query_one(NewFileDialog)
+        dialog = app.query_one(PackDialog)
         dialog._input.value = "packed.zip"
         dialog._password_input.value = PW
         dialog.action_submit()
@@ -483,7 +483,7 @@ async def test_repack_with_new_password_replaces_remembered_one(tmp_path):
             )
             app.action_pack()
             await pilot.pause()
-            dialog = app.query_one(NewFileDialog)
+            dialog = app.query_one(PackDialog)
             dialog._input.value = "packed.zip"
             dialog._password_input.value = pw
             dialog.action_submit()

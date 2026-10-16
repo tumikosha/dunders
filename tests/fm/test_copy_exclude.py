@@ -26,7 +26,7 @@ def test_parse_exclude_masks_accepts_every_separator():
 
 def test_parse_exclude_masks_keeps_the_negation_prefix():
     # The "-" survives parsing; is_excluded is the only interpreter.
-    assert parse_exclude_masks(DEFAULT_EXCLUDE) == (".*", "-.gitignore")
+    assert parse_exclude_masks(DEFAULT_EXCLUDE) == (".*", "-.gitignore", "venv*")
 
 
 def test_split_masks_separates_exclusions_from_exceptions():
@@ -42,6 +42,10 @@ def test_default_mask_drops_dotfiles_but_keeps_gitignore():
     assert is_excluded(".env", masks)
     assert not is_excluded(".gitignore", masks)
     assert not is_excluded("main.py", masks)
+    # Virtualenvs too, the trailing ";" adding no empty pattern.
+    assert is_excluded("venv", masks)
+    assert is_excluded("venv312", masks)
+    assert not is_excluded("myvenv", masks)
 
 
 def test_exception_wins_regardless_of_order():

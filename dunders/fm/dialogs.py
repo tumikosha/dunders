@@ -26,7 +26,9 @@ from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
 from dunders.fm.actions import SKIP_SAME_SIZE, CopyStatus
-from dunders.fm.exclude import DEFAULT_EXCLUDE, parse_exclude_masks
+from dunders.fm.exclude import (
+    DEFAULT_EXCLUDE, DEFAULT_PACK_EXCLUDE, parse_exclude_masks,
+)
 from dunders.fm.file_entry import format_size
 from dunders.windowing.content import WindowContent
 from dunders.windowing.helpers import ModalWindow
@@ -49,6 +51,7 @@ __all__ = [
     "FindFileDialog",
     "InputDialog",
     "NewFileDialog",
+    "PackDialog",
     "ProgressDialog",
     "ShadowButton",
 ]
@@ -1045,6 +1048,287 @@ class NewFileDialog(FocusChainMixin, Container, WindowContent):
             self.action_cancel()
 
 
+class _Cycler(Static):
+    """One-row ``Label:  ◀ value ▶`` choice. Left/Right/Space/Enter or a click
+    steps through ``options``; posts :class:`_Cycler.Changed`. Focus styling
+    matches ``_PermCheckbox`` so the two read as one family of fields."""
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    _Cycler {
+        height: 1;
+        width: 100%;
+        padding: 0 1;
+        background: $surface;
+        color: $text;
+    }
+    _Cycler:focus {
+        background: $accent;
+        color: $text;
+        text-style: bold;
+    }
+    """
+
+    BINDINGS = [
+        Binding("left", "step(-1)", show=False),
+        Binding("right", "step(1)", show=False),
+        Binding("space", "step(1)", show=False),
+        Binding("enter", "step(1)", show=False),
+    ]
+
+    class Changed(Message):
+        def __init__(self, cycler: "_Cycler") -> None:
+            self.cycler = cycler
+            super().__init__()
+
+    def __init__(self, label: str, options: list[tuple[object, str]], *,
+                 index: int = 0, id: str | None = None) -> None:
+        self._label = label
+        self.options = options
+        self.index = index
+        super().__init__(self._text(), markup=False, id=id)
+
+    @property
+    def value(self) -> object:
+        return self.options[self.index][0]
+
+    def _text(self) -> str:
+        return f"{self._label:<9}◀ {self.options[self.index][1]} ▶"
+
+    def action_step(self, delta: int) -> None:
+        self.index = (self.index + delta) % len(self.options)
+        self.update(self._text())
+        self.post_message(_Cycler.Changed(self))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.focus()
+        self.action_step(1)
+
+
+class PackDialog(FocusChainMixin, Container, WindowContent):
+    """"Create archive…": archive name, format (zip/7z), compression level,
+    an optional exclusion filter and — zip only — a password.
+
+    Switching the format swaps the name's ``.zip``/``.7z`` suffix. The
+    password row hides for 7z: the app cannot open encrypted 7z archives, so
+    it never creates one."""
+
+    can_focus = False  # the name Input takes focus
+
+    DEFAULT_CSS = """
+    PackDialog {
+        layout: vertical;
+    }
+    PackDialog #pk-prompt {
+        margin: 0 1;
+        height: 1;
+    }
+    PackDialog #pk-input, PackDialog #pk-exclude {
+        margin: 0 1;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $boost;
+    }
+    PackDialog #pk-input:focus, PackDialog #pk-exclude:focus {
+        background: $accent;
+        color: $text;
+        border: none;
+    }
+    PackDialog #pk-format, PackDialog #pk-exclude-on {
+        margin-top: 1;
+    }
+    PackDialog #pk-password-row {
+        height: 1;
+        margin: 1 1 0 1;
+    }
+    PackDialog #pk-password-row.-hidden {
+        display: none;
+    }
+    PackDialog #pk-password-label {
+        width: 11;
+    }
+    PackDialog #pk-password {
+        width: 1fr;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $boost;
+    }
+    PackDialog #pk-password:focus {
+        background: $accent;
+        color: $text;
+        border: none;
+    }
+    PackDialog #pk-buttons {
+        height: 1;
+        align: center middle;
+        margin-top: 1;
+    }
+    """
+
+    class Submitted(Message):
+        def __init__(self, dialog: "PackDialog", value: str) -> None:
+            self.dialog = dialog
+            self.value = value
+            super().__init__()
+
+    class Cancelled(Message):
+        def __init__(self, dialog: "PackDialog") -> None:
+            self.dialog = dialog
+            super().__init__()
+
+    def __init__(self, prompt: str, *, initial: str = "",
+                 context: object | None = None) -> None:
+        from dunders.fm.actions import DEFAULT_PACK_LEVEL, PACK_FORMATS, PACK_LEVELS
+
+        super().__init__()
+        self.prompt = prompt
+        self.context = context
+        self.window_title = "Create archive"
+        self._initial = initial
+        self._input = Input(id="pk-input")
+        self._format = _Cycler(
+            "Format:", [(f, f) for f in PACK_FORMATS], id="pk-format")
+        levels = [(n, f"{name} ({n})") for n, name in PACK_LEVELS]
+        self._level = _Cycler(
+            "Level:", levels,
+            index=[n for n, _ in levels].index(DEFAULT_PACK_LEVEL), id="pk-level")
+        self._exclude_on = _PermCheckbox(
+            label_markup="Exclude names matching:", checked=False,
+            id="pk-exclude-on")
+        self._exclude_input = Input(
+            value=DEFAULT_PACK_EXCLUDE,
+            placeholder="e.g. node_modules;*.pyc;-.gitignore",
+            id="pk-exclude",
+        )
+        self._password_input = Input(
+            password=True, placeholder="empty = no password", id="pk-password")
+
+    def compose(self) -> ComposeResult:
+        # One row, path trimmed from the left on resize: a wrapped long cwd
+        # pushed the buttons out of the fixed-height modal.
+        yield Static(self.prompt, id="pk-prompt", markup=False)
+        yield self._input
+        yield self._format
+        yield self._level
+        yield self._exclude_on
+        yield self._exclude_input
+        with Horizontal(id="pk-password-row"):
+            yield Static("Password:", id="pk-password-label")
+            yield self._password_input
+        with Horizontal(id="pk-buttons"):
+            yield ShadowButton("Pack", id="pk-ok", face_bg="rgb(0,160,90)",
+                               hotkey="p")
+            yield ShadowButton("Cancel", id="pk-cancel",
+                               face_bg="rgb(160,40,40)", hotkey="c")
+
+    def on_mount(self) -> None:
+        self._input.value = self._initial
+
+    def on_resize(self, event: events.Resize) -> None:
+        try:
+            self.query_one("#pk-prompt", Static).update(
+                _ellipsize_left(self.prompt, max(1, event.size.width - 2)))
+        except Exception:
+            pass
+
+    def _focusables(self) -> list[Widget]:
+        try:
+            return [
+                self._input, self._format, self._level,
+                self._exclude_on, self._exclude_input,
+                *([self._password_input] if self.fmt == "zip" else []),
+                self.query_one("#pk-ok", ShadowButton),
+                self.query_one("#pk-cancel", ShadowButton),
+            ]
+        except Exception:
+            return [self._input]
+
+    @property
+    def fmt(self) -> str:
+        return str(self._format.value)
+
+    @property
+    def level(self) -> int:
+        return int(self._level.value)
+
+    @property
+    def exclude_masks(self) -> tuple[str, ...]:
+        """Masks to leave out, read at submit; ``()`` while the box is off."""
+        if not self._exclude_on.checked:
+            return ()
+        return parse_exclude_masks(self._exclude_input.value)
+
+    @property
+    def password(self) -> str | None:
+        """Zip password, ``None`` when blank or the format is 7z."""
+        if self.fmt != "zip":
+            return None
+        from dunders.fm.providers.zip_provider import normalize_password
+
+        return normalize_password(self._password_input.value)
+
+    def get_value(self) -> str:
+        return self._input.value
+
+    def focus_input(self) -> None:
+        self._input.focus()
+
+    def on__cycler_changed(self, event: "_Cycler.Changed") -> None:
+        event.stop()
+        if event.cycler is not self._format:
+            return
+        # Keep the name's suffix in step with the format.
+        name = self._input.value
+        for ext in (".zip", ".7z"):
+            if name.lower().endswith(ext):
+                name = name[: -len(ext)]
+                break
+        self._input.value = f"{name}.{self.fmt}"
+        try:
+            self.query_one("#pk-password-row").set_class(
+                self.fmt != "zip", "-hidden")
+        except Exception:
+            pass
+
+    def action_submit(self) -> None:
+        self.post_message(PackDialog.Submitted(self, self._input.value))
+
+    def action_cancel(self) -> None:
+        self.post_message(PackDialog.Cancelled(self))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_submit()
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        if event.button.id == "pk-ok":
+            self.action_submit()
+        elif event.button.id == "pk-cancel":
+            self.action_cancel()
+
+    def on_key(self, event) -> None:
+        key = event.key
+        if key == "escape":
+            event.stop()
+            self.action_cancel()
+            return
+        # Hotkeys only reach here when focus is NOT in an Input (it swallows
+        # printable keys first).
+        if not key or len(key) != 1:
+            return
+        if key.lower() == "p":
+            event.stop()
+            self.action_submit()
+        elif key.lower() == "c":
+            event.stop()
+            self.action_cancel()
+
+
 class ProgressDialog(WindowContent):
     """Progress modal: title + current file + bar + a real Cancel button.
 
@@ -1091,6 +1375,7 @@ class ProgressDialog(WindowContent):
         self.files_total = 0
         self.read_bytes = 0
         self.written_bytes = 0
+        self.compressed = False
         # Animation clock for indeterminate bars: advances one step per update so
         # the marquee sweeps SMOOTHLY. Seeding the slider with the raw byte/file
         # count instead made the block teleport (count % width jumps by big,
@@ -1159,6 +1444,7 @@ class ProgressDialog(WindowContent):
         self.files_total = status.files_total
         self.read_bytes = status.read_bytes
         self.written_bytes = status.written_bytes
+        self.compressed = status.compressed
         self.two_bars = True
         self._anim += 1
         self.refresh()
@@ -1209,7 +1495,9 @@ class ProgressDialog(WindowContent):
             tag = self._TOTAL_TAG if self.two_bars else ""
             return self._bar_line(width, self.current, self.total, self.is_bytes,
                                   read=read, tag=tag)
-        if self.two_bars and y == self._FILE_BAR_Y:
+        if (self.two_bars and y == self._FILE_BAR_Y
+                and not (self.compressed and self.file_total <= 0)):
+            # (7z packing reports no per-file progress: no File bar then.)
             return self._bar_line(width, self.file_done, self.file_total, True,
                                   read=self.file_done + self._read_ahead,
                                   tag=self._FILE_TAG)
@@ -1233,9 +1521,10 @@ class ProgressDialog(WindowContent):
         left = ""
         if self.read_bytes or self.written_bytes:
             r_speed, w_speed = self._speeds()
+            out_name = "Packed:" if self.compressed else "Written:"
             n, speed, name = ((self.read_bytes, r_speed, "Read:")
                               if y == self._IO_Y else
-                              (self.written_bytes, w_speed, "Written:"))
+                              (self.written_bytes, w_speed, out_name))
             # Current rate (reacts to a stall at once) next to the whole-run
             # average (what the copy has really sustained).
             elapsed = time.monotonic() - self._started
@@ -1271,7 +1560,10 @@ class ProgressDialog(WindowContent):
     def _read_ahead(self) -> int:
         """Bytes read but not yet written. Every earlier file's writer has
         closed (and reported) before the next one opens, so the whole gap
-        belongs to the current file."""
+        belongs to the current file. Packing writes COMPRESSED bytes, so the
+        gap there is the compression saving, not pending work: none shown."""
+        if self.compressed:
+            return 0
         return max(0, self.read_bytes - self.written_bytes)
 
     def _bar_line(self, width: int, done: int, total: int, is_bytes: bool,

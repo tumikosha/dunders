@@ -109,6 +109,66 @@ def _parse_list_line(line: str) -> tuple[str, bool, int] | None:
     return name, is_dir, size
 
 
+class _FtpReader(io.RawIOBase):
+    """Streams ``RETR`` over its OWN connection, chunk by chunk.
+
+    The old ``open_read`` downloaded the whole file into memory with one
+    ``retrbinary`` call before returning: a big download showed no progress
+    (the engine saw no bytes until the end) and Cancel did nothing (nobody
+    looked at the flag inside that call). Streaming hands the engine each
+    chunk as it arrives, so the bars move and Cancel lands between chunks.
+
+    A dedicated connection keeps the shared control channel free — listings
+    work during a download, and an ftp -> ftp copy on the same server cannot
+    deadlock against the writer, which holds the shared connection's lock.
+    """
+
+    def __init__(self, conn: ftplib.FTP, remote: str) -> None:
+        super().__init__()
+        self._conn = conn
+        self._eof = False
+        self._sock = None  # close() also runs on a half-built reader (GC)
+        try:
+            self._sock = conn.transfercmd(f"RETR {remote}")
+        except ftplib.Error as exc:
+            conn.close()
+            raise OSError(f"{remote}: {exc}") from exc
+        except BaseException:
+            conn.close()
+            raise
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        n = self._sock.recv_into(b)
+        if n == 0:
+            self._eof = True
+        return n
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if self._sock is not None:
+                self._sock.close()
+            if self._eof:
+                # Fully read: confirm the server's 226, so a transfer the server
+                # failed (451 …) surfaces as an error instead of a short file.
+                try:
+                    self._conn.voidresp()
+                except ftplib.Error as exc:
+                    raise OSError(str(exc)) from exc
+        finally:
+            # Abandoned mid-way (cancel, a capped read): just drop the private
+            # connection — no ABOR dance that could hang on a slow server.
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            super().close()
+
+
 class _FtpWriter(io.RawIOBase):
     """Streams bytes to the remote path over one ``STOR`` data connection.
 
@@ -119,8 +179,8 @@ class _FtpWriter(io.RawIOBase):
     froze for the entire upload (and a multi-GB file sat in memory).
 
     The connection lock is held from the first ``write`` until ``close`` — the
-    control channel is busy for the whole transfer. ``open_read`` returns a
-    fully-read buffer, so an ftp -> ftp copy never needs the lock mid-stream.
+    control channel is busy for the whole transfer. ``open_read`` streams over
+    a private connection, so an ftp -> ftp copy never contends for this lock.
     """
 
     def __init__(self, conn: ftplib.FTP, lock: threading.Lock, remote: str) -> None:
@@ -352,13 +412,10 @@ class FtpProvider:
                    for e in self.scan(parent, include_parent=False))
 
     def open_read(self, loc: VfsPath) -> BinaryIO:
-        conn = self._conn(loc.root)
-        lock = self._lock_for(loc.root)
-        buf = io.BytesIO()
-        with lock:
-            conn.retrbinary(f"RETR {self._remote(loc)}", buf.write)
-        buf.seek(0)
-        return buf
+        if loc.root not in self._creds:
+            raise OSError(f"no FTP connection for {loc.root!r} (open it first)")
+        return io.BufferedReader(
+            _FtpReader(self._connect(loc.root), self._remote(loc)))
 
     def open_write(
         self, loc: VfsPath, *, size_hint: int | None = None, overwrite: bool = False

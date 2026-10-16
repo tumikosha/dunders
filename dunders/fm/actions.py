@@ -121,6 +121,9 @@ class CopyStatus:
     # dialog shows both so a long wait at the end is visibly "still writing".
     read_bytes: int = 0
     written_bytes: int = 0
+    # Packing: ``written_bytes`` is the archive's (compressed) size, not a copy
+    # of what was read, so "read but not yet written" means nothing there.
+    compressed: bool = False
 
 
 ProgressCallback = Callable[[int, int], None]
@@ -608,6 +611,17 @@ def delete_paths(
 # --------------------------------------------------------------------------
 
 
+#: Compression levels offered by "Create archive…", as ``(level, name)``.
+#: The numbers are 7-Zip's ``-mx`` presets; zip takes the same number as its
+#: deflate ``compresslevel``, and 0 means stored (no compression) for both.
+PACK_LEVELS: tuple[tuple[int, str], ...] = (
+    (0, "Store"), (1, "Fastest"), (3, "Fast"),
+    (5, "Normal"), (7, "Maximum"), (9, "Ultra"),
+)
+PACK_FORMATS: tuple[str, ...] = ("zip", "7z")
+DEFAULT_PACK_LEVEL = 5
+
+
 def pack_paths(
     sources: list[Path],
     dest_zip: Path,
@@ -616,16 +630,32 @@ def pack_paths(
     on_progress: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
     password: str | None = None,
+    fmt: str = "zip",
+    level: int | None = None,
+    exclude: tuple[str, ...] = (),
+    on_status: "StatusCallback | None" = None,
 ) -> OpResult:
-    """Pack ``sources`` into a new ``dest_zip`` (ZIP_DEFLATED).
+    """Pack ``sources`` into a new archive ``dest_zip``.
 
-    A ``password`` (blank/whitespace = none) AES-256-encrypts every member.
+    ``fmt`` is ``"zip"`` (stdlib/pyzipper) or ``"7z"`` (the external 7-Zip
+    binary). ``level`` is a :data:`PACK_LEVELS` number; ``None`` keeps the
+    zip default (deflate level 6) / 7-Zip's Normal. A ``password``
+    (blank/whitespace = none) AES-256-encrypts every zip member; 7z archives
+    are never encrypted (the app cannot open encrypted 7z).
+
+    ``exclude`` is a tuple of copy-style masks (:mod:`dunders.fm.exclude`):
+    a matching file or directory is left out, a directory with its subtree.
 
     Arcnames are computed relative to ``base`` (the panel cwd) so a selection
     packs by its visible names (``dir/sub/f.txt``, ``a.txt``), not by absolute
-    paths. Refuses to overwrite an existing ``dest_zip``. Per-file progress;
-    on cancel the partial archive is removed. Directory entries (including
-    empty dirs) are preserved.
+    paths. Refuses to overwrite an existing ``dest_zip``. Per-file progress
+    (zip) or 7-Zip's own percentage (7z); on cancel the partial archive is
+    removed. Directory entries (including empty dirs) are preserved.
+
+    ``on_status`` gets byte-level :class:`CopyStatus` updates (source bytes
+    read, archive bytes written, current file) for the progress dialog's
+    bars, speeds and clock; without it ``on_progress`` keeps the old
+    whole-item counter.
     """
     result = OpResult()
     if dest_zip.exists():
@@ -633,6 +663,16 @@ def pack_paths(
             OpError(path=dest_zip, reason="destination already exists")
         )
         return result
+    if exclude:
+        sources = [s for s in sources if not is_excluded(s.name, exclude)]
+    prog = None
+    if on_status is not None:
+        files, nbytes = _pack_measure(sources, exclude)
+        prog = _PackProgress(on_status, nbytes, files)
+    if fmt == "7z":
+        return _pack_7z(sources, dest_zip, base=base, level=level,
+                        exclude=exclude, on_progress=on_progress,
+                        cancel_event=cancel_event, prog=prog)
 
     total = _count_entries(sources)
     counter = [0]
@@ -646,12 +686,14 @@ def pack_paths(
         on_progress(0, total)
 
     try:
-        with _open_pack_zip(dest_zip, password) as zf:
+        with _open_pack_zip(dest_zip, password, level) as zf:
+            if prog is not None:
+                prog.emit()
             for src in sources:
                 if _check_cancelled(cancel_event):
                     raise _Cancelled
                 try:
-                    _pack_one(zf, src, base, _bump, cancel_event)
+                    _pack_one(zf, src, base, _bump, cancel_event, exclude, prog)
                 except _Cancelled:
                     raise
                 except OSError as e:
@@ -661,6 +703,8 @@ def pack_paths(
         # the bar at 100% on success regardless of that over-count.
         if on_progress is not None:
             on_progress(total, total)
+        if prog is not None:
+            prog.finish(dest_zip)
         result.succeeded.append(dest_zip)
     except _Cancelled:
         result.cancelled = True
@@ -668,14 +712,93 @@ def pack_paths(
     return result
 
 
-def _open_pack_zip(dest_zip: Path, password: str | None) -> zipfile.ZipFile:
+class _PackProgress:
+    """Byte-level pack progress for the dialog: bars move on SOURCE bytes
+    consumed (the work done); ``written`` is the archive size, shown beside
+    them as the output side with its own speed."""
+
+    def __init__(self, on_status, total_bytes: int, total_files: int) -> None:
+        self.on_status = on_status
+        self.total_bytes = total_bytes
+        self.total_files = total_files
+        self.read = 0
+        self.written = 0
+        self.files_done = 0
+        self.label = ""
+        self.cur_done = 0
+        self.cur_total = 0
+
+    def emit(self) -> None:
+        self.on_status(CopyStatus(
+            self.read, self.total_bytes, self.label, is_bytes=True,
+            file_done=self.cur_done, file_total=self.cur_total,
+            files_done=self.files_done, files_total=self.total_files,
+            read_bytes=self.read, written_bytes=self.written, compressed=True,
+        ))
+
+    def file_start(self, label: str, size: int) -> None:
+        self.label, self.cur_total, self.cur_done = label, max(size, 0), 0
+        self.emit()
+
+    def chunk(self, n: int, written: int) -> None:
+        self.read += n
+        self.cur_done += n
+        self.written = written
+        self.emit()
+
+    def file_done(self, written: int) -> None:
+        self.files_done += 1
+        self.written = written
+        self.emit()
+
+    def finish(self, dest: Path) -> None:
+        try:
+            self.written = dest.stat().st_size
+        except OSError:
+            pass
+        self.read = max(self.read, self.total_bytes)
+        self.emit()
+
+
+def _pack_measure(sources: list[Path],
+                  exclude: tuple[str, ...]) -> tuple[int, int]:
+    """``(files, bytes)`` that packing ``sources`` will read, mask applied —
+    the byte bar's denominator. A local walk, cheap next to compressing."""
+    files = nbytes = 0
+    for src in sources:
+        try:
+            if src.is_dir() and not src.is_symlink():
+                for dirpath, dirnames, filenames in os.walk(src):
+                    if exclude:
+                        dirnames[:] = [d for d in dirnames
+                                       if not is_excluded(d, exclude)]
+                        filenames = [f for f in filenames
+                                     if not is_excluded(f, exclude)]
+                    for f in filenames:
+                        files += 1
+                        try:
+                            nbytes += (Path(dirpath) / f).stat().st_size
+                        except OSError:
+                            pass
+            else:
+                files += 1
+                nbytes += src.stat().st_size
+        except OSError:
+            continue
+    return files, nbytes
+
+
+def _open_pack_zip(dest_zip: Path, password: str | None,
+                   level: int | None = None) -> zipfile.ZipFile:
+    if level == 0:
+        kw = {"compression": zipfile.ZIP_STORED}
+    else:
+        kw = {"compression": zipfile.ZIP_DEFLATED, "compresslevel": level}
     if password is None or not password.strip():
-        return zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED)
+        return zipfile.ZipFile(dest_zip, "w", **kw)
     import pyzipper
 
-    zf = pyzipper.AESZipFile(
-        dest_zip, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
-    )
+    zf = pyzipper.AESZipFile(dest_zip, "w", encryption=pyzipper.WZ_AES, **kw)
     zf.setpassword(password.encode("utf-8"))
     return zf
 
@@ -686,6 +809,8 @@ def _pack_one(
     base: Path,
     bump: Callable[[], None],
     cancel_event: threading.Event | None,
+    exclude: tuple[str, ...] = (),
+    prog: "_PackProgress | None" = None,
 ) -> None:
     """Write ``src`` (file or directory tree) into ``zf`` under base-relative
     arcnames."""
@@ -694,9 +819,13 @@ def _pack_one(
         for dirpath, dirnames, filenames in os.walk(src):
             if _check_cancelled(cancel_event):
                 raise _Cancelled
+            if exclude:
+                # Prune in place so os.walk never descends into an excluded dir.
+                dirnames[:] = [d for d in dirnames if not is_excluded(d, exclude)]
+                filenames = [f for f in filenames if not is_excluded(f, exclude)]
             for name in filenames:
                 fpath = Path(dirpath) / name
-                zf.write(fpath, _arcname(fpath, base))
+                _zip_add(zf, fpath, _arcname(fpath, base), prog, cancel_event)
                 wrote_child = True
                 bump()
             # Preserve empty directories with an explicit "dir/" entry.
@@ -707,8 +836,183 @@ def _pack_one(
         if not wrote_child:
             bump()
     else:
-        zf.write(src, _arcname(src, base))
+        _zip_add(zf, src, _arcname(src, base), prog, cancel_event)
         bump()
+
+
+def _zip_add(zf: zipfile.ZipFile, fpath: Path, arc: str,
+             prog: "_PackProgress | None",
+             cancel_event: threading.Event | None) -> None:
+    """Add one file. With a progress sink, stream it in chunks through
+    ``zf.open(…, "w")`` so the bar, speeds and archive size advance while a
+    big file compresses (``zf.write`` is one opaque call) and Cancel lands
+    mid-file. Without one — or for a non-regular file — ``zf.write`` as ever."""
+    if prog is None or not fpath.is_file():
+        zf.write(fpath, arc)
+        return
+    cls = getattr(zf, "zipinfo_cls", zipfile.ZipInfo)  # pyzipper's AES info
+    zinfo = cls.from_file(fpath, arc)
+    # zf.write sets these from the archive; a hand-made ZipInfo defaults to
+    # ZIP_STORED, which would silently drop the chosen compression.
+    zinfo.compress_type = zf.compression
+    zinfo._compresslevel = zf.compresslevel
+    prog.file_start(str(fpath), zinfo.file_size)
+    with open(fpath, "rb") as src, zf.open(zinfo, "w") as dst:
+        while True:
+            if _check_cancelled(cancel_event):
+                raise _Cancelled
+            chunk = src.read(_COPY_CHUNK)
+            if not chunk:
+                break
+            dst.write(chunk)
+            prog.chunk(len(chunk), zf.fp.tell())
+    prog.file_done(zf.fp.tell())
+
+
+def _pack_list(sources: list[Path], base: Path,
+               exclude: tuple[str, ...]) -> list[str]:
+    """Base-relative names to hand 7-Zip: every file, plus directories that
+    are empty ON DISK. A directory 7-Zip is given is added recursively, so a
+    dir whose content is only excluded entries must not be listed — that
+    would pull the excluded files back in."""
+    out: list[str] = []
+    for src in sources:
+        if not (src.is_dir() and not src.is_symlink()):
+            out.append(_arcname(src, base))
+            continue
+        for dirpath, dirnames, filenames in os.walk(src):
+            if not dirnames and not filenames:
+                out.append(_arcname(Path(dirpath), base))
+                continue
+            if exclude:
+                dirnames[:] = [d for d in dirnames if not is_excluded(d, exclude)]
+                filenames = [f for f in filenames if not is_excluded(f, exclude)]
+            out.extend(_arcname(Path(dirpath) / f, base) for f in filenames)
+    return out
+
+
+def _pack_7z(
+    sources: list[Path],
+    dest: Path,
+    *,
+    base: Path,
+    level: int | None,
+    exclude: tuple[str, ...],
+    on_progress: ProgressCallback | None,
+    cancel_event: threading.Event | None,
+    prog: "_PackProgress | None" = None,
+) -> OpResult:
+    """Create ``dest`` with the external 7-Zip binary.
+
+    The file list is built here (so the copy-style masks, ``-`` exceptions
+    included, behave exactly as for zip) and passed as a UTF-8 list file.
+    ``-bsp1`` streams 7-Zip's percentage, which drives the bar; Cancel kills
+    the process and removes the partial archive."""
+    import re
+    import subprocess
+    import tempfile
+
+    from dunders.fm.providers.sevenzip_provider import find_7z
+
+    result = OpResult()
+    binary = find_7z()
+    if binary is None:
+        result.errors.append(OpError(path=dest, reason="7z binary not found on PATH"))
+        return result
+    names = _pack_list(sources, base, exclude)
+    if not names:
+        result.errors.append(OpError(path=dest, reason="nothing to pack"))
+        return result
+    lvl = DEFAULT_PACK_LEVEL if level is None else level
+    fd, list_path = tempfile.mkstemp(prefix="dunders-pack-", suffix=".lst")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(names) + "\n")
+    if on_progress is not None:
+        on_progress(0, 100)
+    tail: list[bytes] = []
+    try:
+        proc = subprocess.Popen(
+            [binary, "a", "-t7z", f"-mx={lvl}", "-bsp1", "-bb0", "-y",
+             "-scsUTF-8", str(dest), f"@{list_path}"],
+            cwd=str(base), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+        def _drain() -> None:
+            # Always drain, or a chatty 7z blocks once the pipe fills.
+            pct_re = re.compile(rb"(\d+)%")
+            buf = b""
+            while True:
+                block = proc.stdout.read(64)
+                if not block:
+                    break
+                buf = (buf + block)[-4096:]
+                tail.append(block)
+                del tail[:-64]
+                last = None
+                for m in pct_re.finditer(buf):
+                    last = m
+                if last is not None:
+                    pct = min(int(last.group(1)), 100)
+                    pct_box[0] = pct
+                    if on_progress is not None and prog is None:
+                        on_progress(pct, 100)
+                    buf = buf[last.end():]
+
+        pct_box = [0]
+
+        def _report() -> None:
+            # 7-Zip reports only a percentage: read is estimated from it, the
+            # archive size is polled off the disk.
+            if prog is None:
+                return
+            try:
+                prog.written = dest.stat().st_size
+            except OSError:
+                pass
+            prog.read = prog.total_bytes * pct_box[0] // 100
+            prog.label = dest.name
+            prog.emit()
+
+        if prog is not None:
+            prog.label = dest.name
+            prog.emit()
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        while proc.poll() is None:
+            if _check_cancelled(cancel_event):
+                proc.kill()
+                proc.wait()
+                reader.join(timeout=2)
+                dest.unlink(missing_ok=True)
+                result.cancelled = True
+                return result
+            if cancel_event is not None:
+                cancel_event.wait(0.1)
+            else:
+                try:
+                    proc.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
+            _report()
+        reader.join(timeout=5)
+        if proc.returncode != 0:
+            msg = b"".join(tail).decode("utf-8", "replace").strip()
+            msg = msg.splitlines()[-1] if msg else f"7z exited with {proc.returncode}"
+            result.errors.append(OpError(path=dest, reason=msg))
+            dest.unlink(missing_ok=True)
+            return result
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+    if on_progress is not None:
+        on_progress(100, 100)
+    if prog is not None:
+        prog.finish(dest)
+    result.succeeded.append(dest)
+    return result
 
 
 def _arcname(path: Path, base: Path) -> str:

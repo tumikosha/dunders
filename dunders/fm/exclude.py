@@ -28,11 +28,15 @@ import fnmatch
 import re
 
 
-__all__ = ["DEFAULT_EXCLUDE", "parse_exclude_masks", "split_masks", "is_excluded"]
+__all__ = ["DEFAULT_EXCLUDE", "DEFAULT_PACK_EXCLUDE", "parse_exclude_masks", "split_masks", "is_excluded"]
 
 
-#: Prefilled into the copy/move dialog: skip dotfiles, but keep ``.gitignore``.
-DEFAULT_EXCLUDE = ".*;-.gitignore"
+#: Prefilled into the copy/move dialog: skip dotfiles (but keep
+#: ``.gitignore``) and virtualenvs (``venv``, ``venv312``, …).
+DEFAULT_EXCLUDE = ".*;-.gitignore;venv*;"
+
+#: Prefilled into "Create archive…" (off until its checkbox is ticked).
+DEFAULT_PACK_EXCLUDE = ".*;-.gitignore;venv*;myvenv*"
 
 
 def parse_exclude_masks(text: str) -> tuple[str, ...]:

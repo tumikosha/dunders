@@ -304,6 +304,61 @@ class TestTransfer:
         # Written grew alongside reading, not in one jump at the end.
         assert any(0 < s.written_bytes < len(data) for s in statuses)
 
+    def test_download_streams_progress_and_cancels(self, ftp_server, tmp_path):
+        """A big download reports bytes as they arrive and honours Cancel
+        mid-file. The old open_read fetched the whole file in one call first:
+        no progress, and Cancel was ignored until it finished."""
+        import threading
+        _host, port, root = ftp_server
+        data = bytes(range(256)) * (4 * 1024 * 1024 // 256)  # 4 MiB
+        (root / "big.bin").write_bytes(data)
+        reg = default_registry()
+        reg.for_scheme("ftp").resolve_target(
+            f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/")
+        )
+        src = _root_loc(port).child("big.bin")
+        statuses = []
+        res = transfer(reg, [src], VfsPath.local(tmp_path), mode="copy",
+                       on_status=statuses.append)
+        assert not res.errors
+        assert (tmp_path / "big.bin").read_bytes() == data
+        assert any(0 < s.read_bytes < len(data) for s in statuses)
+
+        ev = threading.Event()
+        out = tmp_path / "cancel"
+        out.mkdir()
+
+        def _on_status(st):
+            if st.read_bytes >= 1024 * 1024:
+                ev.set()  # cancel once the first MiB arrived
+
+        res = transfer(reg, [src], VfsPath.local(out), mode="copy",
+                       on_status=_on_status, cancel_event=ev)
+        assert res.cancelled
+        assert not (out / "big.bin").exists()   # partial removed
+        # The shared connection still works after the abandoned download.
+        names = [e.name for e in reg.for_scheme("ftp").scan(
+            _root_loc(port), include_parent=False)]
+        assert "big.bin" in names
+
+    def test_ftp_to_ftp_same_server_does_not_deadlock(self, ftp_server):
+        _host, port, root = ftp_server
+        reg = default_registry()
+        reg.for_scheme("ftp").resolve_target(
+            f"bob:secret@127.0.0.1:{port}/", base=VfsPath.local("/")
+        )
+        res = transfer(reg, [_root_loc(port).child("hello.txt")],
+                       _root_loc(port).child("dir"), mode="copy")
+        assert not res.errors
+        assert (root / "dir" / "hello.txt").read_text() == "hi there"
+
+    def test_read_missing_file_raises_oserror(self, ftp_server):
+        _host, port, _root = ftp_server
+        p = FtpProvider()
+        _open(p, port)
+        with pytest.raises(OSError):
+            p.open_read(_root_loc(port).child("nope.bin"))
+
     def test_upload_empty_file(self, ftp_server, tmp_path):
         _host, port, root = ftp_server
         reg = default_registry()

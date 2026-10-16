@@ -187,6 +187,119 @@ def docker_available() -> bool:
     return _available
 
 
+class _DockerStreamReader(io.RawIOBase):
+    """``cat`` stdout of a running ``docker exec``/``run`` as a readable stream.
+    A non-zero exit after EOF raises with docker's stderr; closing early (a
+    cancel, a capped read) kills the process."""
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        super().__init__()
+        self._proc = proc
+        self._eof = False
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        n = self._proc.stdout.readinto(b)
+        if not n:
+            self._eof = True
+            return 0
+        return n
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        proc = self._proc
+        try:
+            if not self._eof:
+                proc.kill()
+            proc.wait()
+            err = proc.stderr.read() if proc.stderr else b""
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if self._eof and proc.returncode != 0:
+                raise OSError(err.decode(errors="replace").strip() or "docker error")
+        finally:
+            super().close()
+
+
+class _DockerTarStreamWriter(io.RawIOBase):
+    """Streams a one-member tar into ``docker cp - container:parent``.
+
+    A tar header carries the member size up front, so this needs the exact
+    size (the transfer engine passes the source's as ``size_hint``). Bytes go
+    to docker as they are written — real progress, bounded memory, Cancel
+    mid-file — instead of :class:`_DockerWriter` buffering the whole file and
+    piping it in ``close``. A short or long write never finishes the tar:
+    docker is killed so no truncated file lands in the container."""
+
+    def __init__(self, provider: "DockerProvider", loc: VfsPath, size: int) -> None:
+        super().__init__()
+        self._size = size
+        self._written = 0
+        container = _container_name(loc)
+        parent = _fs_path(loc.parent, _CONTAINER)
+        self._proc = provider._popen(["cp", "-", f"{container}:{parent}"],
+                                     endpoint=loc.root, stdin=subprocess.PIPE,
+                                     stdout=subprocess.DEVNULL)
+        info = tarfile.TarInfo(name=loc.parts[-1])
+        info.size = size
+        info.mtime = int(time.time())
+        info.mode = 0o644
+        self._send(info.tobuf(format=tarfile.PAX_FORMAT))
+
+    def writable(self) -> bool:
+        return True
+
+    def _send(self, data: bytes) -> None:
+        try:
+            self._proc.stdin.write(data)
+        except BrokenPipeError as exc:
+            raise OSError(self._fail_reason() or "docker cp exited early") from exc
+
+    def _fail_reason(self) -> str:
+        self._proc.kill()
+        self._proc.wait()
+        err = self._proc.stderr.read() if self._proc.stderr else b""
+        return err.decode(errors="replace").strip()
+
+    def write(self, b) -> int:
+        n = len(b)
+        if self._written + n > self._size:
+            raise OSError("source grew while copying (size changed)")
+        self._send(bytes(b))
+        self._written += n
+        return n
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        proc = self._proc
+        try:
+            if self._written != self._size:
+                # Cancelled or the source shrank: abandon the tar unfinished.
+                proc.kill()
+                proc.wait()
+                return
+            pad = (-self._size) % tarfile.BLOCKSIZE
+            self._send(b"\0" * pad + b"\0" * (2 * tarfile.BLOCKSIZE))
+            proc.stdin.close()
+            proc.wait()
+            err = proc.stderr.read() if proc.stderr else b""
+            if proc.returncode != 0:
+                raise OSError(err.decode(errors="replace").strip() or "docker cp failed")
+        finally:
+            for pipe in (proc.stdin, proc.stderr):
+                if pipe is not None and not pipe.closed:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            super().close()
+
+
 class _DockerWriter(io.BytesIO):
     """Buffers bytes; on close packs them as a one-member tar and `docker cp`s
     the member into the container's parent directory."""
@@ -286,15 +399,28 @@ class DockerProvider:
 
     # ``input`` mirrors subprocess.run's own kwarg name on purpose (the writer
     # pipes a tar via `_run([...], input=...)`).
+    def _cmd(self, args: list[str], endpoint: str = "") -> list[str]:
+        """argv for ``docker <args>`` — local, or over multiplexed SSH."""
+        if not endpoint:
+            return [_DOCKER, *args]
+        self._ensure_master(endpoint)
+        remote = "docker " + " ".join(shlex.quote(a) for a in args)
+        return [*self._ssh_prefix(endpoint), remote]
+
+    def _popen(self, args: list[str], *, endpoint: str = "",
+               stdin=None, stdout=None) -> subprocess.Popen:
+        """Start ``docker <args>`` as a stream (no timeout: a big transfer
+        legitimately runs for minutes — ``_run``'s 30 s cap killed those)."""
+        try:
+            return subprocess.Popen(self._cmd(args, endpoint), stdin=stdin,
+                                    stdout=stdout, stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise OSError(f"cannot run docker: {exc}") from exc
+
     def _run(self, args: list[str], *, endpoint: str = "", input: bytes | None = None) -> bytes:
         """Run ``docker <args>`` — locally, or on ``endpoint`` over multiplexed
         SSH. Return stdout bytes; raise OSError on failure/timeout."""
-        if not endpoint:
-            cmd = [_DOCKER, *args]
-        else:
-            self._ensure_master(endpoint)
-            remote = "docker " + " ".join(shlex.quote(a) for a in args)
-            cmd = [*self._ssh_prefix(endpoint), remote]
+        cmd = self._cmd(args, endpoint)
         try:
             proc = subprocess.run(cmd, input=input, capture_output=True, timeout=30)
         except subprocess.TimeoutExpired as exc:
@@ -685,13 +811,17 @@ class DockerProvider:
         return False
 
     def open_read(self, loc: VfsPath) -> BinaryIO:
+        """Stream the file out of ``cat`` as it arrives, so a big copy shows
+        progress and can be cancelled (and is not killed by ``_run``'s 30 s
+        timeout or held whole in memory)."""
         if _level(loc) == "vfs":
-            data = self._run(["run", "--rm", "-v", self._volume_mount(loc), self._HELPER,
-                              "cat", "--", "/mnt" + _fs_path(loc, _VOLUME)], endpoint=loc.root)
-            return io.BytesIO(data)
-        data = self._run(["exec", _container_name(loc), "cat", "--",
-                          _fs_path(loc, _CONTAINER)], endpoint=loc.root)
-        return io.BytesIO(data)
+            args = ["run", "--rm", "-v", self._volume_mount(loc), self._HELPER,
+                    "cat", "--", "/mnt" + _fs_path(loc, _VOLUME)]
+        else:
+            args = ["exec", _container_name(loc), "cat", "--",
+                    _fs_path(loc, _CONTAINER)]
+        proc = self._popen(args, endpoint=loc.root, stdout=subprocess.PIPE)
+        return io.BufferedReader(_DockerStreamReader(proc))
 
     def mkdir(self, parent: VfsPath, name: str) -> OpResult:
         remote = _fs_path(parent.child(name), _CONTAINER)
@@ -769,6 +899,8 @@ class DockerProvider:
                 if isinstance(exc, FileExistsError):
                     raise
                 # `test -e` exit!=0 → file does not exist → OK to write
+        if size_hint:
+            return _DockerTarStreamWriter(self, loc, size_hint)
         return _DockerWriter(self, loc)
 
     def needs_password(self, spec: str) -> bool:  # key/agent SSH auth only

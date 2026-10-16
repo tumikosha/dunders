@@ -20,12 +20,12 @@ async def test_field_is_prefilled_with_the_default_mask(tmp_path):
         await pilot.pause()
         dialog = await _open(app, pilot)
 
-        assert dialog._exclude_input.value == DEFAULT_EXCLUDE == ".*;-.gitignore"
+        assert dialog._exclude_input.value == DEFAULT_EXCLUDE == ".*;-.gitignore;venv*;"
         # Prefilled but inert: the checkbox is still the switch.
         assert dialog.exclude_masks == ()
 
         dialog.query_one("#cm-exclude-on", _PermCheckbox).checked = True
-        assert dialog.exclude_masks == (".*", "-.gitignore")
+        assert dialog.exclude_masks == (".*", "-.gitignore", "venv*")
 
 
 async def test_masks_are_empty_while_the_checkbox_is_off(tmp_path):

@@ -486,8 +486,13 @@ def _copy_tree(
             # means UPDATE-a-record, not clobber, so an import stays an insert.
             # When skip_existing is on, existing files were already skipped above.
             overwrite = getattr(dst_p, "copy_overwrite", True)
+            # size_hint: a destination that must know the size up front (docker
+            # streams a tar, whose header carries it) can stream instead of
+            # buffering the whole file. 0 usually means "size unknown" in a
+            # listing (e.g. a Drive-native doc), so it is not passed as exact.
             with src_p.open_read(src) as reader, \
-                    dst_p.open_write(dest, overwrite=overwrite) as writer:
+                    dst_p.open_write(dest, overwrite=overwrite,
+                                     size_hint=fsize or None) as writer:
                 owns = _attach_writer_progress(
                     writer, lambda _l, n: prog.chunk(n), src.name)
                 while True:

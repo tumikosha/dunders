@@ -56,6 +56,7 @@ from dunders.fm.dialogs import (
     ChangeAttributesDialog,
     ConfirmDialog,
     CopyMoveDialog,
+    PackDialog,
     DockerRunDialog,
     FindFileDialog,
     FolderStatsDialog,
@@ -287,7 +288,7 @@ class DeleteRequest:
 
 @dataclass(frozen=True)
 class PackRequest:
-    """Create a new .zip from a local selection (F-menu "Create archive…")."""
+    """Create a new zip/7z from a local selection (F-menu "Create archive…")."""
 
     targets: list[Path]
     base: Path  # arcnames are relative to this (the source panel cwd)
@@ -1052,32 +1053,39 @@ class DundersApp(App):
         base: Path,
         *,
         password: str | None = None,
+        fmt: str = "zip",
+        level: int | None = None,
+        exclude: tuple[str, ...] = (),
     ) -> None:
         if self.desktop is None:
             return
         progress = ProgressDialog(title="Packing", total=len(targets))
-        show_modal(self.desktop, progress, title="Create archive", size=(64, 9))
+        show_modal(self.desktop, progress, title="Create archive", size=(64, 11))
         self.call_after_refresh(progress.focus)
+        # Byte-level status (bars, read/packed speeds, clock), throttled like
+        # the copy path so per-chunk updates can't starve the UI.
+        on_status = self._status_marshaller(progress)
 
         def _worker() -> None:
-            def _on_progress(i: int, n: int) -> None:
-                self.call_from_thread(progress.set_progress, i, n)
-
             result = pack_paths(
                 targets,
                 dest_zip,
                 base=base,
-                on_progress=_on_progress,
+                on_status=on_status,
                 cancel_event=progress.cancel_event,
                 password=password,
+                fmt=fmt,
+                level=level,
+                exclude=exclude,
             )
             # The fresh archive replaces whatever was at that path: remember
             # its password (or drop a stale one) so entering it is consistent.
-            zp = self._vfs_registry.for_scheme("zip")
-            if password and not result.errors and not result.cancelled:
-                zp.set_password(str(dest_zip), password)
-            else:
-                zp.forget_password(str(dest_zip))
+            if fmt == "zip":
+                zp = self._vfs_registry.for_scheme("zip")
+                if password and not result.errors and not result.cancelled:
+                    zp.set_password(str(dest_zip), password)
+                else:
+                    zp.forget_password(str(dest_zip))
             self.call_from_thread(self._finish_op, "pack", progress, result)
 
         self.run_worker(_worker, thread=True, exclusive=False, group="fileop")
@@ -2517,7 +2525,7 @@ class DundersApp(App):
         self.call_after_refresh(dialog.focus_input)
 
     def action_pack(self) -> None:
-        """Create a new .zip from the selection (File → Create archive…)."""
+        """Create a new zip/7z from the selection (Command → Create archive…)."""
         if self._has_active_modal():
             return
         panel = self._active_panel()
@@ -2531,15 +2539,12 @@ class DundersApp(App):
             return
         self._remember_active_panel_id()
         default = f"{targets[0].name}.zip" if len(targets) == 1 else "archive.zip"
-        dialog = NewFileDialog(
+        dialog = PackDialog(
             prompt=f"Create archive in {panel.cwd}:",
             initial=default,
             context=PackRequest(targets=targets, base=panel.cwd),
-            submit_label="Pack",
-            title="Create archive",
-            password_field=True,
         )
-        show_modal(self.desktop, dialog, title="Create archive", size=(60, 9))
+        show_modal(self.desktop, dialog, title="Create archive", size=(64, 15))
         self.call_after_refresh(dialog.focus_input)
 
     def _open_dunder(self, scheme: str) -> None:
@@ -3739,15 +3744,6 @@ class DundersApp(App):
             new_loc = ctx.parent_loc.child(name) if not result.errors else None
             self._refresh_panels(focus_new=new_loc)
             return
-        if isinstance(ctx, PackRequest):
-            name = event.value.strip()
-            if not name:
-                return
-            if not name.lower().endswith(".zip"):
-                name += ".zip"
-            self._run_pack(ctx.targets, ctx.base / name, ctx.base,
-                           password=password)
-            return
         if isinstance(ctx, OpenDunderRequest):
             spec = event.value.strip()
             # Empty spec is meaningful for providers that expose a "default
@@ -3787,6 +3783,25 @@ class DundersApp(App):
             # _close_modal raised the file panel; bring the editor back.
             self._focus_editor_content(ctx.editor)
             return
+
+    def on_pack_dialog_submitted(self, event: PackDialog.Submitted) -> None:
+        ctx = event.dialog.context
+        # Read every field before the dialog is torn down.
+        d = event.dialog
+        fmt, level, exclude, password = d.fmt, d.level, d.exclude_masks, d.password
+        self._close_modal(d)
+        if not isinstance(ctx, PackRequest):
+            return
+        name = event.value.strip()
+        if not name:
+            return
+        if not name.lower().endswith(f".{fmt}"):
+            name += f".{fmt}"
+        self._run_pack(ctx.targets, ctx.base / name, ctx.base,
+                       password=password, fmt=fmt, level=level, exclude=exclude)
+
+    def on_pack_dialog_cancelled(self, event: PackDialog.Cancelled) -> None:
+        self._close_modal(event.dialog)
 
     def on_new_file_dialog_cancelled(
         self, event: NewFileDialog.Cancelled
