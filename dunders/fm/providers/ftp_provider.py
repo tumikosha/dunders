@@ -30,6 +30,7 @@ import io
 import socket
 import threading
 import time
+from collections.abc import Callable
 from typing import BinaryIO
 
 from dunders.core.vfs import VfsPath
@@ -167,6 +168,10 @@ class _FtpReader(io.RawIOBase):
             except Exception:
                 pass
             super().close()
+
+
+class _DeleteCancelled(Exception):
+    """Cancel pressed while ``FtpProvider.delete`` walks the tree."""
 
 
 class _FtpWriter(io.RawIOBase):
@@ -476,18 +481,103 @@ class FtpProvider:
             return result
         conn = self._conn(targets[0].root)
         lock = self._lock_for(targets[0].root)
+
+        def _cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
         with lock:
-            for i, t in enumerate(targets, 1):
-                if cancel_event is not None and cancel_event.is_set():
-                    result.cancelled = True
-                    break
-                try:
-                    self._delete_one(conn, self._remote(t))
-                except ftplib.all_errors as exc:
-                    result.errors.append(OpError(loc=t, reason=str(exc)))
-                if on_progress is not None:
-                    on_progress(i, len(targets))
+            # Walk first, delete second — like the local delete_paths. Bumping
+            # once per selected target left one big folder at 0% until it was
+            # gone, then 100%. The walk lists every directory anyway (the old
+            # recursion did too), so counting costs no extra round trips; the
+            # bar is indeterminate while it runs.
+            if on_progress is not None:
+                on_progress(0, 0)
+            listings: dict[str, dict[str, bool]] = {}
+            plans: list[tuple[VfsPath, list[tuple[str, str]]]] = []
+            try:
+                for t in targets:
+                    if _cancelled():
+                        raise _DeleteCancelled
+                    try:
+                        plans.append((t, self._plan_delete(
+                            conn, self._remote(t), listings, _cancelled)))
+                    except ftplib.all_errors as exc:
+                        result.errors.append(OpError(loc=t, reason=str(exc)))
+            except _DeleteCancelled:
+                result.cancelled = True
+                return result
+
+            total = sum(len(items) for _t, items in plans)
+            done = 0
+            if on_progress is not None:
+                on_progress(0, total)
+            for t, items in plans:
+                for i, (remote, kind) in enumerate(items):
+                    if _cancelled():
+                        result.cancelled = True
+                        return result
+                    try:
+                        if kind == "file":
+                            conn.delete(remote)
+                        elif kind == "dir":
+                            conn.rmd(remote)
+                        else:
+                            self._delete_one(conn, remote)
+                    except ftplib.all_errors as exc:
+                        result.errors.append(OpError(loc=t, reason=str(exc)))
+                        # The rest of this target can't go (its directory is
+                        # not empty now): skip it, keeping the bar honest.
+                        done += len(items) - i
+                        if on_progress is not None:
+                            on_progress(done, total)
+                        break
+                    done += 1
+                    if on_progress is not None:
+                        on_progress(done, total)
+                else:
+                    result.succeeded.append(t)
         return result
+
+    def _plan_delete(
+        self,
+        conn: ftplib.FTP,
+        remote: str,
+        listings: dict[str, dict[str, bool]],
+        cancelled: Callable[[], bool],
+    ) -> list[tuple[str, str]]:
+        """``(remote, kind)`` steps that delete ``remote``, children first.
+
+        ``kind`` is ``file`` (DELE), ``dir`` (RMD of an emptied directory) or
+        ``auto`` — the parent listing did not show the name, so the old
+        try-DELE-then-recurse path decides at delete time."""
+        parent = remote.rpartition("/")[0] or "/"
+        if parent not in listings:
+            listings[parent] = {
+                n: d for n, d, _s, _m in self._raw_list(conn, parent)}
+        is_dir = listings[parent].get(remote.rpartition("/")[2])
+        if is_dir is None:
+            return [(remote, "auto")]
+        if not is_dir:
+            return [(remote, "file")]
+        return self._plan_dir(conn, remote, cancelled)
+
+    def _plan_dir(
+        self, conn: ftplib.FTP, remote: str, cancelled: Callable[[], bool],
+    ) -> list[tuple[str, str]]:
+        steps: list[tuple[str, str]] = []
+        for name, is_dir, _size, _mtime in self._raw_list(conn, remote):
+            if name in (".", ".."):
+                continue
+            if cancelled():
+                raise _DeleteCancelled
+            child = f"{remote}/{name}"
+            if is_dir:
+                steps.extend(self._plan_dir(conn, child, cancelled))
+            else:
+                steps.append((child, "file"))
+        steps.append((remote, "dir"))
+        return steps
 
     def _delete_one(self, conn: ftplib.FTP, remote: str) -> None:
         try:

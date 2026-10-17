@@ -456,6 +456,46 @@ class TestMutations:
         assert not res.errors
         assert not (root / "dir").exists()
 
+    def test_delete_directory_reports_progress_per_entry(self, ftp_server):
+        """One big folder used to sit at 0% until it was gone, then jump to
+        100%: progress was bumped once per *selected* target. Now every file
+        and directory removed moves the bar, after an indeterminate walk."""
+        _host, port, root = ftp_server
+        big = root / "big"
+        (big / "sub").mkdir(parents=True)
+        for i in range(5):
+            (big / f"f{i}.txt").write_text("x")
+        (big / "sub" / ".hidden").write_text("x")
+        p = FtpProvider()
+        _open(p, port)
+        loc = VfsPath(scheme="ftp", root=f"bob@127.0.0.1:{port}", parts=("big",))
+        calls = []
+        res = p.delete([loc], on_progress=lambda i, n: calls.append((i, n)))
+        assert not res.errors and res.succeeded == [loc]
+        assert not big.exists()
+        # walk (indeterminate), then 0..8 of 8: 5 files + .hidden + sub + big
+        assert calls[0] == (0, 0)
+        assert calls[1:] == [(i, 8) for i in range(9)]
+
+    def test_delete_cancel_stops_between_entries(self, ftp_server):
+        _host, port, root = ftp_server
+        big = root / "big"
+        big.mkdir()
+        for i in range(5):
+            (big / f"f{i}.txt").write_text("x")
+        p = FtpProvider()
+        _open(p, port)
+        loc = VfsPath(scheme="ftp", root=f"bob@127.0.0.1:{port}", parts=("big",))
+        ev = threading.Event()
+
+        def _progress(i, n):
+            if i == 2:
+                ev.set()
+
+        res = p.delete([loc], on_progress=_progress, cancel_event=ev)
+        assert res.cancelled
+        assert len(list(big.iterdir())) == 3
+
     def test_open_write_refuses_existing_without_overwrite(self, ftp_server):
         _host, port, _root = ftp_server
         p = FtpProvider()
