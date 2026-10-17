@@ -72,6 +72,38 @@ class TestParseSpec:
         assert _canonical_root("h", 21, None) == "h:21"
 
 
+class _VsftpdConn:
+    """Fake vsftpd: no MLSD, plain LIST hides dotfiles, RMD refuses a
+    non-empty directory with 550."""
+
+    def __init__(self, tree: dict[str, list[str]]) -> None:
+        self.tree = {d: list(names) for d, names in tree.items()}
+
+    def mlsd(self, remote):
+        raise ftplib.error_perm("500 Unknown command.")
+
+    def retrlines(self, cmd, callback):
+        show_all = cmd.startswith("LIST -a ")
+        path = cmd.split(" ")[-1]
+        if show_all:
+            callback("drwxr-xr-x 2 u g 4096 Jun 14 12:00 .")
+            callback("drwxr-xr-x 2 u g 4096 Jun 14 12:00 ..")
+        for name in self.tree.get(path, []):
+            if show_all or not name.startswith("."):
+                callback(f"-rw-r--r-- 1 u g 5 Jun 14 12:00 {name}")
+
+    def delete(self, remote):
+        parent, _, name = remote.rpartition("/")
+        if remote in self.tree or name not in self.tree.get(parent, []):
+            raise ftplib.error_perm("550 Delete operation failed.")
+        self.tree[parent].remove(name)
+
+    def rmd(self, remote):
+        if self.tree.get(remote):
+            raise ftplib.error_perm("550 Remove directory operation failed.")
+        self.tree.pop(remote, None)
+
+
 class TestListFallback:
     """Servers without MLSD (which reply '500 Unknown command') must fall back
     to LIST parsing rather than crashing — the reported bug."""
@@ -106,6 +138,31 @@ class TestListFallback:
         rows = FtpProvider._raw_list(_FakeConn(), "/")
         by = {name: (is_dir, size) for name, is_dir, size, _ in rows}
         assert by == {"sub": (True, 4096), "a.txt": (False, 5)}
+
+    def test_raw_list_shows_dotfiles_on_vsftpd(self):
+        """vsftpd has no MLSD and hides dotfiles from a plain LIST; only
+        ``LIST -a`` returns them. Without them a recursive delete left
+        ``.DS_Store`` behind and RMD failed with 550."""
+        rows = FtpProvider._raw_list(_VsftpdConn({"/d": [".DS_Store", "a.txt"]}), "/d")
+        assert {r[0] for r in rows} >= {".DS_Store", "a.txt"}
+
+    def test_raw_list_plain_list_when_dash_a_rejected(self):
+        class _NoOptsConn:
+            def mlsd(self, remote):
+                raise ftplib.error_perm("500 Unknown command.")
+
+            def retrlines(self, cmd, callback):
+                if " -a " in cmd:
+                    raise ftplib.error_perm("550 No such file: -a")
+                callback("-rw-r--r-- 1 u g 5 Jun 14 12:00 a.txt")
+
+        rows = FtpProvider._raw_list(_NoOptsConn(), "/")
+        assert [r[0] for r in rows] == ["a.txt"]
+
+    def test_delete_dir_with_hidden_file_on_vsftpd(self):
+        conn = _VsftpdConn({"/d": [".DS_Store", "a.txt"]})
+        FtpProvider()._delete_one(conn, "/d")
+        assert conn.tree == {}
 
     def test_raw_list_returns_empty_when_everything_fails(self):
         class _DeadConn:

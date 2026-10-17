@@ -392,17 +392,25 @@ class FtpProvider:
             return rows
         except ftplib.all_errors:
             pass  # MLSD unsupported / failed → try LIST
-        try:
-            lines: list[str] = []
-            conn.retrlines(f"LIST {remote}", lines.append)
+        # ``LIST -a`` first: vsftpd (no MLSD) hides dotfiles from a plain LIST
+        # unless ``force_dot_files`` is set, so a delete emptied only the
+        # visible entries, left ``.DS_Store`` & co. behind and RMD failed with
+        # ``550 Remove directory operation failed``. A server that does not take
+        # the option errors or lists nothing, and the plain LIST still runs.
+        for cmd in (f"LIST -a {remote}", f"LIST {remote}"):
+            try:
+                lines: list[str] = []
+                conn.retrlines(cmd, lines.append)
+            except ftplib.all_errors:
+                continue
             rows = []
             for line in lines:
                 parsed = _parse_list_line(line)
                 if parsed is not None:
                     rows.append((*parsed, 0.0))
-            return rows
-        except ftplib.all_errors:
-            return []
+            if rows:
+                return rows
+        return []
 
     def _parent_entry(self, loc: VfsPath) -> FileEntry:
         # '..' goes up within the remote tree; at the connection root it has no
