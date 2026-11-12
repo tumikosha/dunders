@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dunders.app import DundersApp
 from dunders.mcp import run_stdio
+from dunders import shell_init
 from dunders.windowing import cell_widths
 
 
@@ -53,6 +54,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--remove-claude",
         action="store_true",
         help="Undo --setup-claude. Leaves dunders itself installed.",
+    )
+    parser.add_argument(
+        "--shell-init",
+        choices=shell_init.SHELLS,
+        default=None,
+        metavar="SHELL",
+        help="Print shell functions (zsh/bash) that cd into the panel's "
+             "directory on Quit -> 'Yes, current dir'. Use: "
+             'eval "$(dunders --shell-init zsh)" in ~/.zshrc.',
     )
     parser.add_argument("--mcp", action="store_true",
                         help="Run as a headless MCP server over stdio (no TUI).")
@@ -138,8 +148,22 @@ def _run_mcp(args: argparse.Namespace) -> None:
     run_stdio(registry, table, allow_write=args.mcp_write)
 
 
+def _run_app(app: DundersApp) -> None:
+    """Run the TUI and pass the Quit dialog's directory to the shell wrapper."""
+    cwd_file = shell_init.take_cwd_file()
+    start_dir = Path.cwd()  # same directory the app records as start_dir
+    # The Quit dialog warns that "Yes, current dir" can't move the shell
+    # when this is False.
+    app.shell_wrapper_active = cwd_file is not None
+    result = app.run()
+    shell_init.report_exit_dir(result, cwd_file, start_dir)
+
+
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    if args.shell_init:
+        print(shell_init.snippet(args.shell_init), end="")
+        return
     if args.setup_claude or args.remove_claude:
         from dunders.claude_setup import remove_claude, setup_claude
 
@@ -158,11 +182,11 @@ def main() -> None:
     )
     # Before the app takes the screen: match emoji widths to this terminal.
     cell_widths.calibrate()
-    DundersApp(
+    _run_app(DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,
         project_dir=project_dir,
-    ).run()
+    ))
 
 
 def _resolve_we_args(
@@ -228,13 +252,13 @@ def main_we() -> None:
     )
     # Before the app takes the screen: match emoji widths to this terminal.
     cell_widths.calibrate()
-    DundersApp(
+    _run_app(DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,
         initial_paths=file_paths,
         terminal_mode=terminal_mode,
         project_dir=project_dir,
-    ).run()
+    ))
 
 
 def main_wew() -> None:
@@ -244,13 +268,13 @@ def main_wew() -> None:
     )
     # Before the app takes the screen: match emoji widths to this terminal.
     cell_widths.calibrate()
-    DundersApp(
+    _run_app(DundersApp(
         launch_mode=launch_mode,
         initial_path=initial_path,
         initial_paths=file_paths,
         terminal_mode=terminal_mode,
         project_dir=project_dir,
-    ).run()
+    ))
 
 
 if __name__ == "__main__":

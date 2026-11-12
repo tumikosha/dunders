@@ -63,7 +63,9 @@ from dunders.fm.dialogs import (
     InputDialog,
     NewFileDialog,
     ProgressDialog,
+    QuitDialog,
 )
+from dunders import shell_init
 from dunders.fm.file_panel import FilePanel
 from dunders.fm.folder_stats import scan_folder_stats
 from dunders.fm.find_file import FindOptions, walk as find_walk
@@ -377,11 +379,6 @@ class CancelSearchRequest:
 
 
 @dataclass(frozen=True)
-class QuitRequest:
-    """Marker context: the Yes/No confirmation guarding F10 quit."""
-
-
-@dataclass(frozen=True)
 class UserMenuPromptRequest:
     label: str
 
@@ -487,6 +484,33 @@ class DundersApp(App):
     # CommandPaletteContent (palette.open, Ctrl+K) is the real palette.
     ENABLE_COMMAND_PALETTE = False
 
+    # Every copy — our own clipboard.copy callers, the editor's Ctrl+C, and
+    # Textual's built-ins (Input/TextArea Ctrl+C, screen text selection) —
+    # ends in copy_to_clipboard, so this is the one place that writes the
+    # system clipboard and confirms it. See clipboard.copy.
+    copies_to_system_clipboard = True
+
+    def copy_to_clipboard(self, text: str) -> None:
+        # Textual's own version only emits OSC 52, which macOS Terminal.app
+        # ignores: a Ctrl+C in a dialog's Input silently copied nothing.
+        system_ok = clipboard.system_copy(text)
+        super().copy_to_clipboard(text)
+        if not text:
+            return
+        notice = clipboard.copy_notice(text)
+        try:
+            if system_ok:
+                self.notify(notice, timeout=2, markup=False)
+            else:
+                # pbcopy/xclip missing (SSH, headless Linux): only the
+                # terminal's OSC 52 is left, and not every terminal honours it.
+                self.notify(
+                    f"{notice} (terminal OSC 52 only — no pbcopy/xclip)",
+                    severity="warning", timeout=4, markup=False,
+                )
+        except Exception:
+            pass  # app tearing down; the copy itself already happened
+
     CSS = """
     Screen { background: $panel; }
     Desktop { margin-top: 1; }
@@ -560,6 +584,13 @@ class DundersApp(App):
             Path(p).expanduser() for p in (initial_paths or [])
         ]
         self.terminal_mode: TerminalMode = terminal_mode
+        # The shell's directory at launch: "Yes, start dir" on quit hands it
+        # back, so a --shell-init wrapper leaves the shell where it was.
+        self.start_dir: Path = Path.cwd()
+        # True when launched through the --shell-init wrapper, i.e. the shell
+        # can follow "Yes, current dir". main._run_app sets it authoritatively;
+        # this default covers launches that construct the app directly.
+        self.shell_wrapper_active: bool = shell_init.ENV_VAR in os.environ
         # Where the panels (and so Project View's tree) start. Set from --pd;
         # None means "derive it", which is what every non-editor launch does.
         self.project_dir: Path | None = (
@@ -785,8 +816,6 @@ class DundersApp(App):
             self._run_delete(ctx)
         elif isinstance(ctx, CancelSearchRequest):
             ctx.content.cancel_event.set()
-        elif isinstance(ctx, QuitRequest):
-            self.exit()
         elif isinstance(ctx, ProviderActionConfirm):
             self._do_provider_action(ctx.action, list(ctx.targets))
 
@@ -1736,6 +1765,7 @@ class DundersApp(App):
                 MenuItem(command_id="record_macro"),
                 MenuSeparator(),
                 MenuItem(command_id="toggle_syntax"),
+                MenuItem(command_id="toggle_wrap"),
                 MenuItem(command_id="set_language"),
                 MenuSeparator(),
                 MenuItem(command_id="save_quit"),
@@ -5244,11 +5274,50 @@ class DundersApp(App):
             return
         if self._has_active_modal():
             return
-        confirm = ConfirmDialog(
-            prompt="Quit dunders?",
-            context=QuitRequest(),
+        note = None
+        if not self.shell_wrapper_active:
+            note = (
+                "\"Yes, current dir\" can't move the shell without the "
+                f"wrapper. Add to your shell rc:\n  {shell_init.rc_hint()}"
+            )
+        show_modal(
+            self.desktop, QuitDialog(note=note), title="Exit",
+            size=(62, 10 if note else 6),
         )
-        show_modal(self.desktop, confirm, title="Exit", size=(40, 6))
+
+    def on_quit_dialog_result(self, event: QuitDialog.Result) -> None:
+        """Quit, returning the directory the shell should end up in.
+
+        ``App.run()`` returns it; ``main`` writes it to ``$DUNDERS_CWD_FILE``
+        for the ``--shell-init`` wrapper to ``cd`` into.
+        """
+        event.stop()
+        self._close_modal(event.dialog)
+        if event.choice is None:
+            return
+        if event.choice == QuitDialog.CURRENT:
+            self.exit(result=str(self._exit_dir()))
+        else:
+            self.exit(result=str(self.start_dir))
+
+    def _exit_dir(self) -> Path:
+        """Local directory of the active panel, for "Yes, current dir".
+
+        Inside an archive that is the archive's own directory; a remote panel
+        (FTP/SFTP/Docker/DB) has no local directory, so the start dir is kept.
+        """
+        panel = self._active_panel()
+        if panel is None:
+            return self.start_dir
+        loc = panel.cwd_loc
+        if loc.scheme == "file":
+            return loc.to_local()
+        root = Path(loc.root)
+        if root.is_file():
+            return root.parent
+        if root.is_dir():
+            return root
+        return self.start_dir
 
     # --- focus & menu routing ---------------------------------------------
 
@@ -5675,7 +5744,6 @@ class DundersApp(App):
         path = content.cwd_loc.display()  # full clean URL (not the truncated root)
         # System clipboard (pbcopy/xclip) + OSC 52 fallback for SSH.
         clipboard.copy(path, app=self)
-        self.notify(f"copied {path}")
 
     def on_window_copy_part_requested(self, event) -> None:
         """[D]/[N]/[P] in an editor title bar: directory, name, or both.
@@ -5698,7 +5766,6 @@ class DundersApp(App):
         if not text:
             return
         clipboard.copy(text, app=self)
-        self.notify(f"copied {text}")
 
     def action_insert_current_file(self) -> None:
         """Ctrl+N: insert the active panel's current entry into the command
@@ -5754,7 +5821,6 @@ class DundersApp(App):
         if not text:
             return
         clipboard.copy(text, app=self)
-        self.notify(f"copied {text}")
 
     def _focused_editor_content(self):
         """Return the focused EditorContent, or None."""

@@ -303,7 +303,7 @@ class ConfirmDialog(FocusChainMixin, Container, WindowContent):
         yield Static(self.prompt, id="cd-prompt")
         with Horizontal(id="cd-buttons"):
             yield ShadowButton(
-                "Yes", id="cd-yes", face_bg="rgb(0,160,90)", hotkey="y"
+                "Yes", id="cd-yes", hotkey="y"
             )
             yield ShadowButton(
                 "No", id="cd-no", face_bg="rgb(160,40,40)", hotkey="n"
@@ -339,6 +339,97 @@ class ConfirmDialog(FocusChainMixin, Container, WindowContent):
 
     def action_cancel(self) -> None:
         self.post_message(ConfirmDialog.Result(self, False))
+
+
+class QuitDialog(FocusChainMixin, Container, WindowContent):
+    """Quit confirmation: leave the shell in the start dir or the panel's dir.
+
+    The shell can only follow the panel when it was launched through the
+    ``dunders --shell-init`` wrapper (see ``dunders.shell_init``); the choice
+    is reported either way and the app decides what to do with it.
+
+    Y = Yes, start dir (the old plain "Yes"), C = Yes, current dir,
+    N/Esc = No. Enter presses the focused button (ShadowButton's own binding).
+    """
+
+    can_focus = False
+
+    START = "start"
+    CURRENT = "current"
+
+    BINDINGS = [
+        Binding("y", "choose('start')", show=False),
+        Binding("c", "choose('current')", show=False),
+        Binding("n", "cancel", show=False),
+        Binding("escape", "cancel", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    QuitDialog { layout: vertical; }
+    QuitDialog #qd-prompt { margin: 1 1 0 1; }
+    QuitDialog #qd-buttons { height: 1; align: center middle; margin-top: 1; }
+    QuitDialog #qd-note { margin: 1 1 0 1; text-style: dim; }
+    """
+
+    class Result(Message):
+        def __init__(self, dialog: "QuitDialog", choice: str | None) -> None:
+            self.dialog = dialog
+            self.choice = choice  # START / CURRENT, or None for "No"
+            super().__init__()
+
+    def __init__(
+        self, prompt: str = "Quit dunders?", note: str | None = None
+    ) -> None:
+        super().__init__()
+        self.prompt = prompt
+        # Shown under the buttons, e.g. "the shell wrapper is not installed".
+        self.note = note
+        self.window_title = "Exit"
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.prompt, id="qd-prompt", markup=False)
+        with Horizontal(id="qd-buttons"):
+            yield ShadowButton(
+                "Yes, start dir", id="qd-start", hotkey="y"
+            )
+            yield ShadowButton(
+                "Yes, current dir", id="qd-current", hotkey="c"
+            )
+            yield ShadowButton("No", id="qd-no", hotkey="n")
+        if self.note:
+            yield Static(self.note, id="qd-note", markup=False)
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_default)
+
+    def _focus_default(self) -> None:
+        try:
+            self.query_one("#qd-start", ShadowButton).focus()
+        except Exception:
+            pass
+
+    def _focusables(self) -> list[Widget]:
+        try:
+            return [
+                self.query_one("#qd-start", ShadowButton),
+                self.query_one("#qd-current", ShadowButton),
+                self.query_one("#qd-no", ShadowButton),
+            ]
+        except Exception:
+            return []
+
+    def on_shadow_button_pressed(self, event: "ShadowButton.Pressed") -> None:
+        event.stop()
+        choice = {"qd-start": self.START, "qd-current": self.CURRENT}.get(
+            event.button.id or ""
+        )
+        self.post_message(QuitDialog.Result(self, choice))
+
+    def action_choose(self, choice: str) -> None:
+        self.post_message(QuitDialog.Result(self, choice))
+
+    def action_cancel(self) -> None:
+        self.post_message(QuitDialog.Result(self, None))
 
 
 class AboutDialog(Container, WindowContent):
@@ -473,7 +564,6 @@ class GDriveConsentDialog(Container, WindowContent):
         from dunders.windowing.core import clipboard
         try:
             clipboard.copy(self._url, app=self.app)
-            self.app.notify("Consent URL copied to clipboard.")
         except Exception:
             self.app.notify("Could not copy to clipboard.", severity="warning")
 
@@ -2528,7 +2618,7 @@ class AddBookmarkDialog(FocusChainMixin, Container, WindowContent):
         if self._ask_password:
             yield self._remember
         with Horizontal(id="ab-buttons"):
-            yield ShadowButton("Save", id="ab-save", face_bg="rgb(0,160,90)", hotkey="s")
+            yield ShadowButton("Save", id="ab-save", hotkey="s")
             yield ShadowButton("Cancel", id="ab-cancel", face_bg="rgb(160,40,40)", hotkey="c")
 
     def on_mount(self) -> None:
@@ -2693,7 +2783,7 @@ class BookmarksDialog(Container, WindowContent):
         if self._remember is not None:
             yield self._remember
         with Horizontal(id="bm-buttons"):
-            yield ShadowButton("Add current", id="bm-add", face_bg="rgb(0,160,90)", hotkey="a")
+            yield ShadowButton("Add current", id="bm-add", hotkey="a")
             yield ShadowButton("Close", id="bm-close", face_bg="rgb(160,40,40)", hotkey="c")
 
     def on_mount(self) -> None:
@@ -2836,7 +2926,7 @@ class DockerRunDialog(FocusChainMixin, Container, WindowContent):
         yield Static("Volumes  (-v, comma-separated):", classes="dr-label")
         yield self._vols_input
         with Horizontal(id="dr-buttons"):
-            yield ShadowButton("Run", id="dr-run", face_bg="rgb(0,160,90)", hotkey="r")
+            yield ShadowButton("Run", id="dr-run", hotkey="r")
             yield ShadowButton(
                 "Cancel", id="dr-cancel", face_bg="rgb(160,40,40)", hotkey="c",
             )

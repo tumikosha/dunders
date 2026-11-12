@@ -46,12 +46,29 @@ def system_paste() -> str:
         return ""
 
 
+def copy_notice(text: str) -> str:
+    """Short human description of what was just copied, for a toast."""
+    lines = text.count("\n") + 1
+    if lines > 1:
+        return f"Copied {lines} lines ({len(text)} chars) to clipboard"
+    if len(text) <= 60:
+        return f"Copied to clipboard: {text}"
+    return f"Copied {len(text)} chars to clipboard"
+
+
 def copy(text: str, app=None) -> None:
     """Copy ``text`` to the system clipboard, with an OSC 52 fallback.
 
     The OSC 52 path (``app.copy_to_clipboard``) is what makes copy work over
     SSH/remote sessions where ``pbcopy``/``xclip`` aren't reachable.
+
+    An app that sets ``copies_to_system_clipboard`` (DundersApp) does the
+    system copy — and the "copied" toast — inside its own
+    ``copy_to_clipboard``, so it is only called once here.
     """
+    if app is not None and getattr(app, "copies_to_system_clipboard", False):
+        app.copy_to_clipboard(text)
+        return
     system_copy(text)
     if app is not None:
         try:

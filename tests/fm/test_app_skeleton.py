@@ -1057,23 +1057,23 @@ async def test_f1_f9_swapped(tmp_path):
 
 @pytest.mark.asyncio
 async def test_f10_shows_exit_confirmation(tmp_path):
-    """F10 must not quit straight away — it opens a Yes/No Exit confirmation."""
-    from dunders.app import QuitRequest
-    from dunders.fm.dialogs import ConfirmDialog
+    """F10 must not quit straight away — it opens the three-button Exit dialog."""
+    from dunders.fm.dialogs import QuitDialog, ShadowButton
 
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
         await pilot.press("f10")
         await pilot.pause(); await pilot.pause()
-        dlg = app.query_one(ConfirmDialog)
-        assert isinstance(dlg.context, QuitRequest)
+        dlg = app.query_one(QuitDialog)
+        labels = [b.label for b in dlg.query(ShadowButton)]
+        assert labels == ["Yes, start dir", "Yes, current dir", "No"]
         assert app.is_running  # not exited
 
 
 @pytest.mark.asyncio
 async def test_exit_confirmation_no_keeps_running(tmp_path):
-    from dunders.fm.dialogs import ConfirmDialog
+    from dunders.fm.dialogs import QuitDialog
 
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     async with app.run_test() as pilot:
@@ -1082,22 +1082,61 @@ async def test_exit_confirmation_no_keeps_running(tmp_path):
         await pilot.pause()
         await pilot.press("n")  # No
         await pilot.pause(); await pilot.pause()
-        assert not app.query(ConfirmDialog)  # dialog dismissed
+        assert not app.query(QuitDialog)  # dialog dismissed
         assert app.is_running
 
 
-@pytest.mark.asyncio
-async def test_exit_confirmation_yes_exits(tmp_path):
+async def _quit_with(tmp_path, monkeypatch, keys, panel_dir=None):
+    monkeypatch.chdir(tmp_path)
     app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
     called = {}
     async with app.run_test() as pilot:
         await pilot.pause(); await pilot.pause()
-        app.exit = lambda *a, **k: called.setdefault("exit", True)
+        if panel_dir is not None:
+            app._active_panel().cwd = panel_dir
+        app.exit = lambda *a, **k: called.setdefault("result", k.get("result"))
         await pilot.press("f10")
         await pilot.pause()
-        await pilot.press("y")  # Yes
+        for key in keys:
+            await pilot.press(key)
         await pilot.pause(); await pilot.pause()
-        assert called.get("exit")
+    return called
+
+
+@pytest.mark.asyncio
+async def test_exit_yes_start_dir_returns_launch_dir(tmp_path, monkeypatch):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    called = await _quit_with(tmp_path, monkeypatch, ["y"], panel_dir=sub)
+    assert called == {"result": str(tmp_path)}
+
+
+@pytest.mark.asyncio
+async def test_exit_enter_presses_default_start_dir(tmp_path, monkeypatch):
+    called = await _quit_with(tmp_path, monkeypatch, ["enter"])
+    assert called == {"result": str(tmp_path)}
+
+
+@pytest.mark.asyncio
+async def test_exit_yes_current_dir_returns_panel_dir(tmp_path, monkeypatch):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    called = await _quit_with(tmp_path, monkeypatch, ["c"], panel_dir=sub)
+    assert called == {"result": str(sub)}
+
+
+@pytest.mark.asyncio
+async def test_exit_current_dir_inside_archive_is_archive_dir(tmp_path, monkeypatch):
+    import zipfile
+    from dunders.core.vfs.locator import VfsPath
+
+    arc = tmp_path / "a.zip"
+    with zipfile.ZipFile(arc, "w") as z:
+        z.writestr("inner/f.txt", "x")
+    called = await _quit_with(
+        tmp_path, monkeypatch, ["c"], panel_dir=VfsPath(scheme="zip", root=str(arc), parts=("inner",)),
+    )
+    assert called == {"result": str(tmp_path)}
 
 
 @pytest.mark.asyncio
@@ -2232,3 +2271,71 @@ async def test_gdrive_bookmark_reopens_folder_directly(monkeypatch, tmp_path):
         app._open_bookmark({"uri": loc.as_uri(), "label": "gd"})
         await pilot.pause()
         assert captured.get("loc") == loc      # exact account + folder restored
+
+
+@pytest.mark.asyncio
+async def test_app_f3_viewer_copies_mouse_selection(tmp_path, monkeypatch):
+    """Text selected with the mouse in the F3 viewer goes to the clipboard on Ctrl+C."""
+    import dunders.windowing.core.buffer as bufmod
+    copied: list[str] = []
+    from dunders.windowing.core import clipboard as cbmod
+    monkeypatch.setattr(bufmod, "_copy_to_system", copied.append)
+    monkeypatch.setattr(cbmod, "system_copy", lambda _t: True)
+    f = tmp_path / "x.txt"
+    f.write_text("alpha beta\ngamma\n")
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        from dunders.fm.viewer import ViewerContent
+        from dunders.windowing import Desktop, Window
+        desktop = app.query_one(Desktop)
+        left = desktop.query_one("#panel-left", Window).content
+        left.cursor = next(i for i, e in enumerate(left.entries) if e.name == "x.txt")
+        await pilot.press("f3")
+        await pilot.pause()
+        viewer = next(w.content for w in desktop.windows if isinstance(w.content, ViewerContent))
+        ed = viewer._editor
+        g = ed._gutter_width()
+        await pilot.mouse_down(ed, offset=(g, 0))
+        await pilot.hover(ed, offset=(g + 5, 0))
+        await pilot.mouse_up(ed, offset=(g + 5, 0))
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copied == ["alpha"]
+        assert app.clipboard == "alpha"
+        assert [n.message for n in app._notifications] == ["Copied to clipboard: alpha"]
+        assert ed.buffer.lines[0] == "alpha beta"  # viewer stays read-only
+        copy_cmd = next(c for c in viewer.get_commands() if c.id == "copy")
+        assert copy_cmd.hotkey_label == "Ctrl+C"
+
+
+@pytest.mark.asyncio
+async def test_exit_dialog_warns_when_shell_wrapper_missing(tmp_path, monkeypatch):
+    from dunders.fm.dialogs import QuitDialog
+
+    monkeypatch.delenv("DUNDERS_CWD_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(); await pilot.pause()
+        await pilot.press("f10")
+        await pilot.pause()
+        dialog = app.query_one(QuitDialog)
+        assert dialog.note and "--shell-init" in dialog.note
+        assert app.query("#qd-note")
+
+
+@pytest.mark.asyncio
+async def test_exit_dialog_has_no_warning_under_wrapper(tmp_path, monkeypatch):
+    from dunders.fm.dialogs import QuitDialog
+
+    monkeypatch.setenv("DUNDERS_CWD_FILE", str(tmp_path / "cwd"))
+    monkeypatch.chdir(tmp_path)
+    app = DundersApp(launch_mode="fm", initial_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause(); await pilot.pause()
+        await pilot.press("f10")
+        await pilot.pause()
+        assert app.query_one(QuitDialog).note is None
+        assert not app.query("#qd-note")

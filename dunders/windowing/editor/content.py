@@ -51,6 +51,9 @@ class EditorContent(WindowContent):
         Binding("ctrl+shift+l", "find_prev", "Find Prev", show=False),
         Binding("ctrl+backslash", "split_h", "Split Horizontal", show=False),
         Binding("ctrl+r", "macro_toggle", "Macro", show=False),
+        # Soft wrap. Here rather than on EditorWidget so one press toggles
+        # both split panes; the WindowCommand carries hotkey_label only.
+        Binding("alt+z", "toggle_wrap", "Word Wrap", show=False),
         Binding("escape", "close_search", "Close", show=False),
     ]
 
@@ -223,7 +226,10 @@ class EditorContent(WindowContent):
     def _mount_second_editor(self, layout_name: str) -> None:
         if self._editor2 is not None or self._split_container is None:
             return
-        ed2 = EditorWidget(buffer=self._buffer, fold_engine=self._new_fold_engine())
+        ed2 = EditorWidget(
+            buffer=self._buffer, fold_engine=self._new_fold_engine(),
+            soft_wrap=self._editor.soft_wrap,
+        )
         ed2.macro_skip_keys.update(self._SEARCH_SKIP_KEYS)
         if self._enable_macros and self._macro_recorder is not None:
             ed2.macro_recorder = self._macro_recorder
@@ -311,8 +317,14 @@ class EditorContent(WindowContent):
             # (binding fires action_copy/paste, then App.on_key → router fires
             # it again), which clears the selection between calls and pastes
             # twice.
-            WindowCommand(id="copy", label="Copy", handler=self._editor.action_copy),
-            WindowCommand(id="paste", label="Paste", handler=self._editor.action_paste),
+            WindowCommand(
+                id="copy", label="Copy", handler=self._editor.action_copy,
+                hotkey_label="Ctrl+C",
+            ),
+            WindowCommand(
+                id="paste", label="Paste", handler=self._editor.action_paste,
+                hotkey_label="Ctrl+V",
+            ),
             WindowCommand(
                 id="split_h", label="Split Horizontal",
                 handler=lambda: self.toggle_split("horizontal"),
@@ -328,6 +340,12 @@ class EditorContent(WindowContent):
             WindowCommand(
                 id="toggle_syntax", label="Syntax Highlight",
                 handler=self._toggle_syntax, hotkey="ctrl+h",
+            ),
+        )
+        commands.append(
+            WindowCommand(
+                id="toggle_wrap", label="Word Wrap",
+                handler=self.action_toggle_wrap, hotkey_label="Alt+Z",
             ),
         )
         commands.append(
@@ -389,6 +407,13 @@ class EditorContent(WindowContent):
         action = getattr(app, "action_save_as", None)
         if callable(action):
             action(self)
+
+    def action_toggle_wrap(self) -> None:
+        """Toggle soft wrap in every pane (split panes share one setting)."""
+        enabled = not self._editor.soft_wrap
+        for ed in (self._editor, self._editor2):
+            if ed is not None:
+                ed.set_soft_wrap(enabled)
 
     def _toggle_syntax(self) -> None:
         self._editor.set_highlight_enabled(not self._editor._highlight_enabled)

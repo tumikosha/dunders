@@ -32,6 +32,27 @@ _SYNTAX_SIZE_THRESHOLD = 1024 * 1024  # 1 MiB — above this, highlighting is of
 _SYNTAX_DEBOUNCE = 0.25               # seconds to wait after edits before retokenizing
 
 
+def wrap_points(line: str, width: int) -> list[int]:
+    """Start columns of the display segments of ``line`` soft-wrapped at ``width``.
+
+    Breaks after the last space that fits, so the space stays at the end of
+    the upper segment and words are not split; a run with no space inside
+    ``width`` (a long word, minified JSON) is cut hard at ``width``. Always
+    starts with 0, so every line has at least one segment.
+    """
+    starts = [0]
+    if width <= 0:
+        return starts
+    n = len(line)
+    start = 0
+    while n - start > width:
+        end = start + width
+        brk = line.rfind(" ", start, end)
+        start = brk + 1 if brk >= start else end
+        starts.append(start)
+    return starts
+
+
 class EditorWidget(ScrollView):
     """A palette-themed text editor widget for the windowing layer."""
 
@@ -146,10 +167,26 @@ class EditorWidget(ScrollView):
         fold_engine: FoldEngine | None = None,
         show_line_numbers: bool = True,
         palette: Palette | None = None,
+        soft_wrap: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.buffer = buffer or TextBuffer()
+        # Soft wrap is display-only: the buffer never gets extra newlines.
+        # When it is active, ``_rendered_lines``/``_line_map`` hold one entry
+        # per *display* row (a long line repeats once per segment) and
+        # ``_seg_start``/``_seg_end`` give each row's [start, end) slice in
+        # rendered-column coordinates, so every span layer (syntax, folds,
+        # search, selection) keeps working in whole-line coordinates.
+        self.soft_wrap = soft_wrap
+        self._seg_start: list[int] | None = None
+        self._seg_end: list[int] | None = None
+        self._wrap_cache: dict[str, list[int]] = {}
+        self._wrap_cache_width = -1
+        # Sticky column for vertical moves in wrap mode: kept while the cursor
+        # is still where the last vertical move put it.
+        self._goal_x: int | None = None
+        self._goal_pos: tuple[int, int] | None = None
         self.fold_engine = fold_engine
         self._palette = palette
         self._fold_regions: list[FoldRegion] = []
@@ -324,6 +361,10 @@ class EditorWidget(ScrollView):
     def _gutter_width(self) -> int:
         if not self.show_line_numbers:
             return 0
+        if self.soft_wrap:
+            # Display rows outnumber buffer lines; the gutter shows buffer
+            # numbers, and must not depend on the wrap it is an input to.
+            return len(str(self.buffer.line_count)) + 2
         line_count = len(self._rendered_lines) if self._rendered_lines else self.buffer.line_count
         return len(str(line_count)) + 2
 
@@ -367,7 +408,15 @@ class EditorWidget(ScrollView):
         else:
             self._rendered_lines = list(self.buffer.lines)
             self._line_map = list(range(len(self._rendered_lines)))
+        self._apply_wrap()
         try:
+            if self._seg_start is not None:
+                # Nothing extends past the window: no horizontal scrolling.
+                self.virtual_size = Size(
+                    self._content_width(), len(self._rendered_lines)
+                )
+                self.refresh()
+                return
             # +1 leaves room for the past-EOL cursor marker; the gutter is
             # rendered fixed (never scrolled) so it counts toward the width too.
             longest = max((len(line) for line in self._rendered_lines), default=0)
@@ -378,6 +427,142 @@ class EditorWidget(ScrollView):
             self.refresh()
         except Exception:
             log.debug("Could not update virtual_size during render refresh", exc_info=True)
+
+    def _wrap_width(self) -> int:
+        # One column stays free so the past-EOL cursor fits on a full segment.
+        return self._content_width() - self._gutter_width() - 1
+
+    def _apply_wrap(self) -> None:
+        """Split ``_rendered_lines`` into display segments when wrap is on.
+
+        Runs on every render refresh (every cursor move), so segment starts
+        are cached per line text: an unchanged line is a dict hit, and str
+        hashes are cached by Python, so a huge line is not rescanned.
+        """
+        width = self._wrap_width() if self.soft_wrap else 0
+        if width < 2:  # wrap off, or not laid out yet (no size)
+            self._seg_start = self._seg_end = None
+            return
+        old = self._wrap_cache if width == self._wrap_cache_width else {}
+        cache: dict[str, list[int]] = {}
+        lines: list[str] = []
+        line_map: list[int] = []
+        starts: list[int] = []
+        ends: list[int] = []
+        for line, buf_row in zip(self._rendered_lines, self._line_map):
+            pts = cache.get(line)
+            if pts is None:
+                pts = old.get(line)
+                if pts is None:
+                    pts = wrap_points(line, width)
+                cache[line] = pts
+            last = len(pts) - 1
+            for i, s in enumerate(pts):
+                lines.append(line)
+                line_map.append(buf_row)
+                starts.append(s)
+                ends.append(pts[i + 1] if i < last else len(line))
+        self._wrap_cache = cache
+        self._wrap_cache_width = width
+        self._rendered_lines = lines
+        self._line_map = line_map
+        self._seg_start = starts
+        self._seg_end = ends
+
+    def set_soft_wrap(self, enabled: bool) -> None:
+        """Turn soft wrap on/off, keeping the cursor in view."""
+        if enabled == self.soft_wrap:
+            return
+        self.soft_wrap = enabled
+        self._goal_x = self._goal_pos = None
+        try:
+            if enabled:
+                self.scroll_to(x=0, animate=False)
+        except Exception:
+            log.debug("scroll reset on wrap toggle failed", exc_info=True)
+        self._post_cursor_update(keep_selection=True)
+
+    def action_toggle_wrap(self) -> None:
+        self.set_soft_wrap(not self.soft_wrap)
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.soft_wrap:
+            self._refresh_render()
+
+    def _display_pos(self, buf_row: int, buf_col: int) -> tuple[int, int]:
+        """(display row, column within that row) of a buffer position."""
+        rcol = self._buffer_col_to_rendered_col(buf_row, buf_col)
+        drow = self._buffer_row_to_rendered_row(buf_row)
+        if self._seg_start is None:
+            return drow, rcol
+        starts = self._seg_start
+        last = len(starts) - 1
+        while (
+            drow < last
+            and self._line_map[drow + 1] == buf_row
+            and starts[drow + 1] <= rcol
+        ):
+            drow += 1
+        if 0 <= drow <= last:
+            return drow, rcol - starts[drow]
+        return drow, rcol
+
+    def _segment_limit(self, drow: int) -> int:
+        """Rightmost rendered column the cursor may take on display row ``drow``.
+
+        A segment that continues on the next row ends one column early: its
+        end column *is* the next row's start, and would display there.
+        """
+        assert self._seg_end is not None
+        end = self._seg_end[drow]
+        return end if end >= len(self._rendered_lines[drow]) else end - 1
+
+    def _place_on_display_row(self, drow: int, x: int) -> None:
+        assert self._seg_start is not None
+        buf_row = self._line_map[drow]
+        start = self._seg_start[drow]
+        rcol = min(start + max(0, x), self._segment_limit(drow))
+        self.buffer.cursor_row = buf_row
+        self.buffer.cursor_col = self._rendered_col_to_buffer_col(buf_row, rcol)
+
+    def _move_visual(self, delta: int) -> bool:
+        """Move the cursor ``delta`` display rows. False when wrap is off."""
+        if self._seg_start is None:
+            return False
+        pos = (self.buffer.cursor_row, self.buffer.cursor_col)
+        drow, x = self._display_pos(*pos)
+        if self._goal_pos == pos and self._goal_x is not None:
+            x = self._goal_x
+        target = max(0, min(drow + delta, len(self._seg_start) - 1))
+        if target != drow:
+            self._place_on_display_row(target, x)
+        self._goal_x = x
+        self._goal_pos = (self.buffer.cursor_row, self.buffer.cursor_col)
+        return True
+
+    def _wrap_home_end(self, end: bool) -> bool:
+        """Home/End by display segment; pressed again, by the whole line.
+
+        False when wrap is off (the caller does the plain line move).
+        """
+        if self._seg_start is None:
+            return False
+        row, col = self.buffer.cursor_row, self.buffer.cursor_col
+        drow, _ = self._display_pos(row, col)
+        rcol = self._buffer_col_to_rendered_col(row, col)
+        if end:
+            target = self._segment_limit(drow)
+            if rcol == target:
+                self.buffer.cursor_col = len(self.buffer.current_line)
+            else:
+                self.buffer.cursor_col = self._rendered_col_to_buffer_col(row, target)
+        else:
+            start = self._seg_start[drow]
+            if rcol == start:
+                self.buffer.cursor_col = 0
+            else:
+                self.buffer.cursor_col = self._rendered_col_to_buffer_col(row, start)
+        return True
 
     def render_line(self, y: int) -> Strip:
         rendered_idx = y + self.scroll_offset.y
@@ -394,10 +579,19 @@ class EditorWidget(ScrollView):
         # and rendered. Building styles and a Rich Text for the whole line cost
         # O(line length) per row per repaint — seconds per keystroke on
         # minified files with 100k+ character lines.
-        scroll_x = self.scroll_offset.x
         body_width = max(0, self._content_width() - gutter)
-        lo = min(scroll_x, n)
-        hi = min(n, scroll_x + body_width)
+        if self._seg_start is not None and self._seg_end is not None:
+            # Soft wrap: this display row is the line's [lo, hi) segment.
+            lo = self._seg_start[rendered_idx]
+            hi = self._seg_end[rendered_idx]
+            first_segment = lo == 0
+            marker_visible = hi >= n  # past-EOL cell lives on the last segment
+        else:
+            scroll_x = self.scroll_offset.x
+            lo = min(scroll_x, n)
+            hi = min(n, scroll_x + body_width)
+            first_segment = True
+            marker_visible = scroll_x <= n < scroll_x + body_width
 
         # Per-column style array for line[lo:hi].
         col_styles: list[RichStyle] = [base] * (hi - lo)
@@ -472,7 +666,8 @@ class EditorWidget(ScrollView):
         # horizontally with ``scroll_offset.x``.
         gutter_text = Text(style=base)
         if self.show_line_numbers:
-            line_num = str(buf_row + 1).rjust(gutter - 1)
+            label = str(buf_row + 1) if first_segment else "↪"
+            line_num = label.rjust(gutter - 1)
             gutter_text.append(f"{line_num} ", style=self._rich_style("editor.line_numbers"))
 
         body_text = Text(style=base)
@@ -486,7 +681,7 @@ class EditorWidget(ScrollView):
             body_text.append(line[lo + i:lo + j], style=st)
             i = j
 
-        if marker_style is not None and scroll_x <= n < scroll_x + body_width:
+        if marker_style is not None and marker_visible:
             body_text.append(" ", style=marker_style)
 
         try:
@@ -663,8 +858,7 @@ class EditorWidget(ScrollView):
         except NoActiveAppError:
             pass
         self._refresh_render()
-        cursor_y = self._buffer_row_to_rendered_row(self.buffer.cursor_row)
-        cursor_x = self._buffer_col_to_rendered_col(
+        cursor_y, cursor_x = self._display_pos(
             self.buffer.cursor_row, self.buffer.cursor_col
         )
         try:
@@ -679,7 +873,11 @@ class EditorWidget(ScrollView):
             scroll_x = self.scroll_offset.x
             body_width = max(1, self._content_width() - self._gutter_width())
             target_x = None
-            if cursor_x < scroll_x:
+            if self._seg_start is not None:
+                # Wrapped rows never extend past the window.
+                if scroll_x:
+                    target_x = 0
+            elif cursor_x < scroll_x:
                 target_x = cursor_x
             elif cursor_x >= scroll_x + body_width:
                 target_x = cursor_x - body_width + 1
@@ -710,12 +908,14 @@ class EditorWidget(ScrollView):
 
     def action_select_up(self) -> None:
         self._start_or_extend_selection()
-        self.buffer.move_cursor_up()
+        if not self._move_visual(-1):
+            self.buffer.move_cursor_up()
         self._update_selection_to_cursor()
 
     def action_select_down(self) -> None:
         self._start_or_extend_selection()
-        self.buffer.move_cursor_down()
+        if not self._move_visual(1):
+            self.buffer.move_cursor_down()
         self._update_selection_to_cursor()
 
     def action_select_left(self) -> None:
@@ -730,12 +930,14 @@ class EditorWidget(ScrollView):
 
     def action_select_line_start(self) -> None:
         self._start_or_extend_selection()
-        self.buffer.cursor_col = 0
+        if not self._wrap_home_end(end=False):
+            self.buffer.cursor_col = 0
         self._update_selection_to_cursor()
 
     def action_select_line_end(self) -> None:
         self._start_or_extend_selection()
-        self.buffer.cursor_col = len(self.buffer.current_line)
+        if not self._wrap_home_end(end=True):
+            self.buffer.cursor_col = len(self.buffer.current_line)
         self._update_selection_to_cursor()
 
     def action_select_document_start(self) -> None:
@@ -775,6 +977,9 @@ class EditorWidget(ScrollView):
 
     def action_page_up(self) -> None:
         page = max(1, self.size.height - 2)
+        if self._move_visual(-page):
+            self._post_cursor_update()
+            return
         for _ in range(page):
             self.buffer.move_cursor_up()
         self._snap_cursor_to_visible_row(direction=-1)
@@ -782,17 +987,26 @@ class EditorWidget(ScrollView):
 
     def action_page_down(self) -> None:
         page = max(1, self.size.height - 2)
+        if self._move_visual(page):
+            self._post_cursor_update()
+            return
         for _ in range(page):
             self.buffer.move_cursor_down()
         self._snap_cursor_to_visible_row(direction=1)
         self._post_cursor_update()
 
     def action_cursor_up(self) -> None:
+        if self._move_visual(-1):
+            self._post_cursor_update()
+            return
         self.buffer.move_cursor_up()
         self._snap_cursor_to_visible_row(direction=-1)
         self._post_cursor_update()
 
     def action_cursor_down(self) -> None:
+        if self._move_visual(1):
+            self._post_cursor_update()
+            return
         self.buffer.move_cursor_down()
         self._snap_cursor_to_visible_row(direction=1)
         self._post_cursor_update()
@@ -898,11 +1112,13 @@ class EditorWidget(ScrollView):
         self._post_cursor_update()
 
     def action_line_start(self) -> None:
-        self.buffer.cursor_col = 0
+        if not self._wrap_home_end(end=False):
+            self.buffer.cursor_col = 0
         self._post_cursor_update()
 
     def action_line_end(self) -> None:
-        self.buffer.cursor_col = len(self.buffer.current_line)
+        if not self._wrap_home_end(end=True):
+            self.buffer.cursor_col = len(self.buffer.current_line)
         self._post_cursor_update()
 
     def action_insert_tab(self) -> None:
@@ -1099,6 +1315,10 @@ class EditorWidget(ScrollView):
         rendered_row = y + self.scroll_offset.y
         rendered_row = max(0, min(rendered_row, len(self._rendered_lines) - 1))
         buf_row = self._rendered_row_to_buffer_row(rendered_row)
+        if self._seg_start is not None and 0 <= rendered_row < len(self._seg_start):
+            start = self._seg_start[rendered_row]
+            rendered_col = min(start + max(0, x - gutter), self._segment_limit(rendered_row))
+            return buf_row, self._rendered_col_to_buffer_col(buf_row, rendered_col)
         rendered_col = max(0, x - gutter + self.scroll_offset.x)
         if rendered_row < len(self._rendered_lines):
             rendered_col = min(rendered_col, len(self._rendered_lines[rendered_row]))

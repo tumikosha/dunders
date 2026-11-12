@@ -43,14 +43,16 @@ async def test_copy_box_click_copies_cwd_and_notifies(tmp_path, monkeypatch):
         await pilot.pause()
         copied = []
         notes = []
-        monkeypatch.setattr(clipboard, "copy", lambda text, app=None: copied.append(text))
+        # The toast comes from DundersApp.copy_to_clipboard, so only the OS
+        # clipboard write is stubbed — the real copy path must run.
+        monkeypatch.setattr(clipboard, "system_copy", lambda text: copied.append(text) or True)
         monkeypatch.setattr(app, "notify", lambda msg, **k: notes.append(msg))
         win = _panel_window(app, "panel-left")
         event = type("E", (), {"window": win})()
         app.on_window_copy_box_clicked(event)
         await pilot.pause()
         assert copied == [str(win.content.cwd)]
-        assert any("copied" in n for n in notes)
+        assert notes == [clipboard.copy_notice(str(win.content.cwd))]
 
 
 # ---------------------------------------------------------------------------
